@@ -380,44 +380,6 @@ const defaultElements = () => [
 const WA = { idle: "idle", testing: "testing", yes: "yes", no: "no" };
 
 /* ── Card Canvas ─────────────────────────────────────────────────────────── */
-/* ── Logo overlay at QR centre ──────────────────────────────────────────────
-   ~18% of QR area — within QR error-correction limit. Data still scannable.
-─────────────────────────────────────────────────────────────────────────── */
-function drawQrLogo(ctx, el) {
-  const pad = Math.round(el.size * 0.18);
-  const lx  = el.x + el.size / 2 - pad / 2;
-  const ly  = el.y + el.size / 2 - pad / 2;
-  const r   = pad * 0.22;
-  // White rounded square
-  ctx.save();
-  ctx.shadowColor = "rgba(0,0,0,0.18)"; ctx.shadowBlur = 4;
-  ctx.fillStyle = "#ffffff";
-  ctx.beginPath();
-  ctx.moveTo(lx + r, ly);
-  ctx.lineTo(lx + pad - r, ly);
-  ctx.quadraticCurveTo(lx + pad, ly, lx + pad, ly + r);
-  ctx.lineTo(lx + pad, ly + pad - r);
-  ctx.quadraticCurveTo(lx + pad, ly + pad, lx + pad - r, ly + pad);
-  ctx.lineTo(lx + r, ly + pad);
-  ctx.quadraticCurveTo(lx, ly + pad, lx, ly + pad - r);
-  ctx.lineTo(lx, ly + r);
-  ctx.quadraticCurveTo(lx, ly, lx + r, ly);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-  // Navy "N" brand mark
-  const fs = Math.round(pad * 0.62);
-  ctx.save();
-  ctx.font = `800 ${fs}px 'Plus Jakarta Sans', sans-serif`;
-  ctx.fillStyle = "#0d1f3c";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("N", lx + pad / 2, ly + pad / 2 + 1);
-  ctx.textAlign = "left";
-  ctx.textBaseline = "alphabetic";
-  ctx.restore();
-}
-
 function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onMove }) {
   const ref  = useRef(null);
   const drag = useRef(null);
@@ -456,7 +418,6 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
           img.onload = () => {
             ctx.save(); ctx.shadowColor = "rgba(0,0,0,0.2)"; ctx.shadowBlur = 6;
             ctx.drawImage(img, el.x, el.y, el.size, el.size); ctx.restore();
-            drawQrLogo(ctx, el);
             if (selected === el.id) {
               ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 1.5;
               ctx.setLineDash([4, 3]);
@@ -552,7 +513,6 @@ function exportCard(bgImage, bgSize, elements, record) {
         img.onload = () => {
           ctx.save(); ctx.shadowColor = "rgba(0,0,0,0.2)"; ctx.shadowBlur = 6;
           ctx.drawImage(img, el.x, el.y, el.size, el.size); ctx.restore();
-          drawQrLogo(ctx, el);
           if (++done === qrEls.length) resolve(cv.toDataURL("image/png"));
         };
         img.onerror = () => { if (++done === qrEls.length) resolve(cv.toDataURL("image/png")); };
@@ -770,7 +730,6 @@ export default function App() {
     for (let i = 0; i < records.length; i++) {
       const rec = records[i];
       const dataUrl = await exportCard(bgImage, bgSize, elements, rec);
-      // Strip the "data:image/png;base64," prefix
       const base64 = dataUrl.split(",")[1];
       const filename = `${(rec.name || `Record_${i}`).toString().replace(/\s/g, "_")}_Nikadi.png`;
       zip.file(filename, base64, { base64: true });
