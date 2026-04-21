@@ -715,6 +715,11 @@ export default function App() {
   const [loadingTemplate,   setLoadingTemplate]   = useState(false);
   const [dbStatus,          setDbStatus]          = useState(supabase ? "unknown" : "unconfigured");
 
+  /* ── Saved templates ── */
+  const [savedTemplates,    setSavedTemplates]    = useState([]);
+  const [showSaveTemplate,  setShowSaveTemplate]  = useState(false);
+  const [templateSaveName,  setTemplateSaveName]  = useState("");
+
   /* ── Event modal ── */
   const [modalEvent,   setModalEvent]   = useState(null); // null=closed, obj=open
   const [deleteTarget, setDeleteTarget] = useState(null); // event to confirm-delete
@@ -793,6 +798,7 @@ export default function App() {
   };
   useEffect(() => {
     if (!supabase) return;
+    loadSavedTemplates();
     loadSavedEvents().then((events) => {
       const lastId = localStorage.getItem("nikadi_last_event");
       if (lastId) {
@@ -831,6 +837,84 @@ export default function App() {
       const { data: { publicUrl } } = supabase.storage.from("templates").getPublicUrl(path);
       return publicUrl;
     } catch (e) { console.warn(e.message); return null; }
+  };
+
+  /* ── Saved templates: load / save / apply ── */
+  const loadSavedTemplates = async () => {
+    if (!supabase) return;
+    const { data, error } = await supabase.from("saved_templates").select("*").order("created_at", { ascending:false }).limit(50);
+    if (!error && data) setSavedTemplates(data);
+  };
+
+  const saveCurrentTemplate = async () => {
+    if (!supabase)   { showToast("Supabase not configured","warn"); return; }
+    if (!bgImage)    { showToast("No template loaded to save","warn"); return; }
+    const name = templateSaveName.trim();
+    if (!name)       { showToast("Enter a template name","warn"); return; }
+
+    let url = coverUrl;
+    if (!url) {
+      url = await uploadTemplateToStorage(bgImage);
+      if (url) setCoverUrl(url);
+    }
+
+    const { error } = await supabase.from("saved_templates").insert([{
+      name,
+      cover_image_url: url || null,
+      elements_layout: elements,
+    }]);
+    if (error) { showToast("Save failed: " + error.message, "warn"); return; }
+
+    showToast(`Template "${name}" saved`, "success");
+    setTemplateSaveName("");
+    setShowSaveTemplate(false);
+    loadSavedTemplates();
+  };
+
+  const applySavedTemplate = async (tpl) => {
+    if (!tpl.cover_image_url) {
+      if (tpl.elements_layout?.length) {
+        setElements(tpl.elements_layout);
+        setLayoutRestored(true);
+        showToast(`Layout "${tpl.name}" applied`, "success");
+      }
+      return;
+    }
+    setLoadingTemplate(true);
+    try {
+      const res  = await fetch(tpl.cover_image_url);
+      const blob = await res.blob();
+      await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const dataUrl = e.target.result;
+          const fp      = templateFingerprint(dataUrl, tpl.cover_image_url);
+          const img     = new Image();
+          img.onload = () => {
+            setBgImage(dataUrl);
+            setBgSize({ w:img.naturalWidth, h:img.naturalHeight });
+            if (Array.isArray(tpl.elements_layout) && tpl.elements_layout.length) {
+              pendingDbLayout.current = tpl.elements_layout;
+            }
+            setTemplateKey(fp);
+            setCoverUrl(tpl.cover_image_url);
+            resolve();
+          };
+          img.src = dataUrl;
+        };
+        reader.readAsDataURL(blob);
+      });
+      showToast(`Template "${tpl.name}" applied`, "success");
+    } catch { showToast("Could not load template", "warn"); }
+    finally { setLoadingTemplate(false); }
+  };
+
+  const deleteSavedTemplate = async (tpl) => {
+    if (!supabase) return;
+    const { error } = await supabase.from("saved_templates").delete().eq("id", tpl.id);
+    if (error) { showToast("Delete failed: " + error.message, "warn"); return; }
+    showToast(`Template "${tpl.name}" deleted`, "success");
+    loadSavedTemplates();
   };
 
   /* ── Background upload ── */
@@ -1022,6 +1106,12 @@ export default function App() {
     });
     setSavedEventId(ev.id);
     setCoverUrl(ev.cover_image_url||null);
+
+    /* Clear canvas template when event has none */
+    if (!ev.cover_image_url) {
+      setBgImage(null); setBgSize(null); setTemplateKey(null);
+      setElements(defaultElements()); setLayoutRestored(false);
+    }
 
     /* Fetch template from Supabase Storage — only if URL changed */
     if (ev.cover_image_url && ev.cover_image_url !== coverUrl) {
@@ -1435,6 +1525,52 @@ export default function App() {
                   <div style={{display:"flex",gap:6}}>
                     <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetTemplate}>✕ Remove</button>
                     {templateKey && <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetLayout} title="Reset element positions to defaults">↺ Reset Layout</button>}
+                  </div>
+                )}
+                {bgImage && supabase && (
+                  showSaveTemplate ? (
+                    <div style={{display:"flex",gap:6,marginTop:6}}>
+                      <input
+                        className="nk-input"
+                        style={{fontSize:11,flex:1,padding:"4px 8px"}}
+                        placeholder="Template name…"
+                        value={templateSaveName}
+                        onChange={e=>setTemplateSaveName(e.target.value)}
+                        onKeyDown={e=>{ if(e.key==="Enter") saveCurrentTemplate(); if(e.key==="Escape") setShowSaveTemplate(false); }}
+                        autoFocus
+                      />
+                      <button className="nk-btn nk-btn-primary" style={{fontSize:11,padding:"4px 10px"}} onClick={saveCurrentTemplate}>Save</button>
+                      <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setShowSaveTemplate(false)}>✕</button>
+                    </div>
+                  ) : (
+                    <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:6}} onClick={()=>{ setShowSaveTemplate(true); setTemplateSaveName(""); }}>
+                      💾 Save as Template
+                    </button>
+                  )
+                )}
+
+                {/* Saved templates list */}
+                {savedTemplates.length > 0 && (
+                  <div style={{marginTop:10}}>
+                    <div style={{fontSize:10,color:N.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Saved Templates</div>
+                    {savedTemplates.map(tpl => (
+                      <div key={tpl.id} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+                        <button
+                          className="nk-btn nk-btn-ghost nk-btn-full"
+                          style={{fontSize:11,textAlign:"left",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}
+                          title={`Apply "${tpl.name}"`}
+                          onClick={()=>applySavedTemplate(tpl)}
+                        >
+                          🖼️ {tpl.name}
+                        </button>
+                        <button
+                          className="nk-btn nk-btn-ghost"
+                          style={{fontSize:10,padding:"3px 7px",color:N.red||"#f87171",flexShrink:0}}
+                          title="Delete template"
+                          onClick={()=>deleteSavedTemplate(tpl)}
+                        >✕</button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

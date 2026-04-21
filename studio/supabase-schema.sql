@@ -1,6 +1,7 @@
 -- =====================================================================
 -- NIKADI STUDIO — Supabase Schema
 -- Run this in your Supabase project: SQL Editor > New Query
+-- Safe to re-run: all statements use IF NOT EXISTS / IF EXISTS guards
 -- =====================================================================
 
 -- Events table (one row per event/batch)
@@ -20,7 +21,6 @@ CREATE TABLE IF NOT EXISTS events (
   created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Add elements_layout to an existing events table (run if table already exists)
 ALTER TABLE events ADD COLUMN IF NOT EXISTS elements_layout JSONB;
 
 -- Cards table (one row per attendee/contact in an event)
@@ -36,22 +36,39 @@ CREATE TABLE IF NOT EXISTS event_cards (
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Indexes for fast lookups
-CREATE INDEX IF NOT EXISTS idx_event_cards_event_id ON event_cards(event_id);
-CREATE INDEX IF NOT EXISTS idx_events_created_at    ON events(created_at DESC);
+-- Saved templates table (reusable card designs)
+CREATE TABLE IF NOT EXISTS saved_templates (
+  id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name            TEXT NOT NULL,
+  cover_image_url TEXT,
+  elements_layout JSONB,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
 
 -- =====================================================================
--- ROW LEVEL SECURITY (disable for simple single-user setup)
+-- INDEXES
 -- =====================================================================
-ALTER TABLE events      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE event_cards ENABLE ROW LEVEL SECURITY;
-
--- Allow all access (single-user / internal tool — tighten if needed)
-CREATE POLICY "allow_all_events"       ON events      FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_event_cards"  ON event_cards FOR ALL USING (true) WITH CHECK (true);
+CREATE INDEX IF NOT EXISTS idx_event_cards_event_id    ON event_cards(event_id);
+CREATE INDEX IF NOT EXISTS idx_events_created_at       ON events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_saved_templates_created ON saved_templates(created_at DESC);
 
 -- =====================================================================
--- STORAGE BUCKET (run in Supabase Dashboard > Storage OR via SQL)
+-- ROW LEVEL SECURITY
+-- =====================================================================
+ALTER TABLE events           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_cards      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE saved_templates  ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "allow_all_events"            ON events;
+DROP POLICY IF EXISTS "allow_all_event_cards"       ON event_cards;
+DROP POLICY IF EXISTS "allow_all_saved_templates"   ON saved_templates;
+
+CREATE POLICY "allow_all_events"          ON events           FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "allow_all_event_cards"     ON event_cards      FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "allow_all_saved_templates" ON saved_templates  FOR ALL USING (true) WITH CHECK (true);
+
+-- =====================================================================
+-- STORAGE BUCKET
 -- =====================================================================
 -- In Supabase Dashboard:
 --   1. Go to Storage > New Bucket
@@ -59,10 +76,13 @@ CREATE POLICY "allow_all_event_cards"  ON event_cards FOR ALL USING (true) WITH 
 --   3. Public bucket: YES (toggle on)
 --   4. Save
 
--- Or via SQL (Supabase Storage extension):
+-- Or via SQL:
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('templates', 'templates', true)
 ON CONFLICT (id) DO NOTHING;
+
+DROP POLICY IF EXISTS "public_read_templates"   ON storage.objects;
+DROP POLICY IF EXISTS "public_insert_templates" ON storage.objects;
 
 CREATE POLICY "public_read_templates"
   ON storage.objects FOR SELECT USING (bucket_id = 'templates');
