@@ -1,14 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
 import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
-import { createClient } from "@supabase/supabase-js";
-
-/* ══════════════════════════════════════════════════════════════════════════
-   SUPABASE
-══════════════════════════════════════════════════════════════════════════ */
-const SB_URL = import.meta.env.VITE_SUPABASE_URL  || "";
-const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
-const supabase = (SB_URL && SB_KEY) ? createClient(SB_URL, SB_KEY) : null;
+import { supabase } from "./lib/supabase";
+import LoginPage from "./LoginPage";
 
 /* ══════════════════════════════════════════════════════════════════════════
    BRAND
@@ -739,6 +733,17 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const showToast = (msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4500); };
 
+  /* ── Auth ── */
+  const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
+  useEffect(() => {
+    if (!supabase) { setUser(null); return; }
+    supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
   const activeRecord = records[activeIdx] || {};
   const selectedEl   = elements.find(e => e.id === selected);
   const cw = bgSize?.w || DEFAULT_W;
@@ -1383,6 +1388,15 @@ export default function App() {
   /* ══════════════════════════════════════════════════════
      RENDER
   ══════════════════════════════════════════════════════ */
+  if (user === undefined) return (
+    <div style={{minHeight:"100vh",background:"#050d1f",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{width:40,height:40,border:"3px solid #1e3a5f",borderTopColor:"#3b82f6",borderRadius:"50%",animation:"spin 0.8s linear infinite"}} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+
+  if (!user) return <LoginPage />;
+
   return (
     <>
       <style>{CSS}</style>
@@ -1445,6 +1459,21 @@ export default function App() {
               ⬇ Download All ({records.length})
             </button>
             <button className="nk-btn nk-btn-ghost" onClick={testAllWa}>🔍 Test All WA</button>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
+              {user.user_metadata?.avatar_url && (
+                <img src={user.user_metadata.avatar_url} alt="" style={{width:28,height:28,borderRadius:"50%",objectFit:"cover"}} />
+              )}
+              <span style={{fontSize:12,color:N.textMid,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {user.user_metadata?.full_name || user.email}
+              </span>
+              <button
+                className="nk-btn nk-btn-ghost"
+                style={{fontSize:12,padding:"4px 10px"}}
+                onClick={() => supabase?.auth.signOut()}
+              >
+                Sign out
+              </button>
+            </div>
           </div>
         </header>
 

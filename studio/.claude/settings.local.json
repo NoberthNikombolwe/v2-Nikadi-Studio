@@ -8,7 +8,8 @@
       "Bash(npm list *)",
       "Bash(choco --version)",
       "Bash(scoop --version)",
-      "Bash(winget --version)"
+      "Bash(winget --version)",
+      "Bash(npm run *)"
     ]
   }
 }
