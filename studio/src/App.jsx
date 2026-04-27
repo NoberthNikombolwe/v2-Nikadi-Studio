@@ -726,10 +726,11 @@ export default function App() {
 
   /* ── SMS ── */
   const [smsMessage,      setSmsMessage]      = useState("Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!");
-  const [smsSettings,     setSmsSettings]     = useState({ atUsername:"", atApiKey:"", senderId:"" });
-  const [showSmsSettings, setShowSmsSettings] = useState(false);
+  const smsSettings = { bearerToken:"dc677ab4eddbafd7dfb35b115c91a9bc", senderId:"NIKADI" };
   const [smsSending,      setSmsSending]      = useState(false);
   const [smsLog,          setSmsLog]          = useState([]);
+  const [smsBalance,      setSmsBalance]      = useState(null);
+  const [smsBalanceLoading, setSmsBalanceLoading] = useState(false);
 
   /* ── VCard ── */
   const [vcardContacts, setVcardContacts] = useState([]);
@@ -1250,47 +1251,106 @@ export default function App() {
   };
 
   /* ── SMS ── */
-  const sendSmsToOne = async (idx) => {
-    const rec = records[idx];
-    if (!rec.phone) { showToast("No phone for " + rec.name,"warn"); return; }
-    if (!smsSettings.atApiKey || !smsSettings.atUsername) {
-      window.open(`sms:+${normalisePhone(rec.phone)}?body=${encodeURIComponent(buildSmsMsg(rec))}`, "_blank");
-      showToast(`SMS app opened for ${rec.name}`,"info");
-      return;
-    }
-    setSmsLog(l=>[...l,{name:rec.name,status:"sending"}]);
+  const SMS_BASE = import.meta.env.DEV
+    ? "/sms-proxy"
+    : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-sms`;
+  const SMS_API = `${SMS_BASE}/api/sms/v2`;
+
+  const fetchSmsBalance = async () => {
+    setSmsBalanceLoading(true);
     try {
-      const body = new URLSearchParams({
-        username: smsSettings.atUsername,
-        to:       `+${normalisePhone(rec.phone)}`,
-        message:  buildSmsMsg(rec),
-        ...(smsSettings.senderId ? {from:smsSettings.senderId} : {}),
-      });
-      const res = await fetch("https://api.africastalking.com/version1/messaging", {
-        method:"POST",
-        headers:{apiKey:smsSettings.atApiKey, Accept:"application/json", "Content-Type":"application/x-www-form-urlencoded"},
-        body,
+      const res = await fetch(`${SMS_BASE}/api/v2/balance`, {
+        headers: {
+          Authorization: `Bearer ${smsSettings.bearerToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setRecords(rs=>rs.map((r,i)=>i===idx?{...r,smsStatus:SMS.sent}:r));
-      setSmsLog(l=>l.map(x=>x.name===rec.name?{...x,status:"sent"}:x));
-      showToast(`SMS sent to ${rec.name}`,"success");
-    } catch {
-      setSmsLog(l=>l.map(x=>x.name===rec.name?{...x,status:"failed"}:x));
-      setRecords(rs=>rs.map((r,i)=>i===idx?{...r,smsStatus:SMS.failed}:r));
-      window.open(`sms:+${normalisePhone(rec.phone)}?body=${encodeURIComponent(buildSmsMsg(rec))}`, "_blank");
-      showToast("API error — SMS app opened as fallback","warn");
+      const data = await res.json();
+      setSmsBalance(data);
+    } catch (err) {
+      showToast(`Balance fetch failed: ${err.message}`, "warn");
+    }
+    setSmsBalanceLoading(false);
+  };
+
+  const sendSmsToOne = async (idx) => {
+    const rec = records[idx];
+    if (!rec.phone) { showToast("No phone for " + rec.name, "warn"); return; }
+    setSmsLog(l => [...l, { name: rec.name, status: "sending" }]);
+    try {
+      const res = await fetch(`${SMS_API}/text/single`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${smsSettings.bearerToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          from: smsSettings.senderId || "NIKADI",
+          to:   normalisePhone(rec.phone),
+          text: buildSmsMsg(rec),
+          flash: 0,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const grp = data?.messages?.[0]?.status?.groupId;
+      if (grp === 18 || grp === 20) {
+        setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: SMS.sent } : r));
+        setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "sent" } : x));
+        showToast(`SMS sent to ${rec.name}`, "success");
+      } else {
+        throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
+      }
+    } catch (err) {
+      setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "failed" } : x));
+      setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: SMS.failed } : r));
+      showToast(`SMS failed for ${rec.name}: ${err.message}`, "warn");
     }
   };
 
   const sendAllSms = async () => {
-    const withPhone = records.filter(r=>r.phone);
-    if (!withPhone.length) { showToast("No phone numbers","warn"); return; }
-    setSmsSending(true); setSmsLog([]);
-    for (let i=0;i<records.length;i++) {
-      if (!records[i].phone) continue;
-      await sendSmsToOne(i);
-      await new Promise(r=>setTimeout(r,600));
+    const withPhone = records.filter(r => r.phone);
+    if (!withPhone.length) { showToast("No phone numbers", "warn"); return; }
+    setSmsSending(true);
+    setSmsLog(withPhone.map(rec => ({ name: rec.name, status: "sending" })));
+    try {
+      const messages = withPhone.map(rec => ({
+        from: smsSettings.senderId || "NIKADI",
+        to:   normalisePhone(rec.phone),
+        text: buildSmsMsg(rec),
+      }));
+      const res = await fetch(`${SMS_API}/text/multi`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${smsSettings.bearerToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({ messages, flash: 0 }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const respMsgs = data?.messages || [];
+      setRecords(rs => rs.map(r => {
+        if (!r.phone) return r;
+        const match = respMsgs.find(m => m.to === normalisePhone(r.phone));
+        if (!match) return r;
+        const ok = match.status.groupId === 18 || match.status.groupId === 20;
+        return { ...r, smsStatus: ok ? SMS.sent : SMS.failed };
+      }));
+      setSmsLog(withPhone.map(rec => {
+        const match = respMsgs.find(m => m.to === normalisePhone(rec.phone));
+        const ok = match && (match.status.groupId === 18 || match.status.groupId === 20);
+        return { name: rec.name, status: ok ? "sent" : "failed" };
+      }));
+      const sentCount = respMsgs.filter(m => m.status.groupId === 18 || m.status.groupId === 20).length;
+      showToast(`Done — ${sentCount}/${withPhone.length} SMS sent`, "success");
+    } catch (err) {
+      setSmsLog(withPhone.map(rec => ({ name: rec.name, status: "failed" })));
+      showToast(`Bulk SMS failed: ${err.message}`, "warn");
     }
     setSmsSending(false);
     if (savedEventId) await saveCards(savedEventId);
@@ -1398,12 +1458,6 @@ export default function App() {
           <div className="nk-banner">
             <span style={{fontSize:16,marginTop:1}}>ℹ</span>
             <span><strong>WhatsApp verification:</strong> Opens each <code>wa.me</code> link — confirm active numbers with <strong style={{color:N.green}}>✓ Yes</strong> or <strong style={{color:N.red}}>✗ No</strong>.</span>
-          </div>
-        )}
-        {tab==="sms" && !smsSettings.atApiKey && (
-          <div className="nk-banner">
-            <span style={{fontSize:16,marginTop:1}}>ℹ</span>
-            <span><strong>SMS API not configured.</strong> Configure Africa's Talking below, or use <strong style={{color:N.teal}}>Download SMS CSV</strong>. Without API keys, clicking Send opens your device SMS app.</span>
           </div>
         )}
         {tab==="vcard" && (
@@ -1836,26 +1890,71 @@ export default function App() {
                       Variables: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{name}"}</code> &nbsp;
                       <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{cardType}"}</code>
                     </p>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:N.textDim,marginBottom:14}}>
-                      <span>Sample length: {buildSmsMsg(records[0]||{}).length} chars</span>
-                      <span style={{color:buildSmsMsg(records[0]||{}).length>160?N.amber:N.green}}>
-                        {buildSmsMsg(records[0]||{}).length>160?"Multi-part":"Single SMS"}
-                      </span>
+                    {(()=>{
+                      const sample   = buildSmsMsg(records[0]||{});
+                      const len      = sample.length;
+                      const parts    = len === 0 ? 1 : len <= 160 ? 1 : Math.ceil(len / 153);
+                      const contacts = records.filter(r=>r.phone).length;
+                      const total    = parts * contacts;
+                      return (
+                        <div style={{background:N.cardBg,border:`1px solid ${N.border}`,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:11}}>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                            <span style={{color:N.textDim}}>Characters</span>
+                            <span style={{fontFamily:"JetBrains Mono, monospace",color:len>160?N.amber:N.textMid}}>
+                              {len} / {len<=160?160:`${Math.ceil(len/153)*153} (${parts}×153)`}
+                            </span>
+                          </div>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                            <span style={{color:N.textDim}}>SMS per message</span>
+                            <span style={{fontFamily:"JetBrains Mono, monospace",color:parts>1?N.amber:N.green,fontWeight:600}}>{parts} {parts>1?"parts":"part"}</span>
+                          </div>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                            <span style={{color:N.textDim}}>Contacts with phone</span>
+                            <span style={{fontFamily:"JetBrains Mono, monospace",color:N.textMid}}>{contacts}</span>
+                          </div>
+                          <div style={{height:1,background:N.border,margin:"6px 0"}}/>
+                          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                            <span style={{color:N.textDim,fontWeight:600}}>Total SMS credits</span>
+                            <span style={{fontFamily:"JetBrains Mono, monospace",fontWeight:700,color:N.teal,fontSize:13}}>{total.toLocaleString()}</span>
+                          </div>
+                          <div style={{display:"flex",justifyContent:"space-between"}}>
+                            <span style={{color:N.textDim,fontWeight:600}}>Amount (TZS)</span>
+                            <span style={{fontFamily:"JetBrains Mono, monospace",fontWeight:700,color:N.amber,fontSize:13}}>{(total*16).toLocaleString()} Tsh</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                      <div className="nk-sec nk-sec-teal" style={{margin:0}}>Remaining SMS</div>
+                      <button className="nk-btn nk-btn-ghost" style={{padding:"3px 10px",fontSize:11}} onClick={fetchSmsBalance} disabled={smsBalanceLoading}>
+                        {smsBalanceLoading?"⏳":"↻"} Refresh
+                      </button>
                     </div>
-                    <button className="nk-btn nk-btn-ghost nk-btn-full" style={{marginBottom:8}} onClick={()=>setShowSmsSettings(v=>!v)}>
-                      ⚙ {showSmsSettings?"Hide":"Show"} API Settings (Africa's Talking)
-                    </button>
-                    {showSmsSettings && (
-                      <div className="nk-sms-settings">
-                        <label className="nk-label">AT Username</label>
-                        <input className="nk-input" placeholder="Your AT username" value={smsSettings.atUsername} onChange={e=>setSmsSettings(s=>({...s,atUsername:e.target.value}))} />
-                        <label className="nk-label">AT API Key</label>
-                        <input className="nk-input" type="password" placeholder="API key" value={smsSettings.atApiKey} onChange={e=>setSmsSettings(s=>({...s,atApiKey:e.target.value}))} />
-                        <label className="nk-label">Sender ID (optional)</label>
-                        <input className="nk-input" placeholder="Short code or name" value={smsSettings.senderId} onChange={e=>setSmsSettings(s=>({...s,senderId:e.target.value}))} />
-                        <p style={{fontSize:10,color:N.amber,lineHeight:1.6}}>Note: AT API blocks direct browser calls (CORS). If it fails the app falls back to opening your native SMS app. Use Download CSV for bulk.</p>
-                      </div>
-                    )}
+                    <div style={{background:N.tealBg,border:`1.5px solid ${N.teal}55`,borderRadius:10,padding:"18px 20px",marginBottom:14,textAlign:"center"}}>
+                      {smsBalanceLoading ? (
+                        <div style={{color:N.textDim,fontSize:13,padding:"8px 0"}}>Loading…</div>
+                      ) : smsBalance ? (
+                        <>
+                          <div style={{fontFamily:"JetBrains Mono, monospace",fontSize:36,fontWeight:800,color:N.teal,lineHeight:1}}>
+                            {Math.floor(smsBalance.sms_balance / 16).toLocaleString()}
+                          </div>
+                          <div style={{fontSize:11,color:N.textDim,marginTop:4,marginBottom:10}}>SMS remaining</div>
+                          <div style={{display:"flex",justifyContent:"center",gap:16}}>
+                            <div style={{textAlign:"center"}}>
+                              <div style={{fontSize:12,fontWeight:600,color:N.textMid}}>{smsBalance.display}</div>
+                              <div style={{fontSize:10,color:N.textDim}}>Balance</div>
+                            </div>
+                            <div style={{width:1,background:N.border}}/>
+                            <div style={{textAlign:"center"}}>
+                              <div style={{fontSize:12,fontWeight:600,color:N.textMid}}>{smsBalance.default}</div>
+                              <div style={{fontSize:10,color:N.textDim}}>Channel</div>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{color:N.textDim,fontSize:12,padding:"8px 0"}}>Click Refresh to load balance</div>
+                      )}
+                    </div>
                     <button className="nk-btn nk-btn-teal nk-btn-full" onClick={sendAllSms} disabled={smsSending}>
                       {smsSending?"⏳ Sending…":`💬 Send SMS to All (${records.filter(r=>r.phone).length})`}
                     </button>
@@ -1863,6 +1962,82 @@ export default function App() {
                       ⬇ Download SMS CSV
                     </button>
                   </div>
+                  {/* ── iPhone Pro Max Mockup ── */}
+                  <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
+                    <div style={{fontSize:11,color:N.textDim,fontWeight:600,letterSpacing:1,textTransform:"uppercase"}}>Preview</div>
+                    {/* phone shell */}
+                    <div style={{
+                      width:220,background:"linear-gradient(160deg,#2a2a2e,#1a1a1c)",
+                      borderRadius:44,
+                      padding:"10px 7px 14px",
+                      boxShadow:"0 0 0 1.5px #3c3c3e, 0 0 0 3px #1a1a1c, inset 0 1px 0 rgba(255,255,255,0.08), 0 24px 60px rgba(0,0,0,0.7)",
+                      position:"relative",
+                    }}>
+                      {/* side button left */}
+                      <div style={{position:"absolute",left:-3,top:80,width:3,height:28,background:"#3a3a3c",borderRadius:"2px 0 0 2px"}}/>
+                      <div style={{position:"absolute",left:-3,top:118,width:3,height:52,background:"#3a3a3c",borderRadius:"2px 0 0 2px"}}/>
+                      <div style={{position:"absolute",left:-3,top:180,width:3,height:52,background:"#3a3a3c",borderRadius:"2px 0 0 2px"}}/>
+                      {/* side button right */}
+                      <div style={{position:"absolute",right:-3,top:120,width:3,height:72,background:"#3a3a3c",borderRadius:"0 2px 2px 0"}}/>
+                      {/* screen bezel */}
+                      <div style={{background:"#000",borderRadius:36,overflow:"hidden",position:"relative"}}>
+                        {/* Dynamic Island */}
+                        <div style={{position:"absolute",top:10,left:"50%",transform:"translateX(-50%)",width:80,height:26,background:"#000",borderRadius:20,zIndex:10,boxShadow:"0 0 0 1px #1c1c1c"}}/>
+                        {/* screen content */}
+                        <div style={{background:"#f5f5f5",display:"flex",flexDirection:"column",height:440}}>
+                          {/* status bar */}
+                          <div style={{paddingTop:14,paddingBottom:4,paddingLeft:20,paddingRight:16,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:9,fontWeight:600,color:"#000",background:"#f5f5f5",flexShrink:0}}>
+                            <span>9:41</span>
+                            <div style={{display:"flex",gap:4,alignItems:"center",fontSize:9}}>
+                              <span>●●●</span><span>WiFi</span><span>🔋</span>
+                            </div>
+                          </div>
+                          {/* nav bar */}
+                          <div style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0",padding:"6px 12px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                            <span style={{fontSize:16,color:"#007aff"}}>‹</span>
+                            <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#0a7ea4,#0d9da8)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0}}>N</div>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:11,fontWeight:700,color:"#000",lineHeight:1.2}}>NIKADI</div>
+                              <div style={{fontSize:9,color:"#8e8e93"}}>Text Message</div>
+                            </div>
+                            <span style={{fontSize:14,color:"#007aff"}}>📞</span>
+                          </div>
+                          {/* message area */}
+                          <div style={{flex:1,minHeight:0,padding:"10px 8px",overflowY:"auto",display:"flex",flexDirection:"column",gap:6,background:"#fff"}}>
+                            {/* timestamp */}
+                            <div style={{textAlign:"center",fontSize:9,color:"#8e8e93",marginBottom:4,marginTop:"auto"}}>Today 9:41 AM</div>
+                            {/* received bubble */}
+                            <div style={{display:"flex",alignItems:"flex-end",gap:4}}>
+                              <div style={{width:20,height:20,borderRadius:"50%",background:"linear-gradient(135deg,#0a7ea4,#0d9da8)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:700,color:"#fff",flexShrink:0}}>N</div>
+                              <div style={{
+                                background:"#e5e5ea",
+                                borderRadius:"16px 16px 16px 4px",
+                                padding:"7px 10px",
+                                maxWidth:"82%",
+                                fontSize:10,
+                                lineHeight:1.5,
+                                color:"#000",
+                                wordBreak:"break-word",
+                                whiteSpace:"pre-wrap",
+                              }}>
+                                {buildSmsMsg(records[0]||{name:"Mwanakadi",cardType:"VIP"})}
+                              </div>
+                            </div>
+                            <div style={{textAlign:"left",paddingLeft:28,fontSize:8,color:"#8e8e93"}}>Delivered</div>
+                          </div>
+                          {/* input bar */}
+                          <div style={{background:"#f5f5f5",borderTop:"1px solid #e0e0e0",padding:"6px 8px",display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                            <span style={{fontSize:14,color:"#007aff"}}>➕</span>
+                            <div style={{flex:1,background:"#fff",border:"1px solid #c7c7cc",borderRadius:14,padding:"4px 10px",fontSize:9,color:"#c7c7cc"}}>iMessage</div>
+                            <span style={{fontSize:14,color:"#007aff"}}>🎤</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    {/* home bar */}
+                    <div style={{width:60,height:4,background:"#3a3a3c",borderRadius:2,marginTop:-6}}/>
+                  </div>
+
                   <div style={{flex:1}}>
                     <div className="nk-sec nk-sec-teal">SMS Preview per Recipient</div>
                     {smsLog.length > 0 && (
