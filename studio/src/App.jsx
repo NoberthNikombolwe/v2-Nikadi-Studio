@@ -408,7 +408,7 @@ const defaultElements = () => [
   { id:"qr",       label:"QR Code",   type:"qr",                     x:300, y:95,  size:120 },
 ];
 const WA  = { idle:"idle", testing:"testing", yes:"yes", no:"no" };
-const SMS = { pending:"pending", sent:"sent", failed:"failed" };
+const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -579,8 +579,8 @@ function RecordRow({ rec, idx, onEdit, onOpenTest, onConfirmWa, onSendSingle, on
       </td>
       <td><WaBadge status={rec.waStatus||WA.idle} /></td>
       <td>
-        <span className={`nk-badge ${rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
-          {rec.smsStatus===SMS.sent?"✓ SMS Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
+        <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
+          {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
         </span>
       </td>
       <td>
@@ -1298,9 +1298,11 @@ export default function App() {
       const data = await res.json();
       const grp = data?.messages?.[0]?.status?.groupId;
       if (grp === 18 || grp === 20) {
-        setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: SMS.sent } : r));
-        setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "sent" } : x));
-        showToast(`SMS sent to ${rec.name}`, "success");
+        const status = grp === 20 ? SMS.delivered : SMS.sent;
+        const logStatus = grp === 20 ? "delivered" : "sent";
+        setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: status } : r));
+        setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: logStatus } : x));
+        showToast(`SMS ${logStatus} to ${rec.name}`, "success");
       } else {
         throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
       }
@@ -1338,13 +1340,15 @@ export default function App() {
         if (!r.phone) return r;
         const match = respMsgs.find(m => m.to === normalisePhone(r.phone));
         if (!match) return r;
-        const ok = match.status.groupId === 18 || match.status.groupId === 20;
-        return { ...r, smsStatus: ok ? SMS.sent : SMS.failed };
+        if (match.status.groupId === 20) return { ...r, smsStatus: SMS.delivered };
+        if (match.status.groupId === 18) return { ...r, smsStatus: SMS.sent };
+        return { ...r, smsStatus: SMS.failed };
       }));
       setSmsLog(withPhone.map(rec => {
         const match = respMsgs.find(m => m.to === normalisePhone(rec.phone));
-        const ok = match && (match.status.groupId === 18 || match.status.groupId === 20);
-        return { name: rec.name, status: ok ? "sent" : "failed" };
+        const grp = match?.status?.groupId;
+        const status = grp === 20 ? "delivered" : grp === 18 ? "sent" : "failed";
+        return { name: rec.name, status };
       }));
       const sentCount = respMsgs.filter(m => m.status.groupId === 18 || m.status.groupId === 20).length;
       showToast(`Done — ${sentCount}/${withPhone.length} SMS sent`, "success");
@@ -1367,7 +1371,7 @@ export default function App() {
   const waOnCount      = records.filter(r=>r.waStatus===WA.yes).length;
   const waOffCount     = records.filter(r=>r.waStatus===WA.no).length;
   const waTestingCount = records.filter(r=>r.waStatus===WA.testing).length;
-  const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent).length;
+  const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
   /* ── Michango: hide QR + Card Type on canvas and exports ── */
@@ -2044,10 +2048,10 @@ export default function App() {
                       <div className="nk-log" style={{marginBottom:16}}>
                         <div className="nk-sec">Send Log</div>
                         {smsLog.map((x,i)=>(
-                          <div key={i} className="nk-log-row" style={{color:x.status==="sent"?N.teal:x.status==="failed"?N.red:N.textMid}}>
-                            <span>{x.status==="sent"?"✓":x.status==="failed"?"✗":"⏳"}</span>
+                          <div key={i} className="nk-log-row" style={{color:x.status==="delivered"?N.green:x.status==="sent"?N.teal:x.status==="failed"?N.red:N.textMid}}>
+                            <span>{x.status==="delivered"?"✓✓":x.status==="sent"?"↑":x.status==="failed"?"✗":"⏳"}</span>
                             <span>{x.name}</span>
-                            <span style={{fontSize:11,color:N.textDim}}>{x.status}</span>
+                            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
                           </div>
                         ))}
                       </div>
@@ -2067,8 +2071,8 @@ export default function App() {
                                 <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{buildSmsMsg(rec)}</div>
                               </td>
                               <td>
-                                <span className={`nk-badge ${rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
-                                  {rec.smsStatus===SMS.sent?"✓ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
+                                <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
+                                  {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
                                 </span>
                               </td>
                               <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={N.teal+"44"} onClick={()=>sendSmsToOne(i)}>💬 Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
