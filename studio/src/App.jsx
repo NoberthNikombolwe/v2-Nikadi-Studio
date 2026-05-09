@@ -366,9 +366,6 @@ const normalisePhone = (raw = "") => {
   if (d.startsWith("0") && d.length >= 9) d = "255" + d.slice(1);
   return d;
 };
-const waLink = (phone, text = "") =>
-  `https://wa.me/${normalisePhone(phone)}?text=${encodeURIComponent(text)}`;
-
 const downloadBlob = (content, filename, type = "text/plain") => {
   const blob = new Blob([content], { type });
   const a = document.createElement("a");
@@ -401,7 +398,7 @@ const defaultElements = () => [
   { id:"cardtype", label:"Card Type", type:"text", field:"cardType", x:220, y:200, fontSize:13, color:"#2563b0", bold:false, align:"center" },
   { id:"qr",       label:"QR Code",   type:"qr",                     x:300, y:95,  size:120 },
 ];
-const WA  = { idle:"idle", testing:"testing", yes:"yes", no:"no" };
+const WA  = { idle:"idle", sending:"sending", sent:"sent", failed:"failed" };
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
 
@@ -533,7 +530,7 @@ function exportCard(bgImage, bgSize, elements, record) {
 
 /* ── Small components ─────────────────────────────────────────────────── */
 function WaBadge({ status }) {
-  const map = { idle:["badge-idle","○","Not checked"], testing:["badge-testing","⏳","Awaiting"], yes:["badge-yes","✓","On WhatsApp"], no:["badge-no","✗","Not on WA"] };
+  const map = { idle:["badge-idle","○","Not Sent"], sending:["badge-testing","⏳","Sending…"], sent:["badge-sent","✓","WA Sent"], failed:["badge-no","✗","Failed"] };
   const [cls,icon,label] = map[status]||map.idle;
   return <span className={`nk-badge ${cls}`}>{icon} {label}</span>;
 }
@@ -547,7 +544,7 @@ function Sb({ bg, col, border, children, onClick, title, disabled }) {
   );
 }
 
-function RecordRow({ rec, idx, onEdit, onOpenTest, onConfirmWa, onSendSingle, onDownload, onSendSms, isActive, onActivate }) {
+function RecordRow({ rec, idx, onEdit, onSendWa, onDownload, onSendSms, isActive, onActivate }) {
   const [editing,setEditing] = useState(false);
   const [phone,setPhone]     = useState("");
   const startEdit = () => { setPhone(rec.phone||""); setEditing(true); };
@@ -580,15 +577,9 @@ function RecordRow({ rec, idx, onEdit, onOpenTest, onConfirmWa, onSendSingle, on
       <td>
         <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
           {!rec.phone && <Sb bg={N.redBg} col={N.red} onClick={startEdit}>+ Add №</Sb>}
-          {rec.phone && rec.waStatus===WA.idle && <Sb bg={N.amberBg} col={N.amber} onClick={()=>onOpenTest(idx)}>🔍 WA</Sb>}
-          {rec.waStatus===WA.testing && (<>
-            <span style={{fontSize:11,color:N.amber,alignSelf:"center",fontWeight:600}}>Chat open?</span>
-            <Sb bg={N.greenBg} col={N.green} onClick={()=>onConfirmWa(idx,true)}>✓ Yes</Sb>
-            <Sb bg={N.redBg} col={N.red} onClick={()=>onConfirmWa(idx,false)}>✗ No</Sb>
-          </>)}
-          {rec.waStatus===WA.yes && <Sb bg="#052e16" col={N.green} onClick={()=>onSendSingle(idx)}>📲 WA</Sb>}
-          {rec.waStatus===WA.no  && <Sb bg={N.redBg} col={N.red} onClick={()=>{startEdit();onEdit(idx,"waStatus",WA.idle);}}>✎ Fix</Sb>}
-          {(rec.waStatus===WA.yes||rec.waStatus===WA.no) && <Sb bg="transparent" col={N.textDim} border={N.border} onClick={()=>onEdit(idx,"waStatus",WA.idle)}>↺</Sb>}
+          {rec.phone && <Sb bg="#052e16" col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending}>
+            {rec.waStatus===WA.sending?"⏳":"📲"} WA
+          </Sb>}
           {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={N.teal+"44"} onClick={()=>onSendSms(idx)}>💬 SMS</Sb>}
           <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"} onClick={()=>onDownload(idx)}>⬇ PNG</Sb>
         </div>
@@ -684,9 +675,9 @@ export default function App() {
 
   /* ── Records ── */
   const [records,   setRecords]   = useState([
-    { name:"Nazael Ezekiel",     cardType:"SINGLE", phone:"0712345678", waStatus:WA.idle, smsStatus:SMS.pending },
-    { name:"Denis Mwambuja",     cardType:"DOUBLE", phone:"0756789012", waStatus:WA.idle, smsStatus:SMS.pending },
-    { name:"Noberth Nikombolwe", cardType:"20",     phone:"",           waStatus:WA.idle, smsStatus:SMS.pending },
+    { name:"Nazael Ezekiel",     cardType:"SINGLE", phone:"0712345678", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
+    { name:"Denis Mwambuja",     cardType:"DOUBLE", phone:"0756789012", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
+    { name:"Noberth Nikombolwe", cardType:"20",     phone:"",           waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
   ]);
   const [activeIdx, setActiveIdx] = useState(0);
 
@@ -694,9 +685,11 @@ export default function App() {
   const [tab, setTab] = useState("events");
 
   /* ── WhatsApp ── */
-  const [waMessage,   setWaMessage]   = useState("Hello {name}, please find your {cardType} ID card attached. Welcome aboard!");
-  const [bulkSending, setBulkSending] = useState(false);
-  const [bulkLog,     setBulkLog]     = useState([]);
+  const [waTemplate,     setWaTemplate]     = useState("ImageTemp");
+  const [bulkSending,    setBulkSending]    = useState(false);
+  const [bulkLog,        setBulkLog]        = useState([]);
+  const [uploadingCards, setUploadingCards] = useState(false);
+  const [uploadLog,      setUploadLog]      = useState([]);
 
   /* ── Event state ── */
   const [eventData,    setEventData]    = useState(BLANK_EVENT);
@@ -968,7 +961,7 @@ export default function App() {
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
       const norm = data.map(row => {
-        const n = { waStatus:WA.idle, smsStatus:SMS.pending };
+        const n = { waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" };
         Object.keys(row).forEach(k => {
           const kl = k.trim().toLowerCase().replace(/[\s_]/g,"");
           if      (kl==="name")                                             n.name     = String(row[k]);
@@ -1157,8 +1150,10 @@ export default function App() {
           name:      c.name||"",
           cardType:  c.card_type||"",
           phone:     c.phone||"",
-          waStatus:  c.wa_status||WA.idle,
-          smsStatus: c.sms_status||SMS.pending,
+          waStatus:     c.wa_status||WA.idle,
+          smsStatus:    c.sms_status||SMS.pending,
+          cardUrl:      null,
+          uploadStatus: "idle",
         })));
         setActiveIdx(0);
       }
@@ -1184,35 +1179,114 @@ export default function App() {
   const updateEl   = (prop,val) => setElements(els => els.map(el => el.id===selected ? {...el,[prop]:val} : el));
   const editRecord = (idx,field,val) => setRecords(rs => rs.map((r,i) => i===idx ? {...r,[field]:val} : r));
 
-  /* ── WhatsApp ── */
-  const openWaTest = (idx) => {
-    const rec = records[idx];
-    if (!rec.phone) { showToast("Add a phone number first","warn"); return; }
-    const num = normalisePhone(rec.phone);
-    if (num.length < 10) { showToast("Phone number too short","warn"); return; }
-    window.open(`https://wa.me/${num}`, "_blank");
-    setRecords(rs => rs.map((r,i) => i===idx ? {...r,waStatus:WA.testing} : r));
-    showToast(`WhatsApp opened for ${rec.name} — confirm if chat appeared`, "info");
-  };
-  const confirmWa = (idx, isOnWa) => {
-    setRecords(rs => rs.map((r,i) => i===idx ? {...r,waStatus:isOnWa?WA.yes:WA.no} : r));
-    showToast(isOnWa ? `✓ ${records[idx].name} on WhatsApp` : `✗ ${records[idx].name} not on WhatsApp`, isOnWa?"success":"warn");
-  };
-  const testAllWa = async () => {
-    const untested = records.map((r,i)=>({r,i})).filter(({r})=>r.phone&&r.waStatus===WA.idle);
-    if (!untested.length) { showToast("All tested or no phones","warn"); return; }
-    for (const {i} of untested) { openWaTest(i); await new Promise(r=>setTimeout(r,2000)); }
-  };
+  /* ── WhatsApp API ── */
+  const WA_BASE = import.meta.env.DEV
+    ? "/wa-proxy"
+    : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-wa`;
+  const WA_BEARER = "dc677ab4eddbafd7dfb35b115c91a9bc";
 
-  const buildWaMsg  = (rec) => waMessage.replace("{name}",rec.name||"").replace("{cardType}",rec.cardType||"");
   const buildSmsMsg = (rec) => smsMessage.replace("{name}",rec.name||"").replace("{cardType}",rec.cardType||"");
 
-  const sendSingle = async (idx) => {
+  /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
+  const uploadCardSingle = async (idx) => {
     const rec = records[idx];
-    const url = await exportCard(bgImage, bgSize, designElements, rec);
-    const a = document.createElement("a"); a.download=`${(rec.name||"card").replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
-    setTimeout(() => window.open(waLink(rec.phone, buildWaMsg(rec)), "_blank"), 400);
-    showToast(`Card downloaded + WhatsApp opened for ${rec.name}`, "success");
+    if (!supabase) throw new Error("Supabase not configured");
+    setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"uploading"} : r));
+    const dataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+    const blob = await fetch(dataUrl).then(r => r.blob());
+    const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.png`;
+    const { error: upErr } = await supabase.storage
+      .from("wa-cards")
+      .upload(storageKey, blob, { contentType:"image/png", upsert:true });
+    if (upErr) {
+      setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"failed"} : r));
+      throw new Error(upErr.message);
+    }
+    const { data: { publicUrl } } = supabase.storage.from("wa-cards").getPublicUrl(storageKey);
+    setRecords(rs => rs.map((r,i) => i===idx ? {...r, cardUrl:publicUrl, uploadStatus:"uploaded"} : r));
+    return publicUrl;
+  };
+
+  const uploadAllCards = async () => {
+    if (!supabase) { showToast("Supabase not configured", "warn"); return; }
+    setUploadingCards(true);
+    setUploadLog(records.map(r => ({ name:r.name, status:"uploading" })));
+    let ok = 0, fail = 0;
+    for (let i = 0; i < records.length; i++) {
+      try {
+        await uploadCardSingle(i);
+        setUploadLog(l => l.map((x,j) => j===i ? {...x, status:"uploaded"} : x));
+        ok++;
+      } catch {
+        setUploadLog(l => l.map((x,j) => j===i ? {...x, status:"failed"} : x));
+        fail++;
+      }
+    }
+    setUploadingCards(false);
+    showToast(`Upload done — ${ok} uploaded${fail ? `, ${fail} failed` : ""}`, ok ? "success" : "warn");
+  };
+
+  /* Step 2 — Send WA using the already-uploaded cardUrl */
+  const sendWaSingle = async (idx) => {
+    const rec = records[idx];
+    if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return; }
+    if (!rec.cardUrl) { showToast(`Upload card first for ${rec.name}`, "warn"); return; }
+    if (!waTemplate)  { showToast("Enter a template name first", "warn"); return; }
+    setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sending} : r));
+    setBulkLog(l => {
+      const exists = l.find(x => x.name === rec.name);
+      return exists ? l.map(x => x.name===rec.name ? {...x, status:"sending"} : x)
+                    : [...l, { name:rec.name, status:"sending" }];
+    });
+    try {
+      const reqBody = {
+        to:       [Number(normalisePhone(rec.phone))],
+        account:  "Nikadi",
+        template: waTemplate,
+        header:   { image: { file: rec.cardUrl, name: rec.name || "Event Card" } },
+      };
+      console.log("WA request:", JSON.stringify(reqBody, null, 2));
+      const res = await fetch(`${WA_BASE}/api/whatsapp/v2/text/single`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${WA_BEARER}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(reqBody),
+      });
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        console.error("WA API error:", res.status, errBody);
+        throw new Error(`HTTP ${res.status}: ${errBody}`);
+      }
+      const data = await res.json();
+      const grp = data?.messages?.[0]?.status?.groupId;
+      if (grp === 18 || grp === 20) {
+        setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sent} : r));
+        setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"sent"} : x));
+        showToast(`WA sent to ${rec.name}`, "success");
+      } else {
+        throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
+      }
+    } catch (err) {
+      setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.failed} : r));
+      setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"failed"} : x));
+      showToast(`WA failed for ${rec.name}: ${err.message}`, "warn");
+    }
+  };
+
+  const sendWaAll = async () => {
+    const ready = records.map((r,i)=>({r,i})).filter(({r})=>r.phone && r.cardUrl);
+    if (!ready.length) { showToast("No cards uploaded yet — upload first","warn"); return; }
+    setBulkSending(true);
+    setBulkLog(ready.map(({r})=>({ name:r.name, status:"sending" })));
+    for (const {i} of ready) {
+      await sendWaSingle(i);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    setBulkSending(false);
+    showToast(`Done — ${ready.length} WA messages dispatched`, "success");
     if (savedEventId) await saveCards(savedEventId);
   };
 
@@ -1235,24 +1309,6 @@ export default function App() {
     const a = document.createElement("a"); a.download="nikadi_cards.zip"; a.href=URL.createObjectURL(blob); a.click();
     URL.revokeObjectURL(a.href);
     showToast(`✓ nikadi_cards.zip (${records.length} cards)`, "success");
-  };
-
-  const sendAll = async () => {
-    const ready = records.filter(r=>r.waStatus===WA.yes&&r.phone);
-    if (!ready.length) { showToast("No confirmed WhatsApp numbers","warn"); return; }
-    setBulkSending(true); setBulkLog([]);
-    for (const rec of ready) {
-      setBulkLog(l=>[...l,{name:rec.name,status:"sending"}]);
-      const url = await exportCard(bgImage, bgSize, designElements, rec);
-      const a = document.createElement("a"); a.download=`${(rec.name||"").replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
-      await new Promise(r=>setTimeout(r,800));
-      window.open(waLink(rec.phone, buildWaMsg(rec)), "_blank");
-      await new Promise(r=>setTimeout(r,1500));
-      setBulkLog(l=>l.map(x=>x.name===rec.name?{...x,status:"sent"}:x));
-    }
-    setBulkSending(false);
-    showToast(`Done — ${ready.length} cards sent`, "success");
-    if (savedEventId) await saveCards(savedEventId);
   };
 
   /* ── SMS ── */
@@ -1373,9 +1429,8 @@ export default function App() {
   };
 
   /* ── Counts ── */
-  const waOnCount      = records.filter(r=>r.waStatus===WA.yes).length;
-  const waOffCount     = records.filter(r=>r.waStatus===WA.no).length;
-  const waTestingCount = records.filter(r=>r.waStatus===WA.testing).length;
+  const waSentCount    = records.filter(r=>r.waStatus===WA.sent).length;
+  const waFailedCount  = records.filter(r=>r.waStatus===WA.failed).length;
   const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
@@ -1450,15 +1505,12 @@ export default function App() {
                 ● {eventData.username||"Event"}{eventData.event_type ? ` · ${eventData.event_type}` : ""}
               </span>
             )}
-            {waOnCount > 0 && (
-              <button className="nk-btn nk-btn-success" onClick={sendAll} disabled={bulkSending}>
-                {bulkSending ? "⏳ Sending…" : `📲 WA Send All (${waOnCount})`}
-              </button>
-            )}
+            <button className="nk-btn nk-btn-success" onClick={sendWaAll} disabled={bulkSending}>
+              {bulkSending ? "⏳ Sending…" : `📲 WA Send All (${records.filter(r=>r.phone).length})`}
+            </button>
             <button className="nk-btn nk-btn-primary" onClick={downloadAll}>
               ⬇ Download All ({records.length})
             </button>
-            <button className="nk-btn nk-btn-ghost" onClick={testAllWa}>🔍 Test All WA</button>
             <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
               {user.user_metadata?.avatar_url && (
                 <img src={user.user_metadata.avatar_url} alt="" style={{width:28,height:28,borderRadius:"50%",objectFit:"cover"}} />
@@ -1479,18 +1531,19 @@ export default function App() {
 
         {/* Tabs */}
         <nav className="nk-tabs">
-          <button className={`nk-tab${tab==="events"?" active":""}`}  onClick={()=>{ loadSavedEvents(); setTab("events"); }}>🗂 Events</button>
-          <button className={`nk-tab${tab==="design"?" active":""}`}  onClick={()=>setTab("design")}>🎨 Design</button>
-          <button className={`nk-tab${tab==="vcard"?" active":""}`}   onClick={()=>setTab("vcard")}>📇 VCard</button>
-          <button className={`nk-tab${tab==="sms"?" active":""}`}     onClick={()=>setTab("sms")}>💬 SMS</button>
-          <button className={`nk-tab${tab==="batch"?" active":""}`}   onClick={()=>setTab("batch")}>📊 Batch & Send</button>
+          <button className={`nk-tab${tab==="events"?" active":""}`}    onClick={()=>{ loadSavedEvents(); setTab("events"); }}>🗂 Events</button>
+          <button className={`nk-tab${tab==="design"?" active":""}`}    onClick={()=>setTab("design")}>🎨 Design</button>
+          <button className={`nk-tab${tab==="vcard"?" active":""}`}     onClick={()=>setTab("vcard")}>📇 VCard</button>
+          <button className={`nk-tab${tab==="sms"?" active":""}`}       onClick={()=>setTab("sms")}>💬 SMS</button>
+          <button className={`nk-tab${tab==="whatsapp"?" active":""}`}  onClick={()=>setTab("whatsapp")}>📲 WhatsApp</button>
+          <button className={`nk-tab${tab==="batch"?" active":""}`}     onClick={()=>setTab("batch")}>📊 Batch & Send</button>
         </nav>
 
         {/* Info banners */}
         {tab==="batch" && (
           <div className="nk-banner">
             <span style={{fontSize:16,marginTop:1}}>ℹ</span>
-            <span><strong>WhatsApp verification:</strong> Opens each <code>wa.me</code> link — confirm active numbers with <strong style={{color:N.green}}>✓ Yes</strong> or <strong style={{color:N.red}}>✗ No</strong>.</span>
+            <span><strong>WhatsApp Sending:</strong> Select an image in the <strong>WhatsApp</strong> tab, then use <strong style={{color:N.green}}>📲 WA</strong> per row or <strong style={{color:N.green}}>WA Send All</strong> in the header. 1 second gap per number.</span>
           </div>
         )}
         {tab==="vcard" && (
@@ -1708,14 +1761,14 @@ export default function App() {
                 )}
               </div>
 
-              {/* WhatsApp message */}
+              {/* WhatsApp info */}
               <div>
-                <div className="nk-sec">WhatsApp Message</div>
-                <textarea className="nk-input nk-textarea" value={waMessage} onChange={e=>setWaMessage(e.target.value)} />
-                <p style={{fontSize:10,color:N.textDim,lineHeight:1.7}}>
-                  Variables: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{name}"}</code> &nbsp;
-                  <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{cardType}"}</code>
-                </p>
+                <div className="nk-sec">WhatsApp</div>
+                <div className="nk-chip" style={{fontSize:11,lineHeight:1.8}}>
+                  Each card is generated<br/>
+                  from the canvas design<br/>
+                  and sent per recipient.
+                </div>
               </div>
 
             </aside>
@@ -2116,16 +2169,139 @@ export default function App() {
             )}
 
             {/* ─── BATCH & SEND ─── */}
+            {/* ─── WHATSAPP ─── */}
+            {tab === "whatsapp" && (
+              <div className="nk-page" style={{padding:"0 0 40px"}}>
+                <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
+
+                  {/* Left: step controls */}
+                  <div style={{flex:"0 0 260px"}}>
+                    {/* Step 1 */}
+                    <div className="nk-sec" style={{color:N.sky}}>Step 1 — Upload Cards</div>
+                    <div className="nk-chip" style={{marginBottom:10,fontSize:11,lineHeight:1.8}}>
+                      Renders each personalized card<br/>
+                      and uploads to Supabase Storage<br/>
+                      to get a public image URL.<br/>
+                      <span style={{color:N.green}}>
+                        {records.filter(r=>r.uploadStatus==="uploaded").length} / {records.length} uploaded
+                      </span>
+                    </div>
+                    <button className="nk-btn nk-btn-primary nk-btn-full" style={{marginBottom:20}}
+                      onClick={uploadAllCards} disabled={uploadingCards}>
+                      {uploadingCards ? "⏳ Uploading…" : `☁ Upload All Cards (${records.length})`}
+                    </button>
+
+                    {/* Template */}
+                    <div className="nk-sec" style={{color:N.amber}}>WhatsApp Template</div>
+                    <label className="nk-label">Template Name</label>
+                    <input
+                      className="nk-input"
+                      value={waTemplate}
+                      onChange={e => setWaTemplate(e.target.value)}
+                      placeholder="e.g. ImageTemp"
+                      style={{marginBottom:20}}
+                    />
+
+                    {/* Step 2 */}
+                    <div className="nk-sec" style={{color:N.green}}>Step 2 — Send via WhatsApp</div>
+                    <div className="nk-chip" style={{marginBottom:10,fontSize:11,lineHeight:1.8}}>
+                      Template: <span style={{color:N.amber}}>{waTemplate||"—"}</span><br/>
+                      Account: <span style={{color:N.sky}}>Nikadi</span><br/>
+                      Delay: <span style={{color:N.sky}}>1 s / number</span><br/>
+                      <span style={{color:N.green}}>
+                        {records.filter(r=>r.phone&&r.cardUrl).length} ready to send
+                      </span>
+                    </div>
+                    <button className="nk-btn nk-btn-success nk-btn-full"
+                      onClick={sendWaAll}
+                      disabled={bulkSending||!records.filter(r=>r.phone&&r.cardUrl).length}>
+                      {bulkSending ? "⏳ Sending…" : `📲 Send All (${records.filter(r=>r.phone&&r.cardUrl).length})`}
+                    </button>
+                  </div>
+
+                  {/* Right: table */}
+                  <div style={{flex:1}}>
+                    {/* Upload log */}
+                    {uploadLog.length > 0 && (
+                      <div className="nk-log" style={{marginBottom:12}}>
+                        <div className="nk-sec" style={{color:N.sky,marginBottom:6}}>Upload Log</div>
+                        {uploadLog.map((x,i)=>(
+                          <div key={i} className="nk-log-row"
+                            style={{color:x.status==="uploaded"?N.green:x.status==="failed"?N.red:N.textMid}}>
+                            <span>{x.status==="uploaded"?"✓":x.status==="failed"?"✗":"⏳"}</span>
+                            <span>{x.name}</span>
+                            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* Send log */}
+                    {bulkLog.length > 0 && (
+                      <div className="nk-log" style={{marginBottom:12}}>
+                        <div className="nk-sec" style={{color:N.green,marginBottom:6}}>Send Log</div>
+                        {bulkLog.map((x,i)=>(
+                          <div key={i} className="nk-log-row"
+                            style={{color:x.status==="sent"?N.green:x.status==="failed"?N.red:N.textMid}}>
+                            <span>{x.status==="sent"?"✓":x.status==="failed"?"✗":"⏳"}</span>
+                            <span>{x.name}</span>
+                            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {/* Records table */}
+                    <div className="nk-table-wrap">
+                      <table className="nk-table">
+                        <thead><tr>{["#","Name","Phone","Upload","WA","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                        <tbody>
+                          {records.map((rec,i)=>(
+                            <tr key={i}>
+                              <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i+1}</td>
+                              <td style={{fontWeight:600}}>{rec.name}</td>
+                              <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>
+                                {rec.phone ? `+${normalisePhone(rec.phone)}` : <span style={{color:N.textDim}}>—</span>}
+                              </td>
+                              <td>
+                                <span className={`nk-badge ${rec.uploadStatus==="uploaded"?"badge-yes":rec.uploadStatus==="uploading"?"badge-testing":rec.uploadStatus==="failed"?"badge-no":"badge-idle"}`}>
+                                  {rec.uploadStatus==="uploaded"?"✓ Ready":rec.uploadStatus==="uploading"?"⏳ Uploading":rec.uploadStatus==="failed"?"✗ Failed":"○ Pending"}
+                                </span>
+                              </td>
+                              <td><WaBadge status={rec.waStatus||WA.idle} /></td>
+                              <td>
+                                <div style={{display:"flex",gap:5}}>
+                                  <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"}
+                                    onClick={()=>uploadCardSingle(i)}
+                                    disabled={rec.uploadStatus==="uploading"}>
+                                    {rec.uploadStatus==="uploading"?"⏳":"☁"} Upload
+                                  </Sb>
+                                  {rec.phone && rec.cardUrl && (
+                                    <Sb bg="#052e16" col={N.green}
+                                      onClick={()=>sendWaSingle(i)}
+                                      disabled={rec.waStatus===WA.sending}>
+                                      {rec.waStatus===WA.sending?"⏳":"📲"} Send
+                                    </Sb>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {tab === "batch" && (
               <div className="nk-page" style={{padding:"0 0 40px"}}>
                 <div className="nk-stats">
                   {[
-                    ["Total",     records.length,                                           N.textMid],
-                    ["WA ✓",      waOnCount,                                                N.green],
-                    ["Not on WA", waOffCount,                                               N.red],
-                    ["Awaiting",  waTestingCount,                                           N.amber],
-                    ["SMS Sent",  smsSentCount,                                             N.teal],
-                    ["Unchecked", records.length-waOnCount-waOffCount-waTestingCount,       N.textDim],
+                    ["Total",      records.length,  N.textMid],
+                    ["WA Sent",    waSentCount,     N.green],
+                    ["WA Failed",  waFailedCount,   N.red],
+                    ["SMS Sent",   smsSentCount,    N.teal],
+                    ["Pending WA", records.filter(r=>r.phone&&r.waStatus===WA.idle).length, N.textDim],
                   ].map(([l,v,c])=>(
                     <div key={l} className="nk-stat" style={{borderColor:c+"33"}}>
                       <div className="nk-stat-num" style={{color:c}}>{v}</div>
@@ -2150,8 +2326,7 @@ export default function App() {
                     <tbody>
                       {records.map((rec,i)=>(
                         <RecordRow key={i} rec={rec} idx={i}
-                          onEdit={editRecord} onOpenTest={openWaTest} onConfirmWa={confirmWa}
-                          onSendSingle={sendSingle} onDownload={downloadCard}
+                          onEdit={editRecord} onSendWa={sendWaSingle} onDownload={downloadCard}
                           onSendSms={sendSmsToOne}
                           isActive={activeIdx===i}
                           onActivate={()=>{ setActiveIdx(i); setTab("design"); }} />
@@ -2226,15 +2401,10 @@ export default function App() {
               <label className="nk-label">Phone</label>
               <input className="nk-input" value={activeRecord.phone||""} onChange={e=>editRecord(activeIdx,"phone",e.target.value)} placeholder="+255…" />
 
-              <button className="nk-btn nk-btn-primary nk-btn-full" onClick={()=>openWaTest(activeIdx)}>🔍 Test on WhatsApp</button>
-              {activeRecord.waStatus===WA.testing && (
-                <div style={{display:"flex",gap:8,marginBottom:8}}>
-                  <button className="nk-btn nk-btn-success" style={{flex:1}} onClick={()=>confirmWa(activeIdx,true)}>✓ Yes</button>
-                  <button className="nk-btn nk-btn-danger"  style={{flex:1}} onClick={()=>confirmWa(activeIdx,false)}>✗ No</button>
-                </div>
-              )}
-              {activeRecord.waStatus===WA.yes && (
-                <button className="nk-btn nk-btn-success nk-btn-full" onClick={()=>sendSingle(activeIdx)}>📲 Send via WhatsApp</button>
+              {activeRecord.phone && (
+                <button className="nk-btn nk-btn-success nk-btn-full" onClick={()=>sendWaSingle(activeIdx)} disabled={activeRecord.waStatus===WA.sending}>
+                  {activeRecord.waStatus===WA.sending ? "⏳ Sending…" : activeRecord.waStatus===WA.sent ? "✓ WA Sent" : "📲 Send via WhatsApp"}
+                </button>
               )}
 
               <button className="nk-btn nk-btn-ghost nk-btn-full" style={{marginTop:4}}

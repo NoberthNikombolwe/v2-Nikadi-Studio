@@ -10,6 +10,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/sms-proxy/, ''),
       },
+      '/wa-proxy': {
+        target: 'https://messaging-service.co.tz',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/wa-proxy/, ''),
+      },
     },
   },
 })
