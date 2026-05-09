@@ -398,7 +398,7 @@ const defaultElements = () => [
   { id:"cardtype", label:"Card Type", type:"text", field:"cardType", x:220, y:200, fontSize:13, color:"#2563b0", bold:false, align:"center" },
   { id:"qr",       label:"QR Code",   type:"qr",                     x:300, y:95,  size:120 },
 ];
-const WA  = { idle:"idle", sending:"sending", sent:"sent", failed:"failed" };
+const WA  = { idle:"idle", sending:"sending", sent:"sent", notSent:"notSent", invalid:"invalid" };
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
 
@@ -530,9 +530,15 @@ function exportCard(bgImage, bgSize, elements, record) {
 
 /* ── Small components ─────────────────────────────────────────────────── */
 function WaBadge({ status }) {
-  const map = { idle:["badge-idle","○","Not Sent"], sending:["badge-testing","⏳","Sending…"], sent:["badge-sent","✓","WA Sent"], failed:["badge-no","✗","Failed"] };
-  const [cls,icon,label] = map[status]||map.idle;
-  return <span className={`nk-badge ${cls}`}>{icon} {label}</span>;
+  const styles = {
+    idle:    { cls:"badge-idle",    icon:"○", label:"Not Sent", extra:{} },
+    sending: { cls:"badge-testing", icon:"⏳", label:"Sending…", extra:{} },
+    sent:    { cls:"badge-sent",    icon:"✓", label:"Sent",     extra:{} },
+    notSent: { cls:"badge-no",      icon:"✗", label:"Not Sent", extra:{background:"#1a0a0a",color:"#f87171",border:"1px solid #f8717144"} },
+    invalid: { cls:"badge-testing", icon:"⚠", label:"Invalid",  extra:{background:"#2d1a00",color:"#f59e0b",border:"1px solid #f59e0b44"} },
+  };
+  const { cls, icon, label, extra } = styles[status] || styles.idle;
+  return <span className={`nk-badge ${cls}`} style={extra}>{icon} {label}</span>;
 }
 
 function Sb({ bg, col, border, children, onClick, title, disabled }) {
@@ -568,7 +574,7 @@ function RecordRow({ rec, idx, onEdit, onSendWa, onDownload, onSendSms, isActive
           </span>
         )}
       </td>
-      <td><WaBadge status={rec.waStatus||WA.idle} /></td>
+      <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
       <td>
         <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
           {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
@@ -1188,16 +1194,40 @@ export default function App() {
   const buildSmsMsg = (rec) => smsMessage.replace("{name}",rec.name||"").replace("{cardType}",rec.cardType||"");
 
   /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
+  const compressCard = (dataUrl, maxKb = 2800, quality = 0.88) => new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      // Scale down if needed so the JPEG stays well under 3 MB
+      let w = img.width, h = img.height;
+      const MAX_W = 1200;
+      if (w > MAX_W) { h = Math.round(h * MAX_W / w); w = MAX_W; }
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      // Try progressively lower quality until under maxKb
+      let q = quality;
+      const tryEncode = () => {
+        const result = canvas.toDataURL("image/jpeg", q);
+        const kb = Math.round((result.length * 3) / 4 / 1024);
+        if (kb > maxKb && q > 0.4) { q = Math.max(q - 0.08, 0.4); tryEncode(); }
+        else resolve(result);
+      };
+      tryEncode();
+    };
+    img.src = dataUrl;
+  });
+
   const uploadCardSingle = async (idx) => {
     const rec = records[idx];
     if (!supabase) throw new Error("Supabase not configured");
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"uploading"} : r));
-    const dataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+    const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+    const dataUrl = await compressCard(rawDataUrl);
     const blob = await fetch(dataUrl).then(r => r.blob());
-    const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.png`;
+    const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.jpg`;
     const { error: upErr } = await supabase.storage
       .from("wa-cards")
-      .upload(storageKey, blob, { contentType:"image/png", upsert:true });
+      .upload(storageKey, blob, { contentType:"image/jpeg", upsert:true });
     if (upErr) {
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"failed"} : r));
       throw new Error(upErr.message);
@@ -1224,6 +1254,45 @@ export default function App() {
     }
     setUploadingCards(false);
     showToast(`Upload done — ${ok} uploaded${fail ? `, ${fail} failed` : ""}`, ok ? "success" : "warn");
+  };
+
+  /* Poll delivery report until we get a terminal status (runs in background) */
+  const pollWaStatus = async (messageId, idx, recName) => {
+    const delays = [4000, 6000, 8000, 10000, 12000];
+    for (const delay of delays) {
+      await new Promise(r => setTimeout(r, delay));
+      try {
+        const res = await fetch(`${WA_BASE}/api/whatsapp/v1/reports?messageId=${messageId}&limit=1`, {
+          headers: { Authorization: `Bearer ${WA_BEARER}`, Accept: "application/json" },
+        });
+        if (!res.ok) continue;
+        const data = await res.json().catch(() => null);
+        const result = data?.results?.[0];
+        if (!result) continue;
+        const grp = result.status?.groupId;
+        const rid = result.status?.id;
+        if (grp === 18) continue; // still pending, keep polling
+        if (grp === 20 && [73, 109, 77].includes(rid)) {
+          // confirmed delivered — already marked sent, nothing to do
+          return;
+        }
+        if (
+          (grp === 20 && [75, 76, 78, 79, 80].includes(rid)) ||
+          grp === 19
+        ) {
+          setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
+          setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"invalid"} : x));
+          showToast(`${recName} — number not on WhatsApp`, "warn");
+          return;
+        }
+        if (grp === 22) {
+          setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
+          setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"not sent"} : x));
+          return;
+        }
+      } catch { /* network error, retry */ }
+    }
+    // exhausted — leave as Sent (message was accepted by server)
   };
 
   /* Step 2 — Send WA using the already-uploaded cardUrl */
@@ -1255,23 +1324,64 @@ export default function App() {
         },
         body: JSON.stringify(reqBody),
       });
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        console.error("WA API error:", res.status, errBody);
-        throw new Error(`HTTP ${res.status}: ${errBody}`);
-      }
-      const data = await res.json();
-      const grp = data?.messages?.[0]?.status?.groupId;
-      if (grp === 18 || grp === 20) {
+      const rawText = await res.text().catch(() => "");
+      console.log("WA response:", res.status, rawText);
+
+      const markSent = () => {
         setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sent} : r));
         setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"sent"} : x));
         showToast(`WA sent to ${rec.name}`, "success");
+      };
+      const markInvalid = (reason) => {
+        setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
+        setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"invalid"} : x));
+        showToast(`${rec.name} — ${reason}`, "warn");
+      };
+
+      const invalidHint = (t = "") => {
+        const s = t.toLowerCase();
+        return s.includes("not a whatsapp") || s.includes("not registered")
+          || s.includes("unregistered") || s.includes("no whatsapp")
+          || s.includes("missing outlet") || s.includes("recipient not found");
+      };
+
+      if (!res.ok) {
+        if ((res.status === 422 || res.status === 400) && invalidHint(rawText)) {
+          markInvalid("number not on WhatsApp"); return;
+        }
+        throw new Error(`HTTP ${res.status}: ${rawText}`);
+      }
+
+      let data = {};
+      try { data = JSON.parse(rawText); } catch { throw new Error("Invalid JSON response"); }
+
+      const msg   = data?.messages?.[0];
+      const grp   = msg?.status?.groupId;
+      const id    = msg?.status?.id;
+      const sName = msg?.status?.name || "";
+      const sDesc = (msg?.status?.description || "").toLowerCase();
+
+      if (grp === 18) {
+        // PENDING — accepted by API; mark Sent now, poll in background for rejection
+        markSent();
+        const messageId = msg?.messageId;
+        if (messageId) pollWaStatus(messageId, idx, rec.name);
+      } else if (grp === 20 && [73, 109, 77].includes(id)) {
+        // DELIVERED_TO_HANDSET / SENT_TO_OPERATOR / DELIVERED_TO_OPERATOR
+        markSent();
+      } else if (
+        (grp === 20 && [75, 76, 78, 79, 80].includes(id)) ||
+        (grp === 19 && id === 111) ||
+        invalidHint(sName) || invalidHint(sDesc)
+      ) {
+        // UNDELIVERABLE / REJECTED_MISSING_OUTLET — number not on WhatsApp
+        markInvalid("number not on WhatsApp");
       } else {
-        throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
+        throw new Error(sName || `groupId ${grp}`);
       }
     } catch (err) {
-      setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.failed} : r));
-      setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"failed"} : x));
+      setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
+      setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"not sent"} : x));
       showToast(`WA failed for ${rec.name}: ${err.message}`, "warn");
     }
   };
@@ -1288,6 +1398,28 @@ export default function App() {
     setBulkSending(false);
     showToast(`Done — ${ready.length} WA messages dispatched`, "success");
     if (savedEventId) await saveCards(savedEventId);
+  };
+
+  const downloadWaReport = () => {
+    const statusLabel = {
+      [WA.sent]:    "Sent",
+      [WA.invalid]: "Invalid",
+      [WA.notSent]: "Not Sent",
+      [WA.sending]: "Sending",
+      [WA.idle]:    "Not Sent",
+    };
+    const rows = records.map(r => ({
+      "Name":       r.name     || "",
+      "Card Type":  r.cardType || "",
+      "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
+      "WA Status":  statusLabel[r.waStatus] || "Not Sent",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "WA Report");
+    const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
+    XLSX.writeFile(wb, `${evName}_WA_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
   const downloadCard = async (idx) => {
@@ -1430,7 +1562,7 @@ export default function App() {
 
   /* ── Counts ── */
   const waSentCount    = records.filter(r=>r.waStatus===WA.sent).length;
-  const waFailedCount  = records.filter(r=>r.waStatus===WA.failed).length;
+  const waInvalidCount = records.filter(r=>r.waStatus===WA.invalid).length;
   const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
@@ -2241,13 +2373,20 @@ export default function App() {
                         <div className="nk-sec" style={{color:N.green,marginBottom:6}}>Send Log</div>
                         {bulkLog.map((x,i)=>(
                           <div key={i} className="nk-log-row"
-                            style={{color:x.status==="sent"?N.green:x.status==="failed"?N.red:N.textMid}}>
-                            <span>{x.status==="sent"?"✓":x.status==="failed"?"✗":"⏳"}</span>
+                            style={{color:x.status==="sent"?N.green:x.status==="invalid"?N.amber:x.status==="not sent"?N.red:N.textMid}}>
+                            <span>{x.status==="sent"?"✓":x.status==="invalid"?"⚠":x.status==="not sent"?"✗":"⏳"}</span>
                             <span>{x.name}</span>
                             <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
                           </div>
                         ))}
                       </div>
+                    )}
+                    {/* Download report — shown after sending completes */}
+                    {!bulkSending && bulkLog.length > 0 && (
+                      <button className="nk-btn nk-btn-full" onClick={downloadWaReport}
+                        style={{background:N.greenBg,color:N.green,border:`1px solid ${N.green}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                        <span style={{fontSize:16}}>⬇</span> Download WA Report (.xlsx)
+                      </button>
                     )}
                     {/* Records table */}
                     <div className="nk-table-wrap">
@@ -2266,7 +2405,7 @@ export default function App() {
                                   {rec.uploadStatus==="uploaded"?"✓ Ready":rec.uploadStatus==="uploading"?"⏳ Uploading":rec.uploadStatus==="failed"?"✗ Failed":"○ Pending"}
                                 </span>
                               </td>
-                              <td><WaBadge status={rec.waStatus||WA.idle} /></td>
+                              <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
                               <td>
                                 <div style={{display:"flex",gap:5}}>
                                   <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"}
@@ -2298,8 +2437,8 @@ export default function App() {
                 <div className="nk-stats">
                   {[
                     ["Total",      records.length,  N.textMid],
-                    ["WA Sent",    waSentCount,     N.green],
-                    ["WA Failed",  waFailedCount,   N.red],
+                    ["WA Sent",    waSentCount,    N.green],
+                    ["WA Invalid", waInvalidCount, N.amber],
                     ["SMS Sent",   smsSentCount,    N.teal],
                     ["Pending WA", records.filter(r=>r.phone&&r.waStatus===WA.idle).length, N.textDim],
                   ].map(([l,v,c])=>(
