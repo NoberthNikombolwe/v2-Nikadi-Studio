@@ -1300,7 +1300,7 @@ export default function App() {
     const rec = records[idx];
     if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return; }
     if (!rec.cardUrl) { showToast(`Upload card first for ${rec.name}`, "warn"); return; }
-    if (!waTemplate)  { showToast("Enter a template name first", "warn"); return; }
+    if (!waTemplate)  { showToast("Select a template first", "warn"); return; }
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sending} : r));
     setBulkLog(l => {
       const exists = l.find(x => x.name === rec.name);
@@ -2326,12 +2326,27 @@ export default function App() {
                     {/* Template */}
                     <div className="nk-sec" style={{color:N.amber}}>WhatsApp Template</div>
                     <label className="nk-label">Template Name</label>
+                    <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+                      {["Mwaliko","Mchango","ImageTemp"].map(t => (
+                        <button key={t}
+                          onClick={() => setWaTemplate(t)}
+                          style={{
+                            padding:"6px 14px", borderRadius:6, fontSize:12, fontWeight:600, cursor:"pointer",
+                            border: waTemplate===t ? `1.5px solid ${N.amber}` : `1.5px solid ${N.navy500}`,
+                            background: waTemplate===t ? N.amberBg : N.navy700,
+                            color: waTemplate===t ? N.amber : N.textMid,
+                            transition:"all .15s",
+                          }}>
+                          {t}
+                        </button>
+                      ))}
+                    </div>
                     <input
                       className="nk-input"
                       value={waTemplate}
                       onChange={e => setWaTemplate(e.target.value)}
-                      placeholder="e.g. ImageTemp"
-                      style={{marginBottom:20}}
+                      placeholder="or type a custom template…"
+                      style={{marginBottom:20,fontSize:12}}
                     />
 
                     {/* Step 2 */}
