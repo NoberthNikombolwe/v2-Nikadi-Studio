@@ -18,10 +18,12 @@ CREATE TABLE IF NOT EXISTS events (
   end_datetime    TIMESTAMPTZ,
   cover_image_url TEXT,
   elements_layout JSONB,        -- saved card element positions / sizes / colors
+  sms_message     TEXT,         -- per-event SMS message template
   created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE events ADD COLUMN IF NOT EXISTS elements_layout JSONB;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS sms_message TEXT;
 
 -- Cards table (one row per attendee/contact in an event)
 CREATE TABLE IF NOT EXISTS event_cards (

@@ -665,6 +665,8 @@ function EventModal({ initial, onSave, onClose, saving }) {
   );
 }
 
+const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
+
 /* ══════════════════════════════════════════════════════════════════════════
    MAIN APP
 ══════════════════════════════════════════════════════════════════════════ */
@@ -718,7 +720,9 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState(null); // event to confirm-delete
 
   /* ── SMS ── */
-  const [smsMessage,      setSmsMessage]      = useState("Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!");
+  const [smsMessage,      setSmsMessage]      = useState(DEFAULT_SMS_MESSAGE);
+  const smsSaveTimer   = useRef(null);
+  const smsPersistedMsg = useRef(null);   // last value saved to / loaded from DB — skip redundant writes
   const smsSettings = { bearerToken:"dc677ab4eddbafd7dfb35b115c91a9bc", senderId:"NIKADI" };
   const [smsSending,      setSmsSending]      = useState(false);
   const [smsLog,          setSmsLog]          = useState([]);
@@ -793,6 +797,20 @@ export default function App() {
       localStorage.setItem(LAYOUT_PREFIX + templateKey, JSON.stringify(elements));
     }, 600);
   }, [elements, templateKey]);
+
+  /* ── SMS message: auto-save to DB for the loaded event ── */
+  useEffect(() => {
+    if (!supabase || !savedEventId) return;
+    if (smsMessage === smsPersistedMsg.current) return;
+    clearTimeout(smsSaveTimer.current);
+    smsSaveTimer.current = setTimeout(async () => {
+      const { error } = await supabase.from("events").update({ sms_message: smsMessage }).eq("id", savedEventId);
+      if (error) { showToast("SMS message save failed: " + error.message, "warn"); return; }
+      smsPersistedMsg.current = smsMessage;
+      setSavedEvents(es => es.map(e => e.id === savedEventId ? { ...e, sms_message: smsMessage } : e));
+    }, 800);
+    return () => clearTimeout(smsSaveTimer.current);
+  }, [smsMessage, savedEventId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Load saved events ── */
   const loadSavedEvents = async () => {
@@ -1018,16 +1036,20 @@ export default function App() {
     if (!supabase) { showToast("Supabase not configured","warn"); return null; }
     setIsSaving(true);
     try {
+      // Only stamp the designer's SMS message onto the loaded event or a brand-new one
+      const isLoadedEvent = !currentId || currentId === savedEventId;
       const payload = {
         ...formData,
         cover_image_url: coverUrl||null,
         elements_layout: elements,
+        ...(isLoadedEvent ? { sms_message: smsMessage } : {}),
         start_datetime: formData.start_datetime||null,
         end_datetime:   formData.end_datetime||null,
       };
       if (currentId) {
         const { error } = await supabase.from("events").update(payload).eq("id", currentId);
         if (error) throw error;
+        if (isLoadedEvent) smsPersistedMsg.current = smsMessage;
         setEventData(formData);
         showToast("Event updated", "success");
         await loadSavedEvents();
@@ -1035,6 +1057,7 @@ export default function App() {
       } else {
         const { data, error } = await supabase.from("events").insert([payload]).select().single();
         if (error) throw error;
+        smsPersistedMsg.current = smsMessage;
         setEventData(formData);
         setSavedEventId(data.id);
         showToast("Event created", "success");
@@ -1086,7 +1109,12 @@ export default function App() {
     const { error } = await supabase.from("events").delete().eq("id", ev.id);
     if (error) { showToast("Delete failed: " + error.message, "warn"); return; }
     setSavedEvents(es => es.filter(e => e.id !== ev.id));
-    if (savedEventId === ev.id) { setSavedEventId(null); setEventData(BLANK_EVENT); }
+    if (savedEventId === ev.id) {
+      setSavedEventId(null); setEventData(BLANK_EVENT);
+      clearTimeout(smsSaveTimer.current);
+      smsPersistedMsg.current = null;
+      setSmsMessage(DEFAULT_SMS_MESSAGE);
+    }
     setDeleteTarget(null);
     showToast(`Event "${ev.username}" deleted`, "success");
   };
@@ -1111,6 +1139,8 @@ export default function App() {
     });
     setSavedEventId(ev.id);
     setCoverUrl(ev.cover_image_url||null);
+    smsPersistedMsg.current = ev.sms_message || DEFAULT_SMS_MESSAGE;
+    setSmsMessage(smsPersistedMsg.current);
 
     /* Clear canvas template when event has none */
     if (!ev.cover_image_url) {
@@ -2102,7 +2132,10 @@ export default function App() {
                 <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
                   <div style={{flex:"0 0 340px"}}>
                     <div className="nk-sec nk-sec-teal">SMS Message</div>
-                    <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>Separate from WhatsApp — sent as plain SMS.</p>
+                    <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>
+                      Separate from WhatsApp — sent as plain SMS.
+                      {savedEventId && <span style={{color:N.teal}}> Auto-saved to this event.</span>}
+                    </p>
                     <textarea className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
                     <p style={{fontSize:10,color:N.textDim,lineHeight:1.7,marginBottom:14}}>
                       Variables: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{name}"}</code> &nbsp;
