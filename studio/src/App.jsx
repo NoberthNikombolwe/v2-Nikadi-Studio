@@ -691,7 +691,7 @@ export default function App() {
   const [tab, setTab] = useState("events");
 
   /* ── WhatsApp ── */
-  const [waTemplate,     setWaTemplate]     = useState("ImageTemp");
+  const [waTemplate,     setWaTemplate]     = useState("Mwaliko");
   const [bulkSending,    setBulkSending]    = useState(false);
   const [bulkLog,        setBulkLog]        = useState([]);
   const [uploadingCards, setUploadingCards] = useState(false);
