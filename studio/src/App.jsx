@@ -5,6 +5,28 @@ import { supabase } from "./lib/supabase";
 import LoginPage from "./LoginPage";
 
 /* ══════════════════════════════════════════════════════════════════════════
+   NIKADI STUDIO — event card designer & distribution tool
+
+   Single-file app: design a personalised event card (background + draggable
+   name/QR/date/logo elements), import contacts from Excel/CSV, then export,
+   WhatsApp, or SMS a rendered card to each contact. Events, contacts, and
+   saved templates persist to Supabase (Postgres + Storage); WhatsApp/SMS
+   sends go through messaging-service.co.tz, proxied via Vite in dev and a
+   Supabase Edge Function in production (see supabase/functions/send-sms).
+
+   Layout of this file, top to bottom:
+     BRAND        — theme tokens + global CSS-in-JS string
+     Helpers      — pure utility functions (QR URL, phone normalising, VCF…)
+     CARD CANVAS  — <CardCanvas> renders the draggable card preview;
+                    exportCard() rasterises one canvas to an image
+     EVENT MODAL  — <EventModal> create/edit form for an event's details
+     MAIN APP     — <App>, the default export. Holds all state and renders
+                    the tabbed UI: Events, Design, Contacts, WhatsApp, SMS,
+                    VCard. Gated behind <LoginPage> until Supabase auth
+                    resolves a session.
+══════════════════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════════════
    BRAND
 ══════════════════════════════════════════════════════════════════════════ */
 const FONTS = "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap";
@@ -358,14 +380,17 @@ const CSS = `
 `;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
+// Builds a goqr.me image URL that encodes `data` as a QR code of `size`×`size` px
 const qrUrl = (data, size = 120) =>
   `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}&margin=6&color=0d1f3c&bgcolor=ffffff`;
 
+// Strips non-digits and rewrites a leading local "0" to Tanzania's 255 country code
 const normalisePhone = (raw = "") => {
   let d = String(raw).replace(/\D/g, "");
   if (d.startsWith("0") && d.length >= 9) d = "255" + d.slice(1);
   return d;
 };
+// Triggers a browser file download for arbitrary text content via a throwaway <a> tag
 const downloadBlob = (content, filename, type = "text/plain") => {
   const blob = new Blob([content], { type });
   const a = document.createElement("a");
@@ -374,6 +399,7 @@ const downloadBlob = (content, filename, type = "text/plain") => {
 };
 
 /* Fingerprint a template data-URL for localStorage keying */
+// Cheap DJB2-style hash of a template image so the same background always maps to the same layout cache key
 const templateFingerprint = (dataUrl, filename = "") => {
   const sample = (filename || "") + dataUrl.slice(0, 512) + String(dataUrl.length);
   let h = 5381;
@@ -383,6 +409,7 @@ const templateFingerprint = (dataUrl, filename = "") => {
 
 const LAYOUT_PREFIX = "nikadi_layout_";
 
+// Builds a single VCard (.vcf) string containing one vCard per contact, for phone-book import
 const generateVcf = (contacts, eventUsername) =>
   contacts.map(({ name, phone }) => {
     const fn  = `${name} ${eventUsername}_Nikadi`.trim();
@@ -393,6 +420,7 @@ const generateVcf = (contacts, eventUsername) =>
 
 /* ── Constants ───────────────────────────────────────────────────────── */
 const DEFAULT_W = 440, DEFAULT_H = 280, MAX_DISPLAY_W = 780;
+// Fallback card element layout (name, card type, QR) used for a blank/new template
 const defaultElements = () => [
   { id:"name",     label:"Name",      type:"text", field:"name",     x:220, y:170, fontSize:22, color:"#0d1f3c", bold:true,  align:"center" },
   { id:"cardtype", label:"Card Type", type:"text", field:"cardType", x:220, y:200, fontSize:13, color:"#2563b0", bold:false, align:"center" },
@@ -405,6 +433,8 @@ const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", ven
 /* ══════════════════════════════════════════════════════════════════════════
    CARD CANVAS
 ══════════════════════════════════════════════════════════════════════════ */
+// Interactive <canvas> preview of one card: draws background + elements, and lets
+// the user click-select and drag-reposition an element with the mouse.
 function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onMove }) {
   const ref  = useRef(null);
   const drag = useRef(null);
@@ -415,6 +445,8 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
   const scaleX   = cw / displayW;
   const scaleY   = ch / displayH;
 
+  // Full repaint: background (or placeholder gradient) then every element, with a
+  // dashed selection outline around whichever element is currently selected
   const draw = useCallback(() => {
     const cv = ref.current; if (!cv) return;
     const ctx = cv.getContext("2d");
@@ -468,13 +500,18 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
 
   useEffect(() => { draw(); }, [draw]);
 
+  // Hit-tests canvas coords against elements (topmost/last-in-array first) for click-selection
   const hitEl  = (cx,cy) => [...elements].reverse().find((el) => {
     if (el.type==="text") { const hitW=200; const dx=el.align==="center"?el.x-hitW/2:el.align==="right"?el.x-hitW:el.x; return cx>=dx-4&&cx<=dx+hitW+4&&cy>=el.y-el.fontSize&&cy<=el.y+8; }
     return cx>=el.x&&cx<=el.x+el.size&&cy>=el.y&&cy<=el.y+el.size;
   });
+  // Converts a mouse event's client coords to canvas-space coords (accounts for display scaling)
   const toCv   = (e) => { const r=ref.current.getBoundingClientRect(); return {cx:(e.clientX-r.left)*scaleX,cy:(e.clientY-r.top)*scaleY}; };
+  // Mouse-down: select the element under the cursor (or deselect) and start a drag
   const onDown = (e) => { const {cx,cy}=toCv(e); const el=hitEl(cx,cy); if(el){onSelect(el.id);drag.current={id:el.id,ox:cx-el.x,oy:cy-el.y};}else onSelect(null); };
+  // Mouse-move: while dragging, report the new element position up to the parent
   const onMov  = (e) => { if(!drag.current)return; const {cx,cy}=toCv(e); onMove(drag.current.id,cx-drag.current.ox,cy-drag.current.oy); };
+  // Mouse-up/leave: end the current drag
   const onUp   = () => { drag.current=null; };
 
   return (
@@ -486,6 +523,9 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
 }
 
 /* ── Export ──────────────────────────────────────────────────────────── */
+// Rasterises one card (background + text/QR elements) to a PNG data-URL, off-screen,
+// for download or upload. QR images load asynchronously, so the promise only resolves
+// once every QR element has finished drawing (or failed).
 function exportCard(bgImage, bgSize, elements, record) {
   return new Promise((resolve) => {
     const cw = bgSize?.w||DEFAULT_W; const ch = bgSize?.h||DEFAULT_H;
@@ -529,6 +569,7 @@ function exportCard(bgImage, bgSize, elements, record) {
 }
 
 /* ── Small components ─────────────────────────────────────────────────── */
+// Colored status pill for a record's WhatsApp send status (idle/sending/sent/notSent/invalid)
 function WaBadge({ status }) {
   const styles = {
     idle:    { cls:"badge-idle",    icon:"○", label:"Not Sent", extra:{} },
@@ -541,6 +582,7 @@ function WaBadge({ status }) {
   return <span className={`nk-badge ${cls}`} style={extra}>{icon} {label}</span>;
 }
 
+// Compact icon-style action button used inside table rows (WA/SMS/download/edit actions)
 function Sb({ bg, col, border, children, onClick, title, disabled }) {
   return (
     <button className="nk-btn-sm" onClick={onClick} title={title} disabled={disabled}
@@ -550,10 +592,14 @@ function Sb({ bg, col, border, children, onClick, title, disabled }) {
   );
 }
 
+// One row of the Contacts table: shows WA/SMS status badges, lets the phone number be
+// edited inline, and exposes per-row Send WA / Send SMS / Download PNG actions
 function RecordRow({ rec, idx, onEdit, onSendWa, onDownload, onSendSms, isActive, onActivate }) {
   const [editing,setEditing] = useState(false);
   const [phone,setPhone]     = useState("");
+  // Enter inline phone-edit mode, seeded with the current value
   const startEdit = () => { setPhone(rec.phone||""); setEditing(true); };
+  // Commit the edited phone number back to the parent's records array and exit edit mode
   const save = () => { onEdit(idx,"phone",phone); setEditing(false); };
   return (
     <tr className={isActive?"row-active":""}>
@@ -597,8 +643,12 @@ function RecordRow({ rec, idx, onEdit, onSendWa, onDownload, onSendSms, isActive
 /* ══════════════════════════════════════════════════════════════════════════
    EVENT MODAL  (Create / Edit)
 ══════════════════════════════════════════════════════════════════════════ */
+// Create/Edit form modal for an event's details (username, type, venue, dates, status).
+// Purely local form state until "Save Event" calls onSave(form) — the parent (App)
+// owns the actual Supabase write via persistEvent/onModalSave.
 function EventModal({ initial, onSave, onClose, saving }) {
   const [form, setForm] = useState({ ...BLANK_EVENT, ...initial });
+  // Returns a field-specific onChange handler that writes one key into the form state
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
   return (
     <div className="nk-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
@@ -670,6 +720,9 @@ const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. 
 /* ══════════════════════════════════════════════════════════════════════════
    MAIN APP
 ══════════════════════════════════════════════════════════════════════════ */
+// Top-level app: owns every piece of state (canvas, records, event, SMS, WhatsApp,
+// templates, auth) and renders the tabbed UI. See the file header comment for the
+// overall data flow; section comments below mark each state/logic group.
 export default function App() {
   /* ── Canvas ── */
   const [bgImage,   setBgImage]   = useState(null);
@@ -685,7 +738,7 @@ export default function App() {
   const [records,   setRecords]   = useState([
     { name:"Nazael Ezekiel",     cardType:"SINGLE", phone:"0712345678", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
     { name:"Denis Mwambuja",     cardType:"DOUBLE", phone:"0756789012", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
-    { name:"Noberth Nikombolwe", cardType:"20",     phone:"",           waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
+    { name:"Noberth Nikombolwe", cardType:"20",     phone:"0750301111", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
   ]);
   const [activeIdx, setActiveIdx] = useState(0);
 
@@ -721,9 +774,12 @@ export default function App() {
 
   /* ── SMS ── */
   const [smsMessage,      setSmsMessage]      = useState(DEFAULT_SMS_MESSAGE);
-  const smsSaveTimer   = useRef(null);
+  const [smsMsgSaving,   setSmsMsgSaving]    = useState(false);
   const smsPersistedMsg = useRef(null);   // last value saved to / loaded from DB — skip redundant writes
-  const smsSettings = { bearerToken:"dc677ab4eddbafd7dfb35b115c91a9bc", senderId:"NIKADI" };
+  const smsSettings = {
+    bearerToken: import.meta.env.VITE_SMS_BEARER_TOKEN || "",
+    senderId:    import.meta.env.VITE_SMS_SENDER_ID || "NIKADI",
+  };
   const [smsSending,      setSmsSending]      = useState(false);
   const [smsLog,          setSmsLog]          = useState([]);
   const [smsBalance,      setSmsBalance]      = useState(null);
@@ -734,10 +790,13 @@ export default function App() {
 
   /* ── Toast ── */
   const [toast, setToast] = useState(null);
+  // Shows a transient toast (success/warn/info) that auto-dismisses after 4.5s
   const showToast = (msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4500); };
 
   /* ── Auth ── */
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
+  // Resolves the current Supabase session on mount and keeps `user` in sync with
+  // subsequent sign-in/sign-out events; gates the whole app behind <LoginPage>
   useEffect(() => {
     if (!supabase) { setUser(null); return; }
     supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
@@ -753,6 +812,8 @@ export default function App() {
   const ch = bgSize?.h || DEFAULT_H;
 
   /* ── Supabase ping ── */
+  // On mount, does a cheap count query to confirm Supabase is reachable and drives
+  // the connected/disconnected/unconfigured status dot in the header
   useEffect(() => {
     if (!supabase) return;
     supabase.from("events").select("id", { count:"exact", head:true })
@@ -798,27 +859,28 @@ export default function App() {
     }, 600);
   }, [elements, templateKey]);
 
-  /* ── SMS message: auto-save to DB for the loaded event ── */
-  useEffect(() => {
-    if (!supabase || !savedEventId) return;
-    if (smsMessage === smsPersistedMsg.current) return;
-    clearTimeout(smsSaveTimer.current);
-    smsSaveTimer.current = setTimeout(async () => {
-      const { error } = await supabase.from("events").update({ sms_message: smsMessage }).eq("id", savedEventId);
-      if (error) { showToast("SMS message save failed: " + error.message, "warn"); return; }
-      smsPersistedMsg.current = smsMessage;
-      setSavedEvents(es => es.map(e => e.id === savedEventId ? { ...e, sms_message: smsMessage } : e));
-    }, 800);
-    return () => clearTimeout(smsSaveTimer.current);
-  }, [smsMessage, savedEventId]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* ── SMS message: manual save to DB for the loaded event ── */
+  const saveSmsMessage = async () => {
+    if (!supabase || !savedEventId) { showToast("Save the event first","warn"); return; }
+    setSmsMsgSaving(true);
+    const { error } = await supabase.from("events").update({ sms_message: smsMessage }).eq("id", savedEventId);
+    setSmsMsgSaving(false);
+    if (error) { showToast("SMS message save failed: " + error.message, "warn"); return; }
+    smsPersistedMsg.current = smsMessage;
+    setSavedEvents(es => es.map(e => e.id === savedEventId ? { ...e, sms_message: smsMessage } : e));
+    showToast("SMS message saved", "success");
+  };
 
   /* ── Load saved events ── */
+  // Fetches the 50 most-recent events from Supabase for the Events tab / search dropdown
   const loadSavedEvents = async () => {
     if (!supabase) return [];
     const { data, error } = await supabase.from("events").select("*").order("created_at", { ascending:false }).limit(50);
     if (!error && data) { setSavedEvents(data); return data; }
     return [];
   };
+  // On first mount: load templates + events, then reopen whichever event was last
+  // active (persisted in localStorage under "nikadi_last_event")
   useEffect(() => {
     if (!supabase) return;
     loadSavedTemplates();
@@ -848,6 +910,8 @@ export default function App() {
   }, [eventDropdownOpen]);
 
   /* ── Upload template to Supabase Storage ── */
+  // Uploads a background image (data-URL) to the `templates` Storage bucket and
+  // returns its public URL, or null on failure (caller falls back gracefully)
   const uploadTemplateToStorage = async (dataUrl) => {
     if (!supabase) return null;
     try {
@@ -863,12 +927,14 @@ export default function App() {
   };
 
   /* ── Saved templates: load / save / apply ── */
+  // Fetches the 50 most-recent saved templates for the template picker list
   const loadSavedTemplates = async () => {
     if (!supabase) return;
     const { data, error } = await supabase.from("saved_templates").select("*").order("created_at", { ascending:false }).limit(50);
     if (!error && data) setSavedTemplates(data);
   };
 
+  // Saves the current background image + element layout as a new named, reusable template
   const saveCurrentTemplate = async () => {
     if (!supabase)   { showToast("Supabase not configured","warn"); return; }
     if (!bgImage)    { showToast("No template loaded to save","warn"); return; }
@@ -894,6 +960,8 @@ export default function App() {
     loadSavedTemplates();
   };
 
+  // Loads a saved template's background image + element layout onto the canvas.
+  // If the template has no image, only its layout is applied (over the current bg).
   const applySavedTemplate = async (tpl) => {
     if (!tpl.cover_image_url) {
       if (tpl.elements_layout?.length) {
@@ -932,6 +1000,7 @@ export default function App() {
     finally { setLoadingTemplate(false); }
   };
 
+  // Deletes a saved template row from Supabase and refreshes the template list
   const deleteSavedTemplate = async (tpl) => {
     if (!supabase) return;
     const { error } = await supabase.from("saved_templates").delete().eq("id", tpl.id);
@@ -941,6 +1010,9 @@ export default function App() {
   };
 
   /* ── Background upload ── */
+  // File-input handler for manually picking a background image: loads it onto the
+  // canvas (which triggers the layout-restore effect via templateKey), and — if no
+  // template is attached to the current event yet — also uploads it to Storage
   const onBgUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const reader = new FileReader();
@@ -963,11 +1035,14 @@ export default function App() {
     reader.readAsDataURL(f);
   };
 
+  // Clears the canvas entirely: no background image, default element layout
   const resetTemplate = () => {
     setBgImage(null); setBgSize(null); setCoverUrl(null); setTemplateKey(null);
     setElements(defaultElements()); setLayoutRestored(false);
   };
 
+  // Discards the locally-cached layout for this template (localStorage) and
+  // restores the default element positions
   const resetLayout = () => {
     if (!templateKey) return;
     localStorage.removeItem(LAYOUT_PREFIX + templateKey);
@@ -977,6 +1052,9 @@ export default function App() {
   };
 
   /* ── Excel / CSV upload ── */
+  // Parses an uploaded Excel/CSV file (via SheetJS) into `records`, normalising
+  // common column-name variants (name / cardType|card / phone|phoneNumber|mobile);
+  // any other columns pass through untouched
   const onExcelUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
@@ -1002,6 +1080,8 @@ export default function App() {
   };
 
   /* ── VCard CSV upload ── */
+  // Parses an uploaded CSV into `vcardContacts` (name + phone only) feeding the
+  // VCard tab's export — independent of the main `records` table
   const onVcardCsvUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
@@ -1024,6 +1104,7 @@ export default function App() {
     r.readAsArrayBuffer(f);
   };
 
+  // Downloads all vcardContacts as a single .vcf file named after the current event
   const downloadVCard = () => {
     if (!vcardContacts.length) { showToast("Upload a CSV first","warn"); return; }
     const eu = eventData.username || "Nikadi";
@@ -1032,6 +1113,9 @@ export default function App() {
   };
 
   /* ── Save / upsert event ── */
+  // Inserts a new event row or updates an existing one (branches on `currentId`).
+  // Also stamps the designer's cover image, element layout, and — only when saving
+  // the currently-loaded event, not a brand-new one — the SMS message.
   const persistEvent = async (formData, currentId = savedEventId) => {
     if (!supabase) { showToast("Supabase not configured","warn"); return null; }
     setIsSaving(true);
@@ -1072,6 +1156,8 @@ export default function App() {
     }
   };
 
+  // Replaces this event's `event_cards` rows with the current `records` array
+  // (delete-then-insert, so it's a full overwrite, not a merge)
   const saveCards = async (eventId) => {
     if (!supabase || !records.length) return;
     await supabase.from("event_cards").delete().eq("event_id", eventId);
@@ -1088,6 +1174,8 @@ export default function App() {
     else showToast(`${records.length} cards saved`, "success");
   };
 
+  // Manually persists the current element layout to the loaded event's DB row
+  // (and refreshes the localStorage layout cache to match)
   const saveLayout = async () => {
     if (!supabase || !savedEventId) { showToast("Save the event first","warn"); return; }
     const { error } = await supabase.from("events").update({ elements_layout: elements }).eq("id", savedEventId);
@@ -1098,12 +1186,16 @@ export default function App() {
     }
   };
 
+  // EventModal's onSave callback: persists the form via persistEvent, then closes
+  // the modal only if the save actually succeeded
   const onModalSave = async (formData) => {
     const id = await persistEvent(formData, formData.id || null);
     if (id) setModalEvent(null);
   };
 
   /* ── Delete event ── */
+  // Deletes an event row from Supabase (cascades to its cards at the DB level);
+  // if it was the currently-loaded event, also clears designer state back to blank
   const deleteEvent = async (ev) => {
     if (!supabase) return;
     const { error } = await supabase.from("events").delete().eq("id", ev.id);
@@ -1111,7 +1203,6 @@ export default function App() {
     setSavedEvents(es => es.filter(e => e.id !== ev.id));
     if (savedEventId === ev.id) {
       setSavedEventId(null); setEventData(BLANK_EVENT);
-      clearTimeout(smsSaveTimer.current);
       smsPersistedMsg.current = null;
       setSmsMessage(DEFAULT_SMS_MESSAGE);
     }
@@ -1120,6 +1211,10 @@ export default function App() {
   };
 
   /* ── Core: load event data + template from DB into the designer ── */
+  // The main "open an event" routine: populates the event form, SMS message,
+  // background image + element layout (fetched from Storage, only if the cover URL
+  // actually changed), and this event's saved contact cards. Called from the
+  // sidebar dropdown, the Events tab, and on-mount restore-last-event.
   const selectEvent = async (eventIdOrObj) => {
     const ev = typeof eventIdOrObj === "string"
       ? savedEvents.find(e => e.id === eventIdOrObj)
@@ -1199,31 +1294,40 @@ export default function App() {
   };
 
   /* ── Sidebar dropdown handler ── */
+  // Loads the chosen event via selectEvent, or resets to a blank event when "— none —" is picked
   const onEventSelect = (id) => {
     if (!id) { setEventData(BLANK_EVENT); setSavedEventId(null); setCoverUrl(null); return; }
     selectEvent(id);
   };
 
   /* ── Events tab: Create Cards button ── */
+  // Shortcut: load the event, then jump straight to the Design tab
   const createCardsFromEvent = async (ev) => {
     await selectEvent(ev);
     setTab("design");
   };
 
   /* ── Canvas helpers ── */
+  // Drag handler: updates one element's x/y as CardCanvas reports drag movement
   const onMove     = (id,x,y) => setElements(els => els.map(el => el.id===id ? {...el,x,y} : el));
+  // Updates a single property (fontSize/color/align/etc.) on the currently selected element
   const updateEl   = (prop,val) => setElements(els => els.map(el => el.id===selected ? {...el,[prop]:val} : el));
+  // Updates a single field on one contact record (used by RecordRow's inline phone edit)
   const editRecord = (idx,field,val) => setRecords(rs => rs.map((r,i) => i===idx ? {...r,[field]:val} : r));
 
   /* ── WhatsApp API ── */
   const WA_BASE = import.meta.env.DEV
     ? "/wa-proxy"
     : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-wa`;
-  const WA_BEARER = "dc677ab4eddbafd7dfb35b115c91a9bc";
+  const WA_BEARER = import.meta.env.VITE_WA_BEARER_TOKEN || "";
 
+  // Fills the {name}/{cardType} placeholders in the SMS template for one record
   const buildSmsMsg = (rec) => smsMessage.replace("{name}",rec.name||"").replace("{cardType}",rec.cardType||"");
 
   /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
+  // Re-encodes a card PNG as JPEG, iteratively lowering quality (and downscaling
+  // width first) until the result is under `maxKb` — keeps WhatsApp image uploads
+  // fast and comfortably under the provider's size limit
   const compressCard = (dataUrl, maxKb = 2800, quality = 0.88) => new Promise(resolve => {
     const img = new Image();
     img.onload = () => {
@@ -1247,6 +1351,9 @@ export default function App() {
     img.src = dataUrl;
   });
 
+  // Renders one record's card, compresses it to JPEG, and uploads it to the
+  // `wa-cards` Storage bucket; stores the resulting public URL on the record so
+  // sendWaSingle can attach it as the WhatsApp message's image header
   const uploadCardSingle = async (idx) => {
     const rec = records[idx];
     if (!supabase) throw new Error("Supabase not configured");
@@ -1267,6 +1374,8 @@ export default function App() {
     return publicUrl;
   };
 
+  // Runs uploadCardSingle for every record, one at a time, tracking per-row
+  // progress in uploadLog for the "Upload Cards" progress list
   const uploadAllCards = async () => {
     if (!supabase) { showToast("Supabase not configured", "warn"); return; }
     setUploadingCards(true);
@@ -1287,6 +1396,10 @@ export default function App() {
   };
 
   /* Poll delivery report until we get a terminal status (runs in background) */
+  // Re-checks a "pending" WA message's delivery report a few times (with increasing
+  // delays) to catch late rejections — e.g. the number turns out not to be on
+  // WhatsApp — after it was already optimistically marked Sent. groupId/id are the
+  // provider's status codes; see the branches below for what each combination means.
   const pollWaStatus = async (messageId, idx, recName) => {
     const delays = [4000, 6000, 8000, 10000, 12000];
     for (const delay of delays) {
@@ -1326,6 +1439,10 @@ export default function App() {
   };
 
   /* Step 2 — Send WA using the already-uploaded cardUrl */
+  // Sends one WhatsApp template message (image header = the record's uploaded
+  // card) via messaging-service.co.tz, and interprets the provider's response
+  // status codes (groupId/id) to mark the record Sent, Invalid, or Not Sent.
+  // A "pending" (groupId 18) response kicks off pollWaStatus in the background.
   const sendWaSingle = async (idx) => {
     const rec = records[idx];
     if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return; }
@@ -1416,6 +1533,9 @@ export default function App() {
     }
   };
 
+  // Sends WhatsApp messages to every record that has both a phone and an already-
+  // uploaded card, one at a time with a 1s pacing delay between sends, then saves
+  // the updated statuses back to `event_cards` if an event is loaded
   const sendWaAll = async () => {
     const ready = records.map((r,i)=>({r,i})).filter(({r})=>r.phone && r.cardUrl);
     if (!ready.length) { showToast("No cards uploaded yet — upload first","warn"); return; }
@@ -1430,6 +1550,7 @@ export default function App() {
     if (savedEventId) await saveCards(savedEventId);
   };
 
+  // Exports an Excel (.xlsx) report of WhatsApp send status per record, named after the event
   const downloadWaReport = () => {
     const statusLabel = {
       [WA.sent]:    "Sent",
@@ -1452,12 +1573,14 @@ export default function App() {
     XLSX.writeFile(wb, `${evName}_WA_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
+  // Downloads one record's rendered card as a single PNG file
   const downloadCard = async (idx) => {
     const rec = records[idx];
     const url = await exportCard(bgImage, bgSize, designElements, rec);
     const a = document.createElement("a"); a.download=`${(rec.name||`Record_${idx}`).replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
   };
 
+  // Renders every record's card and zips them into a single "nikadi_cards.zip" download
   const downloadAll = async () => {
     if (!records.length) { showToast("No records","warn"); return; }
     showToast(`Zipping ${records.length} cards…`,"info");
@@ -1479,6 +1602,7 @@ export default function App() {
     : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-sms`;
   const SMS_API = `${SMS_BASE}/api/sms/v2`;
 
+  // Queries the messaging-service.co.tz balance endpoint for remaining SMS credits
   const fetchSmsBalance = async () => {
     setSmsBalanceLoading(true);
     try {
@@ -1498,6 +1622,8 @@ export default function App() {
     setSmsBalanceLoading(false);
   };
 
+  // Sends a single SMS to one record (rendered from the SMS template) and updates
+  // its smsStatus from the provider's response groupId (18=sent, 20=delivered)
   const sendSmsToOne = async (idx) => {
     const rec = records[idx];
     if (!rec.phone) { showToast("No phone for " + rec.name, "warn"); return; }
@@ -1536,6 +1662,9 @@ export default function App() {
     }
   };
 
+  // Sends SMS to every record with a phone number in one bulk API call, then maps
+  // the per-recipient results back onto `records` by matching normalised phone
+  // numbers, and saves the updated statuses if an event is loaded
   const sendAllSms = async () => {
     const withPhone = records.filter(r => r.phone);
     if (!withPhone.length) { showToast("No phone numbers", "warn"); return; }
@@ -1583,6 +1712,7 @@ export default function App() {
     if (savedEventId) await saveCards(savedEventId);
   };
 
+  // Exports phone+message pairs as a CSV, for sending via a third-party bulk SMS tool
   const downloadSmsCsv = () => {
     if (!records.length) { showToast("No records","warn"); return; }
     const rows = [["Phone","Message"], ...records.filter(r=>r.phone).map(r=>[`+${normalisePhone(r.phone)}`,buildSmsMsg(r)])];
@@ -2134,9 +2264,23 @@ export default function App() {
                     <div className="nk-sec nk-sec-teal">SMS Message</div>
                     <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>
                       Separate from WhatsApp — sent as plain SMS.
-                      {savedEventId && <span style={{color:N.teal}}> Auto-saved to this event.</span>}
                     </p>
                     <textarea className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8,marginBottom:14}}>
+                      <button
+                        className="nk-btn nk-btn-teal"
+                        style={{fontSize:11,padding:"6px 14px"}}
+                        onClick={saveSmsMessage}
+                        disabled={smsMsgSaving || !savedEventId || smsMessage===smsPersistedMsg.current}>
+                        {smsMsgSaving?"⏳ Saving…":"💾 Save Template"}
+                      </button>
+                      {savedEventId && smsMessage!==smsPersistedMsg.current && (
+                        <span style={{fontSize:11,color:N.amber}}>● Unsaved changes</span>
+                      )}
+                      {!savedEventId && (
+                        <span style={{fontSize:11,color:N.textDim}}>Save the event first to persist this template</span>
+                      )}
+                    </div>
                     <p style={{fontSize:10,color:N.textDim,lineHeight:1.7,marginBottom:14}}>
                       Variables: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{name}"}</code> &nbsp;
                       <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{cardType}"}</code>

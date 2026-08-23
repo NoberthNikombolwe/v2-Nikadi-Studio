@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
-const BEARER = "dc677ab4eddbafd7dfb35b115c91a9bc";
+const BEARER = Deno.env.get("SMS_BEARER_TOKEN") ?? "";
 const UPSTREAM = "https://messaging-service.co.tz";
 
 const cors = {

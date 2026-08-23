@@ -124,14 +124,21 @@ This installs:
 
 ## Step 4 — Configure Environment Variables
 
-Create a file named `.env.local` in the `studio/` folder:
+Copy `.env.example` to `.env.local` in the `studio/` folder:
+
+```bash
+cp .env.example .env.local
+```
 
 ```env
 VITE_SUPABASE_URL=https://your-project-ref.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key-here
+VITE_SMS_BEARER_TOKEN=your-messaging-service-bearer-token
+VITE_SMS_SENDER_ID=NIKADI
+VITE_WA_BEARER_TOKEN=your-messaging-service-bearer-token
 ```
 
-Replace the values with the ones you copied from Supabase in Step 3.
+Replace the Supabase values with the ones you copied from Supabase in Step 3. Get the messaging-service.co.tz bearer token from your account there.
 
 > `.env.local` is listed in `.gitignore` and will never be committed to git.
 
@@ -215,7 +222,16 @@ npx supabase login
 
 This opens your browser to authenticate with your Supabase account.
 
-### 8.3 — Deploy the Function
+### 8.3 — Set the SMS Bearer Token Secret
+
+The function reads its bearer token from a server-side secret, not from source:
+
+```bash
+npx supabase secrets set SMS_BEARER_TOKEN=your-messaging-service-bearer-token \
+  --project-ref your-project-ref
+```
+
+### 8.4 — Deploy the Function
 
 ```bash
 npx supabase functions deploy send-sms \
@@ -225,7 +241,7 @@ npx supabase functions deploy send-sms \
 
 Replace `your-project-ref` with the short ID from your Supabase project URL (e.g. `cixtbtzxlnohxgeewtqc`).
 
-### 8.4 — Verify
+### 8.5 — Verify
 
 After deployment the function will be live at:
 
@@ -285,10 +301,10 @@ Nikadi Studio uses the [messaging-service.co.tz](https://messaging-service.co.tz
 ### Authentication
 
 ```
-Authorization: Bearer dc677ab4eddbafd7dfb35b115c91a9bc
+Authorization: Bearer <your-messaging-service-bearer-token>
 ```
 
-The Bearer token is hardcoded in `App.jsx` (`smsSettings.bearerToken`). To change it, update that constant.
+In development, the token comes from `VITE_SMS_BEARER_TOKEN` / `VITE_WA_BEARER_TOKEN` in `.env.local` (see Step 4). In production, the Edge Function reads it from the `SMS_BEARER_TOKEN` Supabase secret (see Step 8.3) instead of the browser-exposed value.
 
 ### Endpoints Used
 
@@ -420,4 +436,4 @@ The canvas is exported as a PNG image using `canvas.toDataURL("image/png")`.
 - **No user authentication** — the app uses the Supabase `anon` key with open RLS policies. It is designed for internal/private use. Do not expose to the public internet without adding auth.
 - **WhatsApp sending is semi-manual** — each `wa.me` link opens a browser tab that you must confirm. Full automation requires the WhatsApp Business API.
 - **SMS delivery status is immediate only** — the `Delivered` status is based on the API's synchronous response (`groupId: 20`). For asynchronous delivery reports you would need to set up a webhook.
-- **Bearer token is client-side** — the SMS API token is embedded in the frontend. For stricter security, move it to a server-side environment variable in the Supabase Edge Function.
+- **WhatsApp bearer token is still client-side** — `VITE_WA_BEARER_TOKEN` is embedded in the frontend bundle because there is no `send-wa` Edge Function in this repo yet. The SMS token no longer has this problem in production: the `send-sms` Edge Function forwards requests using its own `SMS_BEARER_TOKEN` secret, ignoring whatever the client sends.
