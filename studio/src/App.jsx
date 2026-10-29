@@ -2,7 +2,6 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
 import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 import { supabase } from "./lib/supabase";
-import LoginPage from "./LoginPage";
 
 /* ══════════════════════════════════════════════════════════════════════════
    NIKADI STUDIO — event card designer & distribution tool
@@ -29,7 +28,20 @@ import LoginPage from "./LoginPage";
 /* ══════════════════════════════════════════════════════════════════════════
    BRAND
 ══════════════════════════════════════════════════════════════════════════ */
-const FONTS = "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap";
+const FONTS = "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Poppins:wght@400;500;600;700;800&family=Montserrat:wght@400;500;600;700;800&family=Raleway:wght@400;500;600;700;800&family=Open+Sans:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Playfair+Display:wght@400;500;600;700&family=Oswald:wght@400;500;600;700&family=Lato:wght@400;700&family=Dancing+Script:wght@400;500;600;700&display=swap";
+
+const FONT_OPTIONS = [
+  { label:"Plus Jakarta Sans", value:"Plus Jakarta Sans" },
+  { label:"Poppins",           value:"Poppins" },
+  { label:"Montserrat",        value:"Montserrat" },
+  { label:"Raleway",           value:"Raleway" },
+  { label:"Open Sans",         value:"Open Sans" },
+  { label:"Roboto",            value:"Roboto" },
+  { label:"Playfair Display",  value:"Playfair Display" },
+  { label:"Oswald",            value:"Oswald" },
+  { label:"Lato",              value:"Lato" },
+  { label:"Dancing Script",    value:"Dancing Script" },
+];
 
 const N = {
   navy900:"#050d1f", navy800:"#0a1628", navy700:"#0d1f3c", navy600:"#102848",
@@ -422,8 +434,8 @@ const generateVcf = (contacts, eventUsername) =>
 const DEFAULT_W = 440, DEFAULT_H = 280, MAX_DISPLAY_W = 780;
 // Fallback card element layout (name, card type, QR) used for a blank/new template
 const defaultElements = () => [
-  { id:"name",     label:"Name",      type:"text", field:"name",     x:220, y:170, fontSize:22, color:"#0d1f3c", bold:true,  align:"center" },
-  { id:"cardtype", label:"Card Type", type:"text", field:"cardType", x:220, y:200, fontSize:13, color:"#2563b0", bold:false, align:"center" },
+  { id:"name",     label:"Name",      type:"text", field:"name",     x:220, y:170, fontSize:22, color:"#0d1f3c", bold:true,  align:"center", fontFamily:"Plus Jakarta Sans" },
+  { id:"cardtype", label:"Card Type", type:"text", field:"cardType", x:220, y:200, fontSize:13, color:"#2563b0", bold:false, align:"center", fontFamily:"Plus Jakarta Sans" },
   { id:"qr",       label:"QR Code",   type:"qr",                     x:300, y:95,  size:120 },
 ];
 const WA  = { idle:"idle", sending:"sending", sent:"sent", notSent:"notSent", invalid:"invalid" };
@@ -455,7 +467,8 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
       elements.forEach((el) => {
         if (el.type === "text") {
           const val = record?.[el.field] || `[${el.label}]`;
-          ctx.font = `${el.bold?"bold ":""}${el.fontSize}px 'Plus Jakarta Sans', sans-serif`;
+          const ff = el.fontFamily || "Plus Jakarta Sans";
+          ctx.font = `${el.bold?"bold ":""}${el.fontSize}px '${ff}', sans-serif`;
           ctx.fillStyle = el.color; ctx.textAlign = el.align || "left";
           ctx.fillText(val, el.x, el.y); ctx.textAlign = "left";
           if (selected === el.id) {
@@ -534,7 +547,8 @@ function exportCard(bgImage, bgSize, elements, record) {
     const renderText = () => elements.forEach((el) => {
       if (el.type==="text") {
         const val = record?.[el.field]||"";
-        ctx.font=`${el.bold?"bold ":""}${el.fontSize}px 'Plus Jakarta Sans', sans-serif`;
+        const ff = el.fontFamily || "Plus Jakarta Sans";
+        ctx.font=`${el.bold?"bold ":""}${el.fontSize}px '${ff}', sans-serif`;
         ctx.fillStyle=el.color; ctx.textAlign=el.align||"left";
         ctx.fillText(val,el.x,el.y); ctx.textAlign="left";
       }
@@ -773,6 +787,7 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState(null); // event to confirm-delete
 
   /* ── SMS ── */
+<<<<<<< Updated upstream
   const [smsMessage,      setSmsMessage]      = useState(DEFAULT_SMS_MESSAGE);
   const [smsMsgSaving,   setSmsMsgSaving]    = useState(false);
   const smsPersistedMsg = useRef(null);   // last value saved to / loaded from DB — skip redundant writes
@@ -780,6 +795,14 @@ export default function App() {
     bearerToken: import.meta.env.VITE_SMS_BEARER_TOKEN || "",
     senderId:    import.meta.env.VITE_SMS_SENDER_ID || "NIKADI",
   };
+=======
+  const [smsMessage,      setSmsMessage]      = useState("Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!");
+  const [csvColumns,      setCsvColumns]      = useState(["name","cardType"]);
+  const smsTextareaRef = useRef(null);
+  const smsDraftTimerRef = useRef(null);
+  const [smsDraftSaved,   setSmsDraftSaved]   = useState(false);
+  const smsSettings = { bearerToken:"dc677ab4eddbafd7dfb35b115c91a9bc", senderId:"NIKADI" };
+>>>>>>> Stashed changes
   const [smsSending,      setSmsSending]      = useState(false);
   const [smsLog,          setSmsLog]          = useState([]);
   const [smsBalance,      setSmsBalance]      = useState(null);
@@ -793,6 +816,7 @@ export default function App() {
   // Shows a transient toast (success/warn/info) that auto-dismisses after 4.5s
   const showToast = (msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4500); };
 
+<<<<<<< Updated upstream
   /* ── Auth ── */
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
   // Resolves the current Supabase session on mount and keeps `user` in sync with
@@ -806,6 +830,8 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
+=======
+>>>>>>> Stashed changes
   const activeRecord = records[activeIdx] || {};
   const selectedEl   = elements.find(e => e.id === selected);
   const cw = bgSize?.w || DEFAULT_W;
@@ -879,10 +905,15 @@ export default function App() {
     if (!error && data) { setSavedEvents(data); return data; }
     return [];
   };
+<<<<<<< Updated upstream
   // On first mount: load templates + events, then reopen whichever event was last
   // active (persisted in localStorage under "nikadi_last_event")
+=======
+  const autoLoadDone = useRef(false);
+>>>>>>> Stashed changes
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase || autoLoadDone.current) return;
+    autoLoadDone.current = true;
     loadSavedTemplates();
     loadSavedEvents().then((events) => {
       const lastId = localStorage.getItem("nikadi_last_event");
@@ -898,6 +929,18 @@ export default function App() {
     if (savedEventId) localStorage.setItem("nikadi_last_event", savedEventId);
     else localStorage.removeItem("nikadi_last_event");
   }, [savedEventId]);
+
+  /* Auto-save SMS draft to DB whenever message changes (debounced 1.5 s) */
+  useEffect(() => {
+    if (!supabase || !savedEventId) return;
+    if (smsDraftTimerRef.current) clearTimeout(smsDraftTimerRef.current);
+    setSmsDraftSaved(false);
+    smsDraftTimerRef.current = setTimeout(async () => {
+      const { error } = await supabase.from("events").update({ sms_draft: smsMessage }).eq("id", savedEventId);
+      if (!error) { setSmsDraftSaved(true); setTimeout(() => setSmsDraftSaved(false), 2500); }
+    }, 1500);
+    return () => clearTimeout(smsDraftTimerRef.current);
+  }, [smsMessage, savedEventId]);
 
   /* Close event dropdown on outside click */
   useEffect(() => {
@@ -1062,17 +1105,22 @@ export default function App() {
       const wb   = XLSX.read(ev.target.result, { type:"array" });
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
+      const colMap = {};  // originalKey → placeholder key
+      const extraCols = [];
       const norm = data.map(row => {
         const n = { waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" };
         Object.keys(row).forEach(k => {
           const kl = k.trim().toLowerCase().replace(/[\s_]/g,"");
-          if      (kl==="name")                                             n.name     = String(row[k]);
-          else if (kl==="cardtype"||kl==="card")                           n.cardType = String(row[k]);
-          else if (kl==="phone"||kl==="phonenumber"||kl==="mobile")        n.phone    = String(row[k]);
-          else n[k] = row[k];
+          if      (kl==="name")                                      { n.name     = String(row[k]); colMap[k]="name"; }
+          else if (kl==="cardtype"||kl==="card")                    { n.cardType = String(row[k]); colMap[k]="cardType"; }
+          else if (kl==="phone"||kl==="phonenumber"||kl==="mobile") { n.phone    = String(row[k]); colMap[k]="phone"; }
+          else { n[k] = String(row[k]); if (!extraCols.includes(k)) extraCols.push(k); }
         });
         return n;
       });
+      // Build ordered column list: standard first, then extras
+      const standard = ["name","cardType"].filter(c => Object.values(colMap).includes(c));
+      setCsvColumns([...standard, ...extraCols]);
       setRecords(norm); setActiveIdx(0);
       showToast(`Loaded ${norm.length} records`, "success");
     };
@@ -1126,7 +1174,11 @@ export default function App() {
         ...formData,
         cover_image_url: coverUrl||null,
         elements_layout: elements,
+<<<<<<< Updated upstream
         ...(isLoadedEvent ? { sms_message: smsMessage } : {}),
+=======
+        sms_draft:       smsMessage,
+>>>>>>> Stashed changes
         start_datetime: formData.start_datetime||null,
         end_datetime:   formData.end_datetime||null,
       };
@@ -1169,9 +1221,12 @@ export default function App() {
       wa_status:  r.waStatus||WA.idle,
       sms_status: r.smsStatus||SMS.pending,
     }));
-    const { error } = await supabase.from("event_cards").insert(rows);
+    const { data, error } = await supabase.from("event_cards").insert(rows).select("id");
     if (error) showToast("Cards save error: " + error.message, "warn");
-    else showToast(`${records.length} cards saved`, "success");
+    else {
+      if (data) setRecords(rs => rs.map((r, i) => data[i] ? {...r, dbId: data[i].id} : r));
+      showToast(`${records.length} cards saved`, "success");
+    }
   };
 
   // Manually persists the current element layout to the loaded event's DB row
@@ -1211,11 +1266,15 @@ export default function App() {
   };
 
   /* ── Core: load event data + template from DB into the designer ── */
+<<<<<<< Updated upstream
   // The main "open an event" routine: populates the event form, SMS message,
   // background image + element layout (fetched from Storage, only if the cover URL
   // actually changed), and this event's saved contact cards. Called from the
   // sidebar dropdown, the Events tab, and on-mount restore-last-event.
   const selectEvent = async (eventIdOrObj) => {
+=======
+  const selectEvent = async (eventIdOrObj, targetTab = "design") => {
+>>>>>>> Stashed changes
     const ev = typeof eventIdOrObj === "string"
       ? savedEvents.find(e => e.id === eventIdOrObj)
       : eventIdOrObj;
@@ -1233,6 +1292,7 @@ export default function App() {
       end_datetime:   ev.end_datetime   ? ev.end_datetime.slice(0,16)   : "",
     });
     setSavedEventId(ev.id);
+    if (ev.sms_draft) setSmsMessage(ev.sms_draft);
     setCoverUrl(ev.cover_image_url||null);
     smsPersistedMsg.current = ev.sms_message || DEFAULT_SMS_MESSAGE;
     setSmsMessage(smsPersistedMsg.current);
@@ -1273,24 +1333,24 @@ export default function App() {
       finally { setLoadingTemplate(false); }
     }
 
-    /* Load cards */
+    /* Load cards — always replace so a previous event's cards never linger */
     if (supabase) {
       const { data: cards } = await supabase.from("event_cards").select("*").eq("event_id", ev.id);
-      if (cards?.length) {
-        setRecords(cards.map(c => ({
-          name:      c.name||"",
-          cardType:  c.card_type||"",
-          phone:     c.phone||"",
-          waStatus:     c.wa_status||WA.idle,
-          smsStatus:    c.sms_status||SMS.pending,
-          cardUrl:      null,
-          uploadStatus: "idle",
-        })));
-        setActiveIdx(0);
-      }
+      setRecords((cards || []).map(c => ({
+        dbId:         c.id,
+        name:         c.name||"",
+        cardType:     c.card_type||"",
+        phone:        c.phone||"",
+        waStatus:     c.wa_status||WA.idle,
+        smsStatus:    c.sms_status||SMS.pending,
+        cardUrl:      null,
+        uploadStatus: "idle",
+      })));
+      setActiveIdx(0);
     }
 
     showToast(`"${ev.username}" loaded`, "success");
+    setTab(targetTab);
   };
 
   /* ── Sidebar dropdown handler ── */
@@ -1304,7 +1364,6 @@ export default function App() {
   // Shortcut: load the event, then jump straight to the Design tab
   const createCardsFromEvent = async (ev) => {
     await selectEvent(ev);
-    setTab("design");
   };
 
   /* ── Canvas helpers ── */
@@ -1321,8 +1380,17 @@ export default function App() {
     : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-wa`;
   const WA_BEARER = import.meta.env.VITE_WA_BEARER_TOKEN || "";
 
+<<<<<<< Updated upstream
   // Fills the {name}/{cardType} placeholders in the SMS template for one record
   const buildSmsMsg = (rec) => smsMessage.replace("{name}",rec.name||"").replace("{cardType}",rec.cardType||"");
+=======
+  const buildSmsMsg = (rec) => smsMessage.replace(/\{(\w+)\}/g, (_, key) => {
+    if (key === "name")     return rec.name     || "";
+    if (key === "cardType") return rec.cardType  || "";
+    if (key === "phone")    return rec.phone ? `+${normalisePhone(rec.phone)}` : "";
+    return rec[key] !== undefined ? String(rec[key]) : `{${key}}`;
+  });
+>>>>>>> Stashed changes
 
   /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
   // Re-encodes a card PNG as JPEG, iteratively lowering quality (and downscaling
@@ -1395,12 +1463,27 @@ export default function App() {
     showToast(`Upload done — ${ok} uploaded${fail ? `, ${fail} failed` : ""}`, ok ? "success" : "warn");
   };
 
+  /* Silently persist a single card's status to DB after each send */
+  const autoSaveCard = (dbId, waStatus, smsStatus) => {
+    if (!supabase || !savedEventId || !dbId) return;
+    const updates = {};
+    if (waStatus  !== undefined) updates.wa_status  = waStatus;
+    if (smsStatus !== undefined) updates.sms_status = smsStatus;
+    if (!Object.keys(updates).length) return;
+    supabase.from("event_cards").update(updates).eq("id", dbId)
+      .then(({ error }) => { if (error) console.warn("Auto-save card:", error.message); });
+  };
+
   /* Poll delivery report until we get a terminal status (runs in background) */
+<<<<<<< Updated upstream
   // Re-checks a "pending" WA message's delivery report a few times (with increasing
   // delays) to catch late rejections — e.g. the number turns out not to be on
   // WhatsApp — after it was already optimistically marked Sent. groupId/id are the
   // provider's status codes; see the branches below for what each combination means.
   const pollWaStatus = async (messageId, idx, recName) => {
+=======
+  const pollWaStatus = async (messageId, idx, recName, dbId) => {
+>>>>>>> Stashed changes
     const delays = [4000, 6000, 8000, 10000, 12000];
     for (const delay of delays) {
       await new Promise(r => setTimeout(r, delay));
@@ -1414,28 +1497,25 @@ export default function App() {
         if (!result) continue;
         const grp = result.status?.groupId;
         const rid = result.status?.id;
-        if (grp === 18) continue; // still pending, keep polling
+        if (grp === 18) continue;
         if (grp === 20 && [73, 109, 77].includes(rid)) {
-          // confirmed delivered — already marked sent, nothing to do
-          return;
+          return; // confirmed delivered — already marked sent
         }
-        if (
-          (grp === 20 && [75, 76, 78, 79, 80].includes(rid)) ||
-          grp === 19
-        ) {
+        if ((grp === 20 && [75, 76, 78, 79, 80].includes(rid)) || grp === 19) {
           setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
           setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"invalid"} : x));
+          autoSaveCard(dbId, WA.invalid);
           showToast(`${recName} — number not on WhatsApp`, "warn");
           return;
         }
         if (grp === 22) {
           setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
           setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"not sent"} : x));
+          autoSaveCard(dbId, WA.notSent);
           return;
         }
       } catch { /* network error, retry */ }
     }
-    // exhausted — leave as Sent (message was accepted by server)
   };
 
   /* Step 2 — Send WA using the already-uploaded cardUrl */
@@ -1477,11 +1557,13 @@ export default function App() {
       const markSent = () => {
         setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sent} : r));
         setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"sent"} : x));
+        autoSaveCard(rec.dbId, WA.sent);
         showToast(`WA sent to ${rec.name}`, "success");
       };
       const markInvalid = (reason) => {
         setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
         setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"invalid"} : x));
+        autoSaveCard(rec.dbId, WA.invalid);
         showToast(`${rec.name} — ${reason}`, "warn");
       };
 
@@ -1512,7 +1594,7 @@ export default function App() {
         // PENDING — accepted by API; mark Sent now, poll in background for rejection
         markSent();
         const messageId = msg?.messageId;
-        if (messageId) pollWaStatus(messageId, idx, rec.name);
+        if (messageId) pollWaStatus(messageId, idx, rec.name, rec.dbId);
       } else if (grp === 20 && [73, 109, 77].includes(id)) {
         // DELIVERED_TO_HANDSET / SENT_TO_OPERATOR / DELIVERED_TO_OPERATOR
         markSent();
@@ -1529,6 +1611,7 @@ export default function App() {
     } catch (err) {
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
       setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"not sent"} : x));
+      autoSaveCard(rec.dbId, WA.notSent);
       showToast(`WA failed for ${rec.name}: ${err.message}`, "warn");
     }
   };
@@ -1573,7 +1656,28 @@ export default function App() {
     XLSX.writeFile(wb, `${evName}_WA_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
+<<<<<<< Updated upstream
   // Downloads one record's rendered card as a single PNG file
+=======
+  const downloadFullReport = () => {
+    const waLabel  = { [WA.sent]:"Sent", [WA.invalid]:"Invalid", [WA.notSent]:"Not Sent", [WA.sending]:"Sending", [WA.idle]:"Not Sent" };
+    const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
+    const rows = records.map(r => ({
+      "Name":       r.name     || "",
+      "Card Type":  r.cardType || "",
+      "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
+      "WA Status":  waLabel[r.waStatus]   || "Not Sent",
+      "SMS Status": smsLabel[r.smsStatus] || "Pending",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:14 }, { wch:14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Send Report");
+    const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
+    XLSX.writeFile(wb, `${evName}_Send_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+
+>>>>>>> Stashed changes
   const downloadCard = async (idx) => {
     const rec = records[idx];
     const url = await exportCard(bgImage, bgSize, designElements, rec);
@@ -1651,6 +1755,7 @@ export default function App() {
         const logStatus = grp === 20 ? "delivered" : "sent";
         setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: status } : r));
         setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: logStatus } : x));
+        autoSaveCard(rec.dbId, undefined, status);
         showToast(`SMS ${logStatus} to ${rec.name}`, "success");
       } else {
         throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
@@ -1658,6 +1763,7 @@ export default function App() {
     } catch (err) {
       setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "failed" } : x));
       setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: SMS.failed } : r));
+      autoSaveCard(rec.dbId, undefined, SMS.failed);
       showToast(`SMS failed for ${rec.name}: ${err.message}`, "warn");
     }
   };
@@ -1720,6 +1826,22 @@ export default function App() {
     showToast(`Downloaded SMS list (${rows.length-1} recipients)`,"success");
   };
 
+  const downloadSmsReport = () => {
+    const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
+    const rows = records.map(r => ({
+      "Name":       r.name     || "",
+      "Card Type":  r.cardType || "",
+      "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
+      "SMS Status": smsLabel[r.smsStatus] || "Pending",
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "SMS Report");
+    const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
+    XLSX.writeFile(wb, `${evName}_SMS_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+
   /* ── Counts ── */
   const waSentCount    = records.filter(r=>r.waStatus===WA.sent).length;
   const waInvalidCount = records.filter(r=>r.waStatus===WA.invalid).length;
@@ -1735,15 +1857,6 @@ export default function App() {
   /* ══════════════════════════════════════════════════════
      RENDER
   ══════════════════════════════════════════════════════ */
-  if (user === undefined) return (
-    <div style={{minHeight:"100vh",background:"#050d1f",display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{width:40,height:40,border:"3px solid #1e3a5f",borderTopColor:"#3b82f6",borderRadius:"50%",animation:"spin 0.8s linear infinite"}} />
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-    </div>
-  );
-
-  if (!user) return <LoginPage />;
-
   return (
     <>
       <style>{CSS}</style>
@@ -1803,21 +1916,6 @@ export default function App() {
             <button className="nk-btn nk-btn-primary" onClick={downloadAll}>
               ⬇ Download All ({records.length})
             </button>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
-              {user.user_metadata?.avatar_url && (
-                <img src={user.user_metadata.avatar_url} alt="" style={{width:28,height:28,borderRadius:"50%",objectFit:"cover"}} />
-              )}
-              <span style={{fontSize:12,color:N.textMid,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                {user.user_metadata?.full_name || user.email}
-              </span>
-              <button
-                className="nk-btn nk-btn-ghost"
-                style={{fontSize:12,padding:"4px 10px"}}
-                onClick={() => supabase?.auth.signOut()}
-              >
-                Sign out
-              </button>
-            </div>
           </div>
         </header>
 
@@ -1829,6 +1927,7 @@ export default function App() {
           <button className={`nk-tab${tab==="sms"?" active":""}`}       onClick={()=>setTab("sms")}>💬 SMS</button>
           <button className={`nk-tab${tab==="whatsapp"?" active":""}`}  onClick={()=>setTab("whatsapp")}>📲 WhatsApp</button>
           <button className={`nk-tab${tab==="batch"?" active":""}`}     onClick={()=>setTab("batch")}>📊 Batch & Send</button>
+          <button className={`nk-tab${tab==="reports"?" active":""}`}   onClick={()=>setTab("reports")}>📋 Reports</button>
         </nav>
 
         {/* Info banners */}
@@ -2110,7 +2209,10 @@ export default function App() {
                       </thead>
                       <tbody>
                         {savedEvents.map((ev, i) => (
-                          <tr key={ev.id} className={savedEventId===ev.id?"row-active":""}>
+                          <tr key={ev.id} className={savedEventId===ev.id?"row-active":""}
+                            onClick={()=>selectEvent(ev)}
+                            style={{cursor:"pointer"}}
+                            title="Click to load this event and open its design">
                             <td style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{i+1}</td>
                             <td>
                               <div style={{fontWeight:700,color:N.text}}>{ev.username}</div>
@@ -2133,23 +2235,28 @@ export default function App() {
                             <td>
                               <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
                                 <Sb bg={N.accent} col="#fff" border={N.accent}
-                                  onClick={()=>createCardsFromEvent(ev)}
+                                  onClick={(e)=>{ e.stopPropagation(); createCardsFromEvent(ev); }}
                                   title="Load this event and open card designer">
                                   🎨 Create Cards
                                 </Sb>
+                                <Sb bg={N.navy600} col={N.teal} border={N.teal+"44"}
+                                  onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "reports"); }}
+                                  title="View this event's cards and download the send report">
+                                  📋 Report
+                                </Sb>
                                 <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"}
-                                  onClick={()=>setModalEvent({...ev, start_datetime: ev.start_datetime?ev.start_datetime.slice(0,16):"", end_datetime: ev.end_datetime?ev.end_datetime.slice(0,16):""})}
+                                  onClick={(e)=>{ e.stopPropagation(); setModalEvent({...ev, start_datetime: ev.start_datetime?ev.start_datetime.slice(0,16):"", end_datetime: ev.end_datetime?ev.end_datetime.slice(0,16):""}); }}
                                   title="Edit event details">
                                   ✏ Edit
                                 </Sb>
                                 <Sb bg={N.redBg} col={N.red} border={N.red+"44"}
-                                  onClick={()=>setDeleteTarget(ev)}
+                                  onClick={(e)=>{ e.stopPropagation(); setDeleteTarget(ev); }}
                                   title="Delete this event">
                                   🗑 Delete
                                 </Sb>
                                 {ev.cover_image_url && (
                                   <Sb bg={N.navy700} col={N.textMid} border={N.border}
-                                    onClick={()=>window.open(ev.cover_image_url,"_blank")}
+                                    onClick={(e)=>{ e.stopPropagation(); window.open(ev.cover_image_url,"_blank"); }}
                                     title="View template">
                                     🖼
                                   </Sb>
@@ -2261,6 +2368,7 @@ export default function App() {
               <div className="nk-page" style={{padding:"0 0 40px"}}>
                 <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
                   <div style={{flex:"0 0 340px"}}>
+<<<<<<< Updated upstream
                     <div className="nk-sec nk-sec-teal">SMS Message</div>
                     <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>
                       Separate from WhatsApp — sent as plain SMS.
@@ -2285,6 +2393,44 @@ export default function App() {
                       Variables: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{name}"}</code> &nbsp;
                       <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{cardType}"}</code>
                     </p>
+=======
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                      <div className="nk-sec nk-sec-teal" style={{margin:0}}>SMS Message</div>
+                      {savedEventId && (
+                        <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: smsDraftSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
+                          {smsDraftSaved ? "✓ draft saved" : "auto-saves to event"}
+                        </span>
+                      )}
+                    </div>
+                    <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>Separate from WhatsApp — sent as plain SMS.</p>
+                    <textarea ref={smsTextareaRef} className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
+                    {/* Clickable column chips — insert placeholder at cursor */}
+                    <div style={{marginBottom:14}}>
+                      <div style={{fontSize:10,color:N.textDim,marginBottom:6}}>Click to insert variable:</div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                        {csvColumns.map(col => (
+                          <button key={col}
+                            onClick={() => {
+                              const ta  = smsTextareaRef.current;
+                              const ph  = `{${col}}`;
+                              if (!ta) { setSmsMessage(m => m + ph); return; }
+                              const s   = ta.selectionStart;
+                              const e2  = ta.selectionEnd;
+                              const nxt = smsMessage.slice(0,s) + ph + smsMessage.slice(e2);
+                              setSmsMessage(nxt);
+                              setTimeout(() => { ta.focus(); ta.setSelectionRange(s+ph.length, s+ph.length); }, 0);
+                            }}
+                            style={{
+                              padding:"3px 10px", borderRadius:5, fontSize:11,
+                              fontFamily:"JetBrains Mono, monospace", cursor:"pointer",
+                              background:N.navy700, color:N.sky, border:`1px solid ${N.sky}33`,
+                            }}>
+                            {`{${col}}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+>>>>>>> Stashed changes
                     {(()=>{
                       const sample   = buildSmsMsg(records[0]||{});
                       const len      = sample.length;
@@ -2436,7 +2582,7 @@ export default function App() {
                   <div style={{flex:1}}>
                     <div className="nk-sec nk-sec-teal">SMS Preview per Recipient</div>
                     {smsLog.length > 0 && (
-                      <div className="nk-log" style={{marginBottom:16}}>
+                      <div className="nk-log" style={{marginBottom:12}}>
                         <div className="nk-sec">Send Log</div>
                         {smsLog.map((x,i)=>(
                           <div key={i} className="nk-log-row" style={{color:x.status==="delivered"?N.green:x.status==="sent"?N.teal:x.status==="failed"?N.red:N.textMid}}>
@@ -2446,6 +2592,12 @@ export default function App() {
                           </div>
                         ))}
                       </div>
+                    )}
+                    {!smsSending && smsLog.length > 0 && (
+                      <button className="nk-btn nk-btn-full" onClick={downloadSmsReport}
+                        style={{background:N.tealBg,color:N.teal,border:`1px solid ${N.teal}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                        <span style={{fontSize:16}}>⬇</span> Download SMS Report (.xlsx)
+                      </button>
                     )}
                     <div className="nk-table-wrap">
                       <table className="nk-table">
@@ -2624,6 +2776,71 @@ export default function App() {
               </div>
             )}
 
+            {tab === "reports" && (
+              <div className="nk-page" style={{padding:"0 0 40px"}}>
+                {/* Header */}
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20,flexWrap:"wrap",gap:12}}>
+                  <div>
+                    <div style={{fontSize:18,fontWeight:700,color:N.text}}>{eventData.username||"Event"} — Send Report</div>
+                    <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{records.length} recipients · {new Date().toLocaleDateString("en-GB")}</div>
+                  </div>
+                  <button className="nk-btn nk-btn-success" onClick={downloadFullReport}
+                    style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:16}}>⬇</span> Download Report (.xlsx)
+                  </button>
+                </div>
+
+                {/* Stats */}
+                <div className="nk-stats" style={{marginBottom:20}}>
+                  {[
+                    ["Total",        records.length,                                                                        N.textMid],
+                    ["WA Sent",      records.filter(r=>r.waStatus===WA.sent).length,                                       N.green],
+                    ["WA Invalid",   records.filter(r=>r.waStatus===WA.invalid).length,                                    N.amber],
+                    ["WA Not Sent",  records.filter(r=>r.waStatus===WA.notSent||r.waStatus===WA.idle).length,              N.textDim],
+                    ["SMS Sent",     records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length,        N.teal],
+                    ["SMS Pending",  records.filter(r=>r.smsStatus===SMS.pending).length,                                  N.textDim],
+                  ].map(([l,v,c])=>(
+                    <div key={l} className="nk-stat" style={{borderColor:c+"33"}}>
+                      <div className="nk-stat-num" style={{color:c}}>{v}</div>
+                      <div className="nk-stat-label">{l}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Table */}
+                <div className="nk-table-wrap">
+                  <table className="nk-table">
+                    <thead>
+                      <tr>{["#","Name","Card Type","Phone","WA Status","SMS Status"].map(h=><th key={h}>{h}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {records.map((rec,i)=>{
+                        const smsColor = rec.smsStatus===SMS.delivered?N.green:rec.smsStatus===SMS.sent?N.teal:rec.smsStatus===SMS.failed?N.red:N.textDim;
+                        return (
+                          <tr key={i}>
+                            <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i+1}</td>
+                            <td style={{fontWeight:600}}>{rec.name}</td>
+                            <td style={{fontSize:12,color:N.textMid}}>{rec.cardType}</td>
+                            <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>
+                              {rec.phone ? `+${normalisePhone(rec.phone)}` : <span style={{color:N.textDim}}>—</span>}
+                            </td>
+                            <td>
+                              <WaBadge status={rec.waStatus||WA.idle} />
+                            </td>
+                            <td>
+                              <span style={{fontSize:12,color:smsColor,fontWeight:600}}>
+                                {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             {tab === "batch" && (
               <div className="nk-page" style={{padding:"0 0 40px"}}>
                 <div className="nk-stats">
@@ -2678,6 +2895,19 @@ export default function App() {
 
               {selectedEl?.type==="text" && (
                 <>
+                  <label className="nk-label">Font Family</label>
+                  <select
+                    className="nk-select"
+                    value={selectedEl.fontFamily||"Plus Jakarta Sans"}
+                    onChange={e=>updateEl("fontFamily",e.target.value)}
+                    style={{fontFamily:`'${selectedEl.fontFamily||"Plus Jakarta Sans"}', sans-serif`,marginBottom:10}}
+                  >
+                    {FONT_OPTIONS.map(f=>(
+                      <option key={f.value} value={f.value} style={{fontFamily:`'${f.value}', sans-serif`}}>
+                        {f.label}
+                      </option>
+                    ))}
+                  </select>
                   <label className="nk-label">Font Size — {selectedEl.fontSize}px</label>
                   <input type="range" min={8} max={Math.round(ch*0.5)} value={selectedEl.fontSize} onChange={e=>updateEl("fontSize",Number(e.target.value))} />
                   <label className="nk-label">Color</label>
