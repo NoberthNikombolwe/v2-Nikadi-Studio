@@ -31,6 +31,10 @@ GRANT ALL ON public.saved_templates TO service_role;
 DROP POLICY IF EXISTS "allow_all_events"            ON public.events;
 DROP POLICY IF EXISTS "allow_all_event_cards"       ON public.event_cards;
 DROP POLICY IF EXISTS "allow_all_saved_templates"   ON public.saved_templates;
+-- also drop the new names so this script (and supabase-schema.sql) can be re-run in any order
+DROP POLICY IF EXISTS "authenticated_all_events"            ON public.events;
+DROP POLICY IF EXISTS "authenticated_all_event_cards"       ON public.event_cards;
+DROP POLICY IF EXISTS "authenticated_all_saved_templates"   ON public.saved_templates;
 
 CREATE POLICY "authenticated_all_events"
   ON public.events FOR ALL
@@ -53,6 +57,9 @@ CREATE POLICY "authenticated_all_saved_templates"
 -- ── 6. Storage bucket policies (templates) ────────────────────────────
 DROP POLICY IF EXISTS "public_read_templates"   ON storage.objects;
 DROP POLICY IF EXISTS "public_insert_templates" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_read_templates"   ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_insert_templates" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_delete_templates" ON storage.objects;
 
 CREATE POLICY "authenticated_read_templates"
   ON storage.objects FOR SELECT

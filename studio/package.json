@@ -7,12 +7,16 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:functions": "node --test \"supabase/**/*.test.ts\"",
     "preview": "vite preview"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.104.0",
+    "jszip": "^3.10.1",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

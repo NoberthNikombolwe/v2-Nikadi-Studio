@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
-import JSZip from "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm";
 import { supabase } from "./lib/supabase";
+import { normalisePhone, isValidPhone } from "./lib/phone";
+import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
+import LoginPage from "./LoginPage";
 
 /* ══════════════════════════════════════════════════════════════════════════
    NIKADI STUDIO — event card designer & distribution tool
@@ -24,6 +25,12 @@ import { supabase } from "./lib/supabase";
                     VCard. Gated behind <LoginPage> until Supabase auth
                     resolves a session.
 ══════════════════════════════════════════════════════════════════════════ */
+
+// Spreadsheet and zip libraries are only needed when importing/exporting, so they are
+// loaded on demand to keep them out of the initial bundle (both are bundled by Vite
+// from node_modules — nothing is fetched from a third-party CDN at runtime)
+const loadXlsx  = () => import("xlsx");
+const loadJsZip = () => import("jszip").then(m => m.default);
 
 /* ══════════════════════════════════════════════════════════════════════════
    BRAND
@@ -277,6 +284,20 @@ const CSS = `
   .nk-log { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
   .nk-log-row { font-size: 12px; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
 
+  /* Floating activity logs: fixed to the viewport so showing/hiding them never moves the page */
+  .nk-activity {
+    position: fixed; left: 24px; bottom: 24px; z-index: 400;
+    width: 340px; max-width: calc(100vw - 48px); max-height: 45vh; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 10px; animation: slideUp 0.3s ease;
+  }
+  .nk-activity .nk-log { margin-bottom: 0; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+  .nk-activity-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .nk-activity-close {
+    background: transparent; border: none; color: ${N.textDim}; cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+  }
+  .nk-activity-close:hover { color: ${N.text}; background: ${N.navy700}; }
+
   /* Table */
   .nk-table { width: 100%; border-collapse: separate; border-spacing: 0; }
   .nk-table-wrap { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; overflow: hidden; }
@@ -388,6 +409,24 @@ const CSS = `
   .nk-confirm-title { font-size: 16px; font-weight: 700; color: ${N.text}; margin-bottom: 8px; }
   .nk-confirm-body  { font-size: 13px; color: ${N.textMid}; margin-bottom: 20px; line-height: 1.6; }
 
+  /* ── Choice dialog (bulk-send / re-send confirmations) ── */
+  .nk-dialog {
+    background: ${N.navy800}; border: 1px solid ${N.border};
+    border-radius: 14px; padding: 24px; max-width: 560px; width: 100%;
+    max-height: 90vh; overflow-y: auto;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6); animation: modalIn 0.2s ease;
+  }
+  .nk-dialog-title   { font-size: 16px; font-weight: 700; color: ${N.text}; margin-bottom: 10px; }
+  .nk-dialog-body    { font-size: 13px; color: ${N.textMid}; margin-bottom: 20px; line-height: 1.6; }
+  .nk-dialog-list    {
+    background: ${N.navy900}; border: 1px solid ${N.border}; border-radius: 8px;
+    padding: 10px 12px; font-size: 12px; line-height: 1.8; max-height: 160px; overflow-y: auto;
+  }
+  .nk-dialog-list .num { font-family: 'JetBrains Mono', monospace; color: ${N.sky}; }
+  .nk-dialog-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+  .nk-btn-warn       { background: ${N.amberBg}; color: ${N.amber}; border: 1.5px solid ${N.amber}66; }
+  .nk-btn-warn:hover { transform: translateY(-1px); filter: brightness(1.25); }
+
   .nk-page { width: 100%; max-width: 1100px; margin: 0 auto; }
 `;
 
@@ -396,12 +435,6 @@ const CSS = `
 const qrUrl = (data, size = 120) =>
   `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}&margin=6&color=0d1f3c&bgcolor=ffffff`;
 
-// Strips non-digits and rewrites a leading local "0" to Tanzania's 255 country code
-const normalisePhone = (raw = "") => {
-  let d = String(raw).replace(/\D/g, "");
-  if (d.startsWith("0") && d.length >= 9) d = "255" + d.slice(1);
-  return d;
-};
 // Triggers a browser file download for arbitrary text content via a throwaway <a> tag
 const downloadBlob = (content, filename, type = "text/plain") => {
   const blob = new Blob([content], { type });
@@ -441,6 +474,13 @@ const defaultElements = () => [
 const WA  = { idle:"idle", sending:"sending", sent:"sent", notSent:"notSent", invalid:"invalid" };
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
+// Placeholder contacts for a fresh session / an event with no saved cards, so the
+// designer has something to preview. They carry no phone number (so they can never
+// be messaged) and are flagged `sample` so saveCards() never writes them to the DB.
+const sampleRecords = () => ["Guest One","Guest Two","Guest Three"].map((name, i) => ({
+  name, cardType:["SINGLE","DOUBLE","VIP"][i], phone:"",
+  waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle", sample:true,
+}));
 
 /* ══════════════════════════════════════════════════════════════════════════
    CARD CANVAS
@@ -536,50 +576,67 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
 }
 
 /* ── Export ──────────────────────────────────────────────────────────── */
+// Loads an image, retrying on error and giving up after `timeoutMs` so a stalled
+// request can't hang an export (or a whole batch upload) forever
+const loadImage = (src, { cors = false, retries = 0, timeoutMs = 15000 } = {}) => new Promise((resolve, reject) => {
+  const attempt = (left) => {
+    const img = new Image();
+    if (cors) img.crossOrigin = "anonymous";
+    const retryOrFail = (reason) => left > 0 ? attempt(left - 1) : reject(new Error(reason));
+    const timer = setTimeout(() => { img.onload = img.onerror = null; retryOrFail("timed out"); }, timeoutMs);
+    img.onload  = () => { clearTimeout(timer); resolve(img); };
+    img.onerror = () => { clearTimeout(timer); retryOrFail("failed to load"); };
+    img.src = src;
+  };
+  attempt(retries);
+});
+
 // Rasterises one card (background + text/QR elements) to a PNG data-URL, off-screen,
-// for download or upload. QR images load asynchronously, so the promise only resolves
-// once every QR element has finished drawing (or failed).
-function exportCard(bgImage, bgSize, elements, record) {
-  return new Promise((resolve) => {
-    const cw = bgSize?.w||DEFAULT_W; const ch = bgSize?.h||DEFAULT_H;
-    const cv = document.createElement("canvas"); cv.width=cw; cv.height=ch;
-    const ctx = cv.getContext("2d");
-    const renderText = () => elements.forEach((el) => {
-      if (el.type==="text") {
-        const val = record?.[el.field]||"";
-        const ff = el.fontFamily || "Plus Jakarta Sans";
-        ctx.font=`${el.bold?"bold ":""}${el.fontSize}px '${ff}', sans-serif`;
-        ctx.fillStyle=el.color; ctx.textAlign=el.align||"left";
-        ctx.fillText(val,el.x,el.y); ctx.textAlign="left";
-      }
-    });
-    const renderQR = () => {
-      const qrEls = elements.filter(e=>e.type==="qr");
-      if (!qrEls.length) { resolve(cv.toDataURL("image/png")); return; }
-      let done=0;
-      qrEls.forEach((el) => {
-        const qrData=`Name=${record?.name||"?"};TypeCard=${record?.cardType||"?"}`;
-        const img=new Image(); img.crossOrigin="anonymous";
-        img.onload=()=>{ ctx.save();ctx.shadowColor="rgba(0,0,0,0.2)";ctx.shadowBlur=6;ctx.drawImage(img,el.x,el.y,el.size,el.size);ctx.restore(); if(++done===qrEls.length)resolve(cv.toDataURL("image/png")); };
-        img.onerror=()=>{ if(++done===qrEls.length)resolve(cv.toDataURL("image/png")); };
-        img.src=qrUrl(qrData,el.size);
-      });
-    };
-    if (bgImage) { const bg=new Image(); bg.onload=()=>{ctx.drawImage(bg,0,0,cw,ch);renderText();renderQR();}; bg.src=bgImage; }
-    else {
-      const g=ctx.createLinearGradient(0,0,cw,ch); g.addColorStop(0,"#0a1628"); g.addColorStop(1,"#0d1f3c");
-      ctx.fillStyle=g; ctx.fillRect(0,0,cw,ch);
-      const s=ctx.createLinearGradient(0,0,0,ch); s.addColorStop(0,"#3b82f6"); s.addColorStop(1,"#38bdf8");
-      ctx.fillStyle=s; ctx.fillRect(0,0,5,ch);
-      ctx.fillStyle="rgba(59,130,246,0.08)"; ctx.fillRect(0,0,cw,65);
-      ctx.fillStyle="#e2e8f0"; ctx.font="700 13px 'Plus Jakarta Sans', sans-serif"; ctx.fillText("NIKADI STUDIO",20,30);
-      ctx.fillStyle="rgba(255,255,255,0.12)"; ctx.fillRect(20,38,140,1);
-      ctx.fillStyle="#64748b"; ctx.font="500 10px 'Plus Jakarta Sans', sans-serif"; ctx.fillText("IDENTITY CARD",20,55);
-      ctx.fillStyle="rgba(59,130,246,0.15)";
-      for(let xi=0;xi<5;xi++) for(let yi=0;yi<3;yi++){ctx.beginPath();ctx.arc(cw-20-xi*12,15+yi*12,2,0,Math.PI*2);ctx.fill();}
-      renderText(); renderQR();
+// for download or upload. Every image is loaded before anything is drawn, and the
+// promise REJECTS if the template or any QR code can't be loaded — a card must never
+// be exported (and then sent to a guest) with its QR code silently missing.
+async function exportCard(bgImage, bgSize, elements, record) {
+  const cw = bgSize?.w||DEFAULT_W; const ch = bgSize?.h||DEFAULT_H;
+  const cv = document.createElement("canvas"); cv.width=cw; cv.height=ch;
+  const ctx = cv.getContext("2d");
+  const qrEls  = elements.filter(e=>e.type==="qr");
+  const qrData = `Name=${record?.name||"?"};TypeCard=${record?.cardType||"?"}`;
+  // Web fonts load lazily, and canvas drawing doesn't trigger a load — wait for every font a
+  // text element uses, or the card silently falls back to a default font
+  await Promise.all(elements.filter(el => el.type==="text").map(el =>
+    Promise.resolve(document.fonts?.load(`${el.bold?"bold ":""}${el.fontSize}px '${el.fontFamily||"Plus Jakarta Sans"}'`)).catch(() => {})));
+  const [bg, ...qrImgs] = await Promise.all([
+    bgImage ? loadImage(bgImage).catch(e => { throw new Error(`Template image ${e.message}`); }) : null,
+    ...qrEls.map(el => loadImage(qrUrl(qrData, el.size), { cors:true, retries:2 })
+      .catch(e => { throw new Error(`QR code ${e.message} for ${record?.name||"record"}`); })),
+  ]);
+  if (bg) ctx.drawImage(bg,0,0,cw,ch);
+  else {
+    const g=ctx.createLinearGradient(0,0,cw,ch); g.addColorStop(0,"#0a1628"); g.addColorStop(1,"#0d1f3c");
+    ctx.fillStyle=g; ctx.fillRect(0,0,cw,ch);
+    const s=ctx.createLinearGradient(0,0,0,ch); s.addColorStop(0,"#3b82f6"); s.addColorStop(1,"#38bdf8");
+    ctx.fillStyle=s; ctx.fillRect(0,0,5,ch);
+    ctx.fillStyle="rgba(59,130,246,0.08)"; ctx.fillRect(0,0,cw,65);
+    ctx.fillStyle="#e2e8f0"; ctx.font="700 13px 'Plus Jakarta Sans', sans-serif"; ctx.fillText("NIKADI STUDIO",20,30);
+    ctx.fillStyle="rgba(255,255,255,0.12)"; ctx.fillRect(20,38,140,1);
+    ctx.fillStyle="#64748b"; ctx.font="500 10px 'Plus Jakarta Sans', sans-serif"; ctx.fillText("IDENTITY CARD",20,55);
+    ctx.fillStyle="rgba(59,130,246,0.15)";
+    for(let xi=0;xi<5;xi++) for(let yi=0;yi<3;yi++){ctx.beginPath();ctx.arc(cw-20-xi*12,15+yi*12,2,0,Math.PI*2);ctx.fill();}
+  }
+  elements.forEach((el) => {
+    if (el.type==="text") {
+      const val = record?.[el.field]||"";
+      const ff = el.fontFamily || "Plus Jakarta Sans";
+      ctx.font=`${el.bold?"bold ":""}${el.fontSize}px '${ff}', sans-serif`;
+      ctx.fillStyle=el.color; ctx.textAlign=el.align||"left";
+      ctx.fillText(val,el.x,el.y); ctx.textAlign="left";
     }
   });
+  qrEls.forEach((el, i) => {
+    ctx.save(); ctx.shadowColor="rgba(0,0,0,0.2)"; ctx.shadowBlur=6;
+    ctx.drawImage(qrImgs[i],el.x,el.y,el.size,el.size); ctx.restore();
+  });
+  return cv.toDataURL("image/png");
 }
 
 /* ── Small components ─────────────────────────────────────────────────── */
@@ -607,8 +664,8 @@ function Sb({ bg, col, border, children, onClick, title, disabled }) {
 }
 
 // One row of the Contacts table: shows WA/SMS status badges, lets the phone number be
-// edited inline, and exposes per-row Send WA / Send SMS / Download PNG actions
-function RecordRow({ rec, idx, onEdit, onSendWa, onDownload, onSendSms, isActive, onActivate }) {
+// edited inline, and exposes per-row Upload / Send WA / Send SMS / Download PNG actions
+function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms, isActive, onActivate }) {
   const [editing,setEditing] = useState(false);
   const [phone,setPhone]     = useState("");
   // Enter inline phone-edit mode, seeded with the current value
@@ -643,6 +700,11 @@ function RecordRow({ rec, idx, onEdit, onSendWa, onDownload, onSendSms, isActive
       <td>
         <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
           {!rec.phone && <Sb bg={N.redBg} col={N.red} onClick={startEdit}>+ Add №</Sb>}
+          <Sb bg={rec.uploadStatus==="uploaded"?N.greenBg:N.navy600} col={rec.uploadStatus==="uploaded"?N.green:N.sky}
+            title={rec.uploadStatus==="uploaded"?"Card uploaded — click to re-upload":"Upload card to Supabase Storage"}
+            onClick={()=>onUpload(idx)} disabled={rec.uploadStatus==="uploading"}>
+            {rec.uploadStatus==="uploading"?"⏳":rec.uploadStatus==="uploaded"?"✓":"☁"} Upload
+          </Sb>
           {rec.phone && <Sb bg="#052e16" col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending}>
             {rec.waStatus===WA.sending?"⏳":"📲"} WA
           </Sb>}
@@ -729,6 +791,51 @@ function EventModal({ initial, onSave, onClose, saving }) {
   );
 }
 
+/* ── Activity logs ───────────────────────────────────────────────────── */
+const NOTICE_VISIBLE_MS = 5000;   // how long toasts and finished activity logs stay on screen
+const logPending = (x) => x.status === "uploading" || x.status === "sending";
+
+// Empties an activity log NOTICE_VISIBLE_MS after its last change, but only once nothing in
+// it is still in progress — a running upload/send keeps its log on screen. Any later
+// change (e.g. a delayed WhatsApp rejection) restarts the countdown.
+function useAutoClearLog(log, setLog) {
+  useEffect(() => {
+    if (!log.length || log.some(logPending)) return;
+    const t = setTimeout(() => setLog([]), NOTICE_VISIBLE_MS);
+    return () => clearTimeout(t);
+  }, [log, setLog]);
+}
+
+// status → [icon, colour] for each log's rows; anything not listed is still in progress (⏳)
+const LOG_STYLES = {
+  upload: { uploaded:["✓",N.green], failed:["✗",N.red] },
+  wa:     { sent:["✓",N.green], invalid:["⚠",N.amber], "not sent":["✗",N.red] },
+  sms:    { delivered:["✓✓",N.green], sent:["↑",N.teal], failed:["✗",N.red] },
+};
+
+// One titled list of activity-log rows inside the floating panel; renders nothing when empty
+function LogSection({ title, color, styles, log, onClose }) {
+  if (!log.length) return null;
+  return (
+    <div className="nk-log">
+      <div className="nk-activity-head">
+        <span className="nk-sec" style={{color,margin:0}}>{title}</span>
+        <button className="nk-activity-close" onClick={onClose} title="Dismiss" aria-label={`Dismiss ${title}`}>✕</button>
+      </div>
+      {log.map((x,i) => {
+        const [icon, col] = styles[x.status] || ["⏳", N.textMid];
+        return (
+          <div key={i} className="nk-log-row" style={{color:col}}>
+            <span>{icon}</span>
+            <span>{x.name}</span>
+            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -749,12 +856,14 @@ export default function App() {
   const pendingDbLayout   = useRef(null);   // layout loaded from DB, consumed once by templateKey effect
 
   /* ── Records ── */
-  const [records,   setRecords]   = useState([
-    { name:"Nazael Ezekiel",     cardType:"SINGLE", phone:"0712345678", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
-    { name:"Denis Mwambuja",     cardType:"DOUBLE", phone:"0756789012", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
-    { name:"Noberth Nikombolwe", cardType:"20",     phone:"0750301111", waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" },
-  ]);
+  const [records,   setRecords]   = useState(sampleRecords);
   const [activeIdx, setActiveIdx] = useState(0);
+  // Always-current copy of `records` for async flows (bulk sends) whose closure would
+  // otherwise see the list as it was when they started
+  const recordsRef = useRef(records);
+  useEffect(() => { recordsRef.current = records; });
+  const selectSeq   = useRef(0);          // bumped per selectEvent call so a superseded (slower) load can bail out
+  const smsInFlight = useRef(new Set());  // record indexes with an SMS request currently in flight
 
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
@@ -787,22 +896,18 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState(null); // event to confirm-delete
 
   /* ── SMS ── */
-<<<<<<< Updated upstream
   const [smsMessage,      setSmsMessage]      = useState(DEFAULT_SMS_MESSAGE);
   const [smsMsgSaving,   setSmsMsgSaving]    = useState(false);
   const smsPersistedMsg = useRef(null);   // last value saved to / loaded from DB — skip redundant writes
+  const [csvColumns,      setCsvColumns]      = useState(["name","cardType"]);   // columns offered as {placeholders} in the SMS editor
+  const smsTextareaRef    = useRef(null);
+  const smsDraftTimerRef  = useRef(null);
+  const smsDraftBase      = useRef(null);   // last message loaded from / autosaved to events.sms_draft
+  const [smsDraftSaved,   setSmsDraftSaved]   = useState(false);
   const smsSettings = {
     bearerToken: import.meta.env.VITE_SMS_BEARER_TOKEN || "",
     senderId:    import.meta.env.VITE_SMS_SENDER_ID || "NIKADI",
   };
-=======
-  const [smsMessage,      setSmsMessage]      = useState("Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!");
-  const [csvColumns,      setCsvColumns]      = useState(["name","cardType"]);
-  const smsTextareaRef = useRef(null);
-  const smsDraftTimerRef = useRef(null);
-  const [smsDraftSaved,   setSmsDraftSaved]   = useState(false);
-  const smsSettings = { bearerToken:"dc677ab4eddbafd7dfb35b115c91a9bc", senderId:"NIKADI" };
->>>>>>> Stashed changes
   const [smsSending,      setSmsSending]      = useState(false);
   const [smsLog,          setSmsLog]          = useState([]);
   const [smsBalance,      setSmsBalance]      = useState(null);
@@ -813,10 +918,45 @@ export default function App() {
 
   /* ── Toast ── */
   const [toast, setToast] = useState(null);
-  // Shows a transient toast (success/warn/info) that auto-dismisses after 4.5s
-  const showToast = (msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 4500); };
+  // Shows a transient toast (success/warn/info) that auto-dismisses after 5s. A new toast
+  // cancels the previous toast's timer, so it always gets its own full 5s instead of being
+  // wiped early when an older toast's timer fires.
+  const toastTimer = useRef(null);
+  const showToast = (msg, type = "info") => {
+    setToast({ msg, type });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), NOTICE_VISIBLE_MS);
+  };
 
-<<<<<<< Updated upstream
+  // Activity logs clear themselves 5 s after a run finishes (see useAutoClearLog)
+  useAutoClearLog(uploadLog, setUploadLog);
+  useAutoClearLog(bulkLog,   setBulkLog);
+  useAutoClearLog(smsLog,    setSmsLog);
+
+  /* ── Choice dialog (in-app replacement for the browser's confirm()) ── */
+  // askDialog({ title, body, actions }) opens the modal and resolves with the chosen
+  // action's `value`, or null if the user cancels (Cancel button, Esc, or a click outside).
+  const [dialog, setDialog] = useState(null);
+  const dialogResolve = useRef(null);
+  const askDialog = (cfg) => new Promise((resolve) => {
+    dialogResolve.current?.(null);   // a newer dialog supersedes one that is still open
+    dialogResolve.current = resolve;
+    setDialog(cfg);
+  });
+  const closeDialog = (value) => {
+    const resolve = dialogResolve.current;
+    dialogResolve.current = null;
+    setDialog(null);
+    resolve?.(value);
+  };
+  // Esc cancels the open dialog
+  useEffect(() => {
+    if (!dialog) return;
+    const onKey = (e) => { if (e.key === "Escape") closeDialog(null); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [dialog]);
+
   /* ── Auth ── */
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
   // Resolves the current Supabase session on mount and keeps `user` in sync with
@@ -830,8 +970,9 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-=======
->>>>>>> Stashed changes
+  // Stable identity for effects: Supabase returns a fresh `user` object on every token
+  // refresh, which must not re-trigger data loads (that would overwrite unsaved edits)
+  const userId = user?.id ?? null;
   const activeRecord = records[activeIdx] || {};
   const selectedEl   = elements.find(e => e.id === selected);
   const cw = bgSize?.w || DEFAULT_W;
@@ -841,11 +982,11 @@ export default function App() {
   // On mount, does a cheap count query to confirm Supabase is reachable and drives
   // the connected/disconnected/unconfigured status dot in the header
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase || !userId) return;   // RLS requires a signed-in session
     supabase.from("events").select("id", { count:"exact", head:true })
       .then(({ error }) => setDbStatus(error ? "disconnected" : "connected"))
       .catch(() => setDbStatus("disconnected"));
-  }, []);
+  }, [userId]);
 
   /* ── Template layout: restore from DB (priority) or localStorage ── */
   useEffect(() => {
@@ -905,15 +1046,10 @@ export default function App() {
     if (!error && data) { setSavedEvents(data); return data; }
     return [];
   };
-<<<<<<< Updated upstream
   // On first mount: load templates + events, then reopen whichever event was last
   // active (persisted in localStorage under "nikadi_last_event")
-=======
-  const autoLoadDone = useRef(false);
->>>>>>> Stashed changes
   useEffect(() => {
-    if (!supabase || autoLoadDone.current) return;
-    autoLoadDone.current = true;
+    if (!supabase || !userId) return;   // RLS requires a signed-in session
     loadSavedTemplates();
     loadSavedEvents().then((events) => {
       const lastId = localStorage.getItem("nikadi_last_event");
@@ -922,7 +1058,7 @@ export default function App() {
         if (ev) selectEvent(ev);
       }
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* Persist active event ID so template auto-reloads on next visit */
   useEffect(() => {
@@ -930,14 +1066,21 @@ export default function App() {
     else localStorage.removeItem("nikadi_last_event");
   }, [savedEventId]);
 
-  /* Auto-save SMS draft to DB whenever message changes (debounced 1.5 s) */
+  /* Auto-save the SMS draft to the event (debounced 1.5 s). This is separate from the manual
+     "Save Template" button (events.sms_message): the draft is the working copy, and it is only
+     written when it differs from what was last loaded/saved. Needs the events.sms_draft column
+     (supabase-schema.sql / supabase-grants-migration.sql); a missing column just skips the save. */
   useEffect(() => {
-    if (!supabase || !savedEventId) return;
-    if (smsDraftTimerRef.current) clearTimeout(smsDraftTimerRef.current);
+    if (!supabase || !savedEventId || smsMessage === smsDraftBase.current) return;
+    clearTimeout(smsDraftTimerRef.current);
     setSmsDraftSaved(false);
     smsDraftTimerRef.current = setTimeout(async () => {
       const { error } = await supabase.from("events").update({ sms_draft: smsMessage }).eq("id", savedEventId);
-      if (!error) { setSmsDraftSaved(true); setTimeout(() => setSmsDraftSaved(false), 2500); }
+      if (!error) {
+        smsDraftBase.current = smsMessage;
+        setSmsDraftSaved(true);
+        setTimeout(() => setSmsDraftSaved(false), 2500);
+      }
     }, 1500);
     return () => clearTimeout(smsDraftTimerRef.current);
   }, [smsMessage, savedEventId]);
@@ -1101,11 +1244,12 @@ export default function App() {
   const onExcelUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = ev => {
+    r.onload = async ev => {
+      const XLSX = await loadXlsx();
       const wb   = XLSX.read(ev.target.result, { type:"array" });
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
-      const colMap = {};  // originalKey → placeholder key
+      const colMap = {};  // original header → standard key
       const extraCols = [];
       const norm = data.map(row => {
         const n = { waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" };
@@ -1118,7 +1262,7 @@ export default function App() {
         });
         return n;
       });
-      // Build ordered column list: standard first, then extras
+      // Ordered column list for the SMS variable chips: standard columns first, then any extras
       const standard = ["name","cardType"].filter(c => Object.values(colMap).includes(c));
       setCsvColumns([...standard, ...extraCols]);
       setRecords(norm); setActiveIdx(0);
@@ -1133,7 +1277,8 @@ export default function App() {
   const onVcardCsvUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = ev => {
+    r.onload = async ev => {
+      const XLSX = await loadXlsx();
       const wb   = XLSX.read(ev.target.result, { type:"array" });
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
@@ -1174,18 +1319,14 @@ export default function App() {
         ...formData,
         cover_image_url: coverUrl||null,
         elements_layout: elements,
-<<<<<<< Updated upstream
         ...(isLoadedEvent ? { sms_message: smsMessage } : {}),
-=======
-        sms_draft:       smsMessage,
->>>>>>> Stashed changes
         start_datetime: formData.start_datetime||null,
         end_datetime:   formData.end_datetime||null,
       };
       if (currentId) {
         const { error } = await supabase.from("events").update(payload).eq("id", currentId);
         if (error) throw error;
-        if (isLoadedEvent) smsPersistedMsg.current = smsMessage;
+        if (isLoadedEvent) { smsPersistedMsg.current = smsMessage; smsDraftBase.current = smsMessage; }
         setEventData(formData);
         showToast("Event updated", "success");
         await loadSavedEvents();
@@ -1194,6 +1335,7 @@ export default function App() {
         const { data, error } = await supabase.from("events").insert([payload]).select().single();
         if (error) throw error;
         smsPersistedMsg.current = smsMessage;
+        smsDraftBase.current = smsMessage;
         setEventData(formData);
         setSavedEventId(data.id);
         showToast("Event created", "success");
@@ -1208,12 +1350,20 @@ export default function App() {
     }
   };
 
-  // Replaces this event's `event_cards` rows with the current `records` array
-  // (delete-then-insert, so it's a full overwrite, not a merge)
-  const saveCards = async (eventId) => {
-    if (!supabase || !records.length) return;
-    await supabase.from("event_cards").delete().eq("event_id", eventId);
-    const rows = records.map(r => ({
+  // Replaces this event's `event_cards` rows with `recs` (default: the current records).
+  // Insert-then-delete rather than delete-then-insert: the new rows go in first and
+  // only the rows that existed beforehand are removed, so a failed insert can never
+  // leave the event with no contacts. Placeholder `sample` records are never saved.
+  // Bulk-send flows pass their own `recs` — this function's closure `records` would
+  // still hold the pre-send statuses.
+  const saveCards = async (eventId, recs = records) => {
+    if (!supabase) return;
+    const entries = recs.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample);   // keep each row's position in `recs`
+    const toSave  = entries.map(({ r }) => r);
+    if (!toSave.length) { showToast("No contacts to save", "info"); return; }
+    const { data: old, error: readErr } = await supabase.from("event_cards").select("id").eq("event_id", eventId);
+    if (readErr) { showToast("Cards save error: " + readErr.message, "warn"); return; }
+    const rows = toSave.map(r => ({
       event_id:   eventId,
       name:       r.name||"",
       card_type:  r.cardType||"",
@@ -1221,12 +1371,18 @@ export default function App() {
       wa_status:  r.waStatus||WA.idle,
       sms_status: r.smsStatus||SMS.pending,
     }));
-    const { data, error } = await supabase.from("event_cards").insert(rows).select("id");
-    if (error) showToast("Cards save error: " + error.message, "warn");
-    else {
-      if (data) setRecords(rs => rs.map((r, i) => data[i] ? {...r, dbId: data[i].id} : r));
-      showToast(`${records.length} cards saved`, "success");
+    const { data: inserted, error } = await supabase.from("event_cards").insert(rows).select("id");
+    if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
+    // Remember each row's new database id so per-card status updates (autoSaveCard) can target it
+    if (inserted?.length === entries.length) {
+      const ids = new Map(entries.map(({ i }, n) => [i, inserted[n].id]));
+      setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
     }
+    if (old?.length) {
+      const { error: delErr } = await supabase.from("event_cards").delete().in("id", old.map(o => o.id));
+      if (delErr) { showToast("Cards saved, but old rows could not be removed: " + delErr.message, "warn"); return; }
+    }
+    showToast(`${toSave.length} cards saved`, "success");
   };
 
   // Manually persists the current element layout to the loaded event's DB row
@@ -1266,19 +1422,21 @@ export default function App() {
   };
 
   /* ── Core: load event data + template from DB into the designer ── */
-<<<<<<< Updated upstream
   // The main "open an event" routine: populates the event form, SMS message,
   // background image + element layout (fetched from Storage, only if the cover URL
   // actually changed), and this event's saved contact cards. Called from the
   // sidebar dropdown, the Events tab, and on-mount restore-last-event.
-  const selectEvent = async (eventIdOrObj) => {
-=======
   const selectEvent = async (eventIdOrObj, targetTab = "design") => {
->>>>>>> Stashed changes
     const ev = typeof eventIdOrObj === "string"
       ? savedEvents.find(e => e.id === eventIdOrObj)
       : eventIdOrObj;
     if (!ev) return;
+
+    // Opening an event is several async steps; if the user opens another one before
+    // this finishes, the older call must stop instead of overwriting the newer event
+    const seq    = ++selectSeq.current;
+    const stale  = () => seq !== selectSeq.current;
+    setLoadingTemplate(false);
 
     setEventData({
       username:       ev.username||"",
@@ -1292,10 +1450,10 @@ export default function App() {
       end_datetime:   ev.end_datetime   ? ev.end_datetime.slice(0,16)   : "",
     });
     setSavedEventId(ev.id);
-    if (ev.sms_draft) setSmsMessage(ev.sms_draft);
     setCoverUrl(ev.cover_image_url||null);
-    smsPersistedMsg.current = ev.sms_message || DEFAULT_SMS_MESSAGE;
-    setSmsMessage(smsPersistedMsg.current);
+    smsPersistedMsg.current = ev.sms_message || DEFAULT_SMS_MESSAGE;   // the saved template
+    smsDraftBase.current    = ev.sms_draft || smsPersistedMsg.current;  // an autosaved draft wins when present
+    setSmsMessage(smsDraftBase.current);
 
     /* Clear canvas template when event has none */
     if (!ev.cover_image_url) {
@@ -1308,14 +1466,19 @@ export default function App() {
       setLoadingTemplate(true);
       try {
         const res    = await fetch(ev.cover_image_url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob   = await res.blob();
-        await new Promise((resolve) => {
+        if (stale()) return;
+        await new Promise((resolve, reject) => {
           const reader = new FileReader();
+          reader.onerror = () => reject(reader.error);
           reader.onload = (e) => {
             const dataUrl = e.target.result;
             const fp      = templateFingerprint(dataUrl, ev.cover_image_url);
             const img     = new Image();
+            img.onerror = () => reject(new Error("template image is not a valid image"));
             img.onload = () => {
+              if (stale()) { resolve(); return; }
               setBgImage(dataUrl);
               setBgSize({ w:img.naturalWidth, h:img.naturalHeight });
               // Queue DB layout so templateKey effect applies it instead of localStorage
@@ -1329,39 +1492,43 @@ export default function App() {
           };
           reader.readAsDataURL(blob);
         });
-      } catch { showToast("Could not load template from database","warn"); }
-      finally { setLoadingTemplate(false); }
+      } catch (err) { if (!stale()) showToast(`Could not load template from database: ${err.message}`,"warn"); }
+      finally { if (!stale()) setLoadingTemplate(false); }
     }
+    if (stale()) return;
 
-    /* Load cards — always replace so a previous event's cards never linger */
+    /* Load cards — never carry the previously open event's contacts over: when this
+       event has none (or they can't be loaded) fall back to the placeholder samples */
     if (supabase) {
-      const { data: cards } = await supabase.from("event_cards").select("*").eq("event_id", ev.id);
-      setRecords((cards || []).map(c => ({
-        dbId:         c.id,
-        name:         c.name||"",
-        cardType:     c.card_type||"",
-        phone:        c.phone||"",
+      const { data: cards, error: cardsErr } = await supabase.from("event_cards").select("*").eq("event_id", ev.id);
+      if (stale()) return;
+      if (cardsErr) showToast("Could not load contacts: " + cardsErr.message, "warn");
+      setRecords(cards?.length ? cards.map(c => ({
+        dbId:      c.id,
+        name:      c.name||"",
+        cardType:  c.card_type||"",
+        phone:     c.phone||"",
         waStatus:     c.wa_status||WA.idle,
         smsStatus:    c.sms_status||SMS.pending,
         cardUrl:      null,
         uploadStatus: "idle",
-      })));
+      })) : sampleRecords());
       setActiveIdx(0);
     }
 
     showToast(`"${ev.username}" loaded`, "success");
-    setTab(targetTab);
+    if (targetTab) setTab(targetTab);
   };
 
   /* ── Sidebar dropdown handler ── */
   // Loads the chosen event via selectEvent, or resets to a blank event when "— none —" is picked
   const onEventSelect = (id) => {
-    if (!id) { setEventData(BLANK_EVENT); setSavedEventId(null); setCoverUrl(null); return; }
+    if (!id) { selectSeq.current++; setEventData(BLANK_EVENT); setSavedEventId(null); setCoverUrl(null); return; }
     selectEvent(id);
   };
 
   /* ── Events tab: Create Cards button ── */
-  // Shortcut: load the event, then jump straight to the Design tab
+  // Shortcut: load the event and jump straight to the Design tab (selectEvent opens it)
   const createCardsFromEvent = async (ev) => {
     await selectEvent(ev);
   };
@@ -1371,8 +1538,9 @@ export default function App() {
   const onMove     = (id,x,y) => setElements(els => els.map(el => el.id===id ? {...el,x,y} : el));
   // Updates a single property (fontSize/color/align/etc.) on the currently selected element
   const updateEl   = (prop,val) => setElements(els => els.map(el => el.id===selected ? {...el,[prop]:val} : el));
-  // Updates a single field on one contact record (used by RecordRow's inline phone edit)
-  const editRecord = (idx,field,val) => setRecords(rs => rs.map((r,i) => i===idx ? {...r,[field]:val} : r));
+  // Updates a single field on one contact record (used by RecordRow's inline phone edit).
+  // Editing a placeholder sample row turns it into a real contact, so it gets saved.
+  const editRecord = (idx,field,val) => setRecords(rs => rs.map((r,i) => i===idx ? {...r,[field]:val,...(r.sample?{sample:false}:{})} : r));
 
   /* ── WhatsApp API ── */
   const WA_BASE = import.meta.env.DEV
@@ -1380,24 +1548,85 @@ export default function App() {
     : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-wa`;
   const WA_BEARER = import.meta.env.VITE_WA_BEARER_TOKEN || "";
 
-<<<<<<< Updated upstream
+  // Bearer token for the SMS/WhatsApp proxy. Dev: the provider token from
+  // .env.development.local (the Vite proxy forwards it as-is). Production: the
+  // signed-in user's Supabase access token — the Edge Functions verify it and attach
+  // the provider token server-side, so no provider secret ever reaches the browser.
+  const getApiToken = async (kind) => {
+    if (import.meta.env.DEV) return kind === "wa" ? WA_BEARER : smsSettings.bearerToken;
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token || "";
+  };
+
+  // Asks (in-app modal) before re-sending to someone who already received a message
+  const confirmResend = async (name, what) => (await askDialog({
+    title: "Send again?",
+    body: `${name} already received ${what}. Sending again messages them a second time.`,
+    actions: [{ value: "yes", label: "Send again", kind: "warn" }],
+  })) === "yes";
+
+  // Works out who a bulk send goes to and asks the user in the modal. When some contacts
+  // share a phone number the user chooses between "Send without duplicates" (the first
+  // record per number) and "Send duplicates too" (every record). Resolves to the chosen
+  // recipients, or null when there is nothing to send or the user cancels.
+  const pickBulkRecipients = async ({ title, emptyMsg, options }) => {
+    const { targets: all, skipped, duplicateGroups } = selectRecipients(records, { ...options, allowDuplicates: true });
+    const note = describeSkipped(skipped);
+    if (!all.length) { showToast(`${emptyMsg} ${note}`.trim(), "warn"); return null; }
+    const unique = dropDuplicates(all);
+    const extra  = all.length - unique.length;   // records that repeat another record's number
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const choice = await askDialog({
+      title,
+      body: (
+        <>
+          <div>
+            <strong style={{color:N.text}}>{plural(unique.length, "contact")}</strong> ready to send{extra ? " (without duplicates)" : ""}.
+          </div>
+          {extra > 0 && (
+            <div style={{marginTop:14}}>
+              <div style={{color:N.amber,fontWeight:700,marginBottom:6}}>
+                ⚠ {plural(extra, "extra record")} {extra === 1 ? "shares" : "share"} a number with another contact
+              </div>
+              <div className="nk-dialog-list">
+                {duplicateGroups.slice(0, 6).map(g => (
+                  <div key={g.phone}><span className="num">+{g.phone}</span> — {g.names.join(", ")}</div>
+                ))}
+                {duplicateGroups.length > 6 && <div style={{color:N.textDim}}>…and {duplicateGroups.length - 6} more</div>}
+              </div>
+              <div style={{marginTop:8,fontSize:12,color:N.textDim}}>
+                <strong>Without duplicates</strong> messages each number once (the first contact listed).{" "}
+                <strong>Duplicates too</strong> messages every record, so these numbers get more than one message and use extra credit.
+              </div>
+            </div>
+          )}
+          {note && <div style={{marginTop:12,fontSize:12,color:N.textDim}}>{note}</div>}
+        </>
+      ),
+      actions: extra > 0
+        ? [{ value:"unique", label:`Send without duplicates (${unique.length})`, kind:"success" },
+           { value:"all",    label:`Send duplicates too (${all.length})`,        kind:"warn" }]
+        : [{ value:"all", label:`Send to ${plural(all.length, "contact")}`, kind:"success" }],
+    });
+    return choice === "unique" ? unique : choice === "all" ? all : null;
+  };
+
   // Fills the {name}/{cardType} placeholders in the SMS template for one record
-  const buildSmsMsg = (rec) => smsMessage.replace("{name}",rec.name||"").replace("{cardType}",rec.cardType||"");
-=======
+  // Also supports {phone} and any extra spreadsheet column as {ColumnName}; unknown {x} is left as typed
   const buildSmsMsg = (rec) => smsMessage.replace(/\{(\w+)\}/g, (_, key) => {
     if (key === "name")     return rec.name     || "";
-    if (key === "cardType") return rec.cardType  || "";
+    if (key === "cardType") return rec.cardType || "";
     if (key === "phone")    return rec.phone ? `+${normalisePhone(rec.phone)}` : "";
     return rec[key] !== undefined ? String(rec[key]) : `{${key}}`;
   });
->>>>>>> Stashed changes
 
   /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
   // Re-encodes a card PNG as JPEG, iteratively lowering quality (and downscaling
   // width first) until the result is under `maxKb` — keeps WhatsApp image uploads
   // fast and comfortably under the provider's size limit
-  const compressCard = (dataUrl, maxKb = 2800, quality = 0.88) => new Promise(resolve => {
+  const compressCard = (dataUrl, maxKb = 2800, quality = 0.88) => new Promise((resolve, reject) => {
     const img = new Image();
+    img.onerror = () => reject(new Error("Could not read the rendered card"));
     img.onload = () => {
       // Scale down if needed so the JPEG stays well under 3 MB
       let w = img.width, h = img.height;
@@ -1426,20 +1655,35 @@ export default function App() {
     const rec = records[idx];
     if (!supabase) throw new Error("Supabase not configured");
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"uploading"} : r));
-    const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec);
-    const dataUrl = await compressCard(rawDataUrl);
-    const blob = await fetch(dataUrl).then(r => r.blob());
-    const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.jpg`;
-    const { error: upErr } = await supabase.storage
-      .from("wa-cards")
-      .upload(storageKey, blob, { contentType:"image/jpeg", upsert:true });
-    if (upErr) {
+    try {
+      const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+      const dataUrl = await compressCard(rawDataUrl);
+      const blob = await fetch(dataUrl).then(r => r.blob());
+      const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.jpg`;
+      const { error: upErr } = await supabase.storage
+        .from("wa-cards")
+        .upload(storageKey, blob, { contentType:"image/jpeg", upsert:true });
+      if (upErr) throw new Error(upErr.message);
+      const { data: { publicUrl } } = supabase.storage.from("wa-cards").getPublicUrl(storageKey);
+      setRecords(rs => rs.map((r,i) => i===idx ? {...r, cardUrl:publicUrl, uploadStatus:"uploaded"} : r));
+      return publicUrl;
+    } catch (err) {
+      // Any failure (render, QR/template load, compression, Storage) — never leave the row on "uploading"
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"failed"} : r));
-      throw new Error(upErr.message);
+      throw err;
     }
-    const { data: { publicUrl } } = supabase.storage.from("wa-cards").getPublicUrl(storageKey);
-    setRecords(rs => rs.map((r,i) => i===idx ? {...r, cardUrl:publicUrl, uploadStatus:"uploaded"} : r));
-    return publicUrl;
+  };
+
+  // Batch & Send row action: runs uploadCardSingle and reports the outcome as a
+  // toast (that tab has no upload log)
+  const uploadCardWithToast = async (idx) => {
+    const name = records[idx]?.name || `#${idx+1}`;
+    try {
+      await uploadCardSingle(idx);
+      showToast(`Card uploaded for ${name}`, "success");
+    } catch (e) {
+      showToast(`Upload failed for ${name}: ${e.message}`, "warn");
+    }
   };
 
   // Runs uploadCardSingle for every record, one at a time, tracking per-row
@@ -1463,7 +1707,7 @@ export default function App() {
     showToast(`Upload done — ${ok} uploaded${fail ? `, ${fail} failed` : ""}`, ok ? "success" : "warn");
   };
 
-  /* Silently persist a single card's status to DB after each send */
+  /* Silently persist a single card's status to the DB right after it changes */
   const autoSaveCard = (dbId, waStatus, smsStatus) => {
     if (!supabase || !savedEventId || !dbId) return;
     const updates = {};
@@ -1475,21 +1719,17 @@ export default function App() {
   };
 
   /* Poll delivery report until we get a terminal status (runs in background) */
-<<<<<<< Updated upstream
   // Re-checks a "pending" WA message's delivery report a few times (with increasing
   // delays) to catch late rejections — e.g. the number turns out not to be on
   // WhatsApp — after it was already optimistically marked Sent. groupId/id are the
   // provider's status codes; see the branches below for what each combination means.
-  const pollWaStatus = async (messageId, idx, recName) => {
-=======
   const pollWaStatus = async (messageId, idx, recName, dbId) => {
->>>>>>> Stashed changes
     const delays = [4000, 6000, 8000, 10000, 12000];
     for (const delay of delays) {
       await new Promise(r => setTimeout(r, delay));
       try {
         const res = await fetch(`${WA_BASE}/api/whatsapp/v1/reports?messageId=${messageId}&limit=1`, {
-          headers: { Authorization: `Bearer ${WA_BEARER}`, Accept: "application/json" },
+          headers: { Authorization: `Bearer ${await getApiToken("wa")}`, Accept: "application/json" },
         });
         if (!res.ok) continue;
         const data = await res.json().catch(() => null);
@@ -1497,11 +1737,15 @@ export default function App() {
         if (!result) continue;
         const grp = result.status?.groupId;
         const rid = result.status?.id;
-        if (grp === 18) continue;
+        if (grp === 18) continue; // still pending, keep polling
         if (grp === 20 && [73, 109, 77].includes(rid)) {
-          return; // confirmed delivered — already marked sent
+          // confirmed delivered — already marked sent, nothing to do
+          return;
         }
-        if ((grp === 20 && [75, 76, 78, 79, 80].includes(rid)) || grp === 19) {
+        if (
+          (grp === 20 && [75, 76, 78, 79, 80].includes(rid)) ||
+          grp === 19
+        ) {
           setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
           setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"invalid"} : x));
           autoSaveCard(dbId, WA.invalid);
@@ -1516,6 +1760,7 @@ export default function App() {
         }
       } catch { /* network error, retry */ }
     }
+    // exhausted — leave as Sent (message was accepted by server)
   };
 
   /* Step 2 — Send WA using the already-uploaded cardUrl */
@@ -1525,9 +1770,12 @@ export default function App() {
   // A "pending" (groupId 18) response kicks off pollWaStatus in the background.
   const sendWaSingle = async (idx) => {
     const rec = records[idx];
+    if (rec.waStatus === WA.sending) return;   // a request for this row is already in flight
     if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return; }
+    if (!isValidPhone(rec.phone)) { showToast(`Invalid phone number for ${rec.name}`, "warn"); return; }
     if (!rec.cardUrl) { showToast(`Upload card first for ${rec.name}`, "warn"); return; }
     if (!waTemplate)  { showToast("Select a template first", "warn"); return; }
+    if (rec.waStatus === WA.sent && !(await confirmResend(rec.name, "this card on WhatsApp"))) return;
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sending} : r));
     setBulkLog(l => {
       const exists = l.find(x => x.name === rec.name);
@@ -1541,18 +1789,16 @@ export default function App() {
         template: waTemplate,
         header:   { image: { file: rec.cardUrl, name: rec.name || "Event Card" } },
       };
-      console.log("WA request:", JSON.stringify(reqBody, null, 2));
       const res = await fetch(`${WA_BASE}/api/whatsapp/v2/text/single`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${WA_BEARER}`,
+          Authorization: `Bearer ${await getApiToken("wa")}`,
           "Content-Type": "application/json",
           Accept: "application/json",
         },
         body: JSON.stringify(reqBody),
       });
       const rawText = await res.text().catch(() => "");
-      console.log("WA response:", res.status, rawText);
 
       const markSent = () => {
         setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sent} : r));
@@ -1616,25 +1862,33 @@ export default function App() {
     }
   };
 
-  // Sends WhatsApp messages to every record that has both a phone and an already-
-  // uploaded card, one at a time with a 1s pacing delay between sends, then saves
-  // the updated statuses back to `event_cards` if an event is loaded
+  // Sends the WhatsApp card to every record that has a valid phone and an uploaded
+  // card, one at a time with a 1s pacing delay. Skips contacts already sent, asks in a
+  // modal first (a bulk send costs credits and can't be recalled) — including whether to
+  // skip or include repeated numbers — then saves the resulting statuses to
+  // `event_cards` if an event is loaded.
   const sendWaAll = async () => {
-    const ready = records.map((r,i)=>({r,i})).filter(({r})=>r.phone && r.cardUrl);
-    if (!ready.length) { showToast("No cards uploaded yet — upload first","warn"); return; }
+    if (bulkSending) return;
+    const targets = await pickBulkRecipients({
+      title:    "Send WhatsApp cards",
+      emptyMsg: "Nothing to send — upload cards first.",
+      options:  { isDone: r => r.waStatus === WA.sent, isEligible: r => !!r.cardUrl },
+    });
+    if (!targets) return;
     setBulkSending(true);
-    setBulkLog(ready.map(({r})=>({ name:r.name, status:"sending" })));
-    for (const {i} of ready) {
-      await sendWaSingle(i);
+    setBulkLog(targets.map(({rec}) => ({ name:rec.name, status:"sending" })));
+    for (const {index} of targets) {
+      await sendWaSingle(index);
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
     setBulkSending(false);
-    showToast(`Done — ${ready.length} WA messages dispatched`, "success");
-    if (savedEventId) await saveCards(savedEventId);
+    showToast(`Done — ${targets.length} WA messages dispatched`, "success");
+    // recordsRef is current here: the 1s pacing delay above lets React flush the status updates
+    if (savedEventId) await saveCards(savedEventId, recordsRef.current);
   };
 
   // Exports an Excel (.xlsx) report of WhatsApp send status per record, named after the event
-  const downloadWaReport = () => {
+  const downloadWaReport = async () => {
     const statusLabel = {
       [WA.sent]:    "Sent",
       [WA.invalid]: "Invalid",
@@ -1648,6 +1902,7 @@ export default function App() {
       "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
       "WA Status":  statusLabel[r.waStatus] || "Not Sent",
     }));
+    const XLSX = await loadXlsx();
     const ws = XLSX.utils.json_to_sheet(rows);
     ws["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 18 }, { wch: 18 }];
     const wb = XLSX.utils.book_new();
@@ -1656,10 +1911,8 @@ export default function App() {
     XLSX.writeFile(wb, `${evName}_WA_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
-<<<<<<< Updated upstream
-  // Downloads one record's rendered card as a single PNG file
-=======
-  const downloadFullReport = () => {
+  // Exports one Excel sheet with both WhatsApp and SMS status per record, named after the event
+  const downloadFullReport = async () => {
     const waLabel  = { [WA.sent]:"Sent", [WA.invalid]:"Invalid", [WA.notSent]:"Not Sent", [WA.sending]:"Sending", [WA.idle]:"Not Sent" };
     const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
     const rows = records.map(r => ({
@@ -1669,6 +1922,7 @@ export default function App() {
       "WA Status":  waLabel[r.waStatus]   || "Not Sent",
       "SMS Status": smsLabel[r.smsStatus] || "Pending",
     }));
+    const XLSX = await loadXlsx();
     const ws = XLSX.utils.json_to_sheet(rows);
     ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:14 }, { wch:14 }];
     const wb = XLSX.utils.book_new();
@@ -1677,27 +1931,32 @@ export default function App() {
     XLSX.writeFile(wb, `${evName}_Send_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
->>>>>>> Stashed changes
+  // Downloads one record's rendered card as a single PNG file
   const downloadCard = async (idx) => {
     const rec = records[idx];
-    const url = await exportCard(bgImage, bgSize, designElements, rec);
-    const a = document.createElement("a"); a.download=`${(rec.name||`Record_${idx}`).replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
+    try {
+      const url = await exportCard(bgImage, bgSize, designElements, rec);
+      const a = document.createElement("a"); a.download=`${(rec.name||`Record_${idx}`).replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
+    } catch (err) { showToast(`Could not render card for ${rec.name}: ${err.message}`, "warn"); }
   };
 
   // Renders every record's card and zips them into a single "nikadi_cards.zip" download
   const downloadAll = async () => {
     if (!records.length) { showToast("No records","warn"); return; }
     showToast(`Zipping ${records.length} cards…`,"info");
-    const zip = new JSZip();
-    for (let i=0;i<records.length;i++) {
-      const rec = records[i];
-      const dataUrl = await exportCard(bgImage, bgSize, designElements, rec);
-      zip.file(`${(rec.name||`Record_${i}`).replace(/\s/g,"_")}_Nikadi.png`, dataUrl.split(",")[1], { base64:true });
-    }
-    const blob = await zip.generateAsync({ type:"blob" });
-    const a = document.createElement("a"); a.download="nikadi_cards.zip"; a.href=URL.createObjectURL(blob); a.click();
-    URL.revokeObjectURL(a.href);
-    showToast(`✓ nikadi_cards.zip (${records.length} cards)`, "success");
+    try {
+      const JSZip = await loadJsZip();
+      const zip = new JSZip();
+      for (let i=0;i<records.length;i++) {
+        const rec = records[i];
+        const dataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+        zip.file(`${(rec.name||`Record_${i}`).replace(/\s/g,"_")}_Nikadi.png`, dataUrl.split(",")[1], { base64:true });
+      }
+      const blob = await zip.generateAsync({ type:"blob" });
+      const a = document.createElement("a"); a.download="nikadi_cards.zip"; a.href=URL.createObjectURL(blob); a.click();
+      URL.revokeObjectURL(a.href);
+      showToast(`✓ nikadi_cards.zip (${records.length} cards)`, "success");
+    } catch (err) { showToast(`Download failed: ${err.message}`, "warn"); }
   };
 
   /* ── SMS ── */
@@ -1712,8 +1971,7 @@ export default function App() {
     try {
       const res = await fetch(`${SMS_BASE}/api/v2/balance`, {
         headers: {
-          Authorization: `Bearer ${smsSettings.bearerToken}`,
-          "Content-Type": "application/json",
+          Authorization: `Bearer ${await getApiToken("sms")}`,
           Accept: "application/json",
         },
       });
@@ -1727,16 +1985,22 @@ export default function App() {
   };
 
   // Sends a single SMS to one record (rendered from the SMS template) and updates
-  // its smsStatus from the provider's response groupId (18=sent, 20=delivered)
+  // its smsStatus from the provider's response groupId (18=sent, 20=delivered).
+  // Guarded against double-clicks (in-flight set) and accidental re-sends (confirm).
   const sendSmsToOne = async (idx) => {
     const rec = records[idx];
     if (!rec.phone) { showToast("No phone for " + rec.name, "warn"); return; }
+    if (!isValidPhone(rec.phone)) { showToast(`Invalid phone number for ${rec.name}`, "warn"); return; }
+    if (smsInFlight.current.has(idx)) return;
+    if ((rec.smsStatus === SMS.sent || rec.smsStatus === SMS.delivered)
+        && !(await confirmResend(rec.name, "this SMS"))) return;
+    smsInFlight.current.add(idx);
     setSmsLog(l => [...l, { name: rec.name, status: "sending" }]);
     try {
       const res = await fetch(`${SMS_API}/text/single`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${smsSettings.bearerToken}`,
+          Authorization: `Bearer ${await getApiToken("sms")}`,
           "Content-Type": "application/json",
           Accept: "application/json",
         },
@@ -1765,19 +2029,30 @@ export default function App() {
       setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: SMS.failed } : r));
       autoSaveCard(rec.dbId, undefined, SMS.failed);
       showToast(`SMS failed for ${rec.name}: ${err.message}`, "warn");
+    } finally {
+      smsInFlight.current.delete(idx);
     }
   };
 
-  // Sends SMS to every record with a phone number in one bulk API call, then maps
-  // the per-recipient results back onto `records` by matching normalised phone
-  // numbers, and saves the updated statuses if an event is loaded
+  // Sends SMS to every record with a valid phone number in one bulk API call, then maps
+  // the per-recipient results back onto `records` by matching normalised phone numbers,
+  // and saves the updated statuses if an event is loaded. Skips contacts already sent and
+  // asks in a modal first (it costs credits) — including whether to skip or include
+  // repeated numbers.
   const sendAllSms = async () => {
-    const withPhone = records.filter(r => r.phone);
-    if (!withPhone.length) { showToast("No phone numbers", "warn"); return; }
+    if (smsSending) return;
+    const targets = await pickBulkRecipients({
+      title:    "Send SMS",
+      emptyMsg: "No SMS to send.",
+      options:  { isDone: r => r.smsStatus === SMS.sent || r.smsStatus === SMS.delivered },
+    });
+    if (!targets) return;
     setSmsSending(true);
-    setSmsLog(withPhone.map(rec => ({ name: rec.name, status: "sending" })));
+    setSmsLog(targets.map(({rec}) => ({ name: rec.name, status: "sending" })));
+    // How this run changes `records`; applied to state and to the copy that gets saved
+    let applyResults = (rs) => rs;
     try {
-      const messages = withPhone.map(rec => ({
+      const messages = targets.map(({rec}) => ({
         from: smsSettings.senderId || "NIKADI",
         to:   normalisePhone(rec.phone),
         text: buildSmsMsg(rec),
@@ -1785,7 +2060,7 @@ export default function App() {
       const res = await fetch(`${SMS_API}/text/multi`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${smsSettings.bearerToken}`,
+          Authorization: `Bearer ${await getApiToken("sms")}`,
           "Content-Type": "application/json",
           Accept: "application/json",
         },
@@ -1794,28 +2069,33 @@ export default function App() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const respMsgs = data?.messages || [];
-      setRecords(rs => rs.map(r => {
-        if (!r.phone) return r;
-        const match = respMsgs.find(m => m.to === normalisePhone(r.phone));
-        if (!match) return r;
-        if (match.status.groupId === 20) return { ...r, smsStatus: SMS.delivered };
-        if (match.status.groupId === 18) return { ...r, smsStatus: SMS.sent };
-        return { ...r, smsStatus: SMS.failed };
-      }));
-      setSmsLog(withPhone.map(rec => {
-        const match = respMsgs.find(m => m.to === normalisePhone(rec.phone));
-        const grp = match?.status?.groupId;
-        const status = grp === 20 ? "delivered" : grp === 18 ? "sent" : "failed";
-        return { name: rec.name, status };
-      }));
-      const sentCount = respMsgs.filter(m => m.status.groupId === 18 || m.status.groupId === 20).length;
-      showToast(`Done — ${sentCount}/${withPhone.length} SMS sent`, "success");
+      // The provider echoes each recipient's number. If a number was sent more than once
+      // (user chose "Send duplicates too"), hand out its results in order, one per record.
+      const queues = new Map();
+      respMsgs.forEach(m => {
+        const k = String(m.to);
+        if (!queues.has(k)) queues.set(k, []);
+        queues.get(k).push(m);
+      });
+      const groupIds = targets.map(({rec}) => queues.get(normalisePhone(rec.phone))?.shift()?.status?.groupId);
+      const statusOf = (grp) => grp === 20 ? SMS.delivered : grp === 18 ? SMS.sent : SMS.failed;
+      // index → new smsStatus, only for recipients the provider actually reported on
+      const updates = new Map(targets.flatMap(({index}, n) => groupIds[n] === undefined ? [] : [[index, statusOf(groupIds[n])]]));
+      applyResults = (rs) => rs.map((r, i) => updates.has(i) ? { ...r, smsStatus: updates.get(i) } : r);
+      setRecords(applyResults);
+      setSmsLog(targets.map(({rec}, n) => ({
+        name: rec.name,
+        status: groupIds[n] === 20 ? "delivered" : groupIds[n] === 18 ? "sent" : "failed",
+      })));
+      const sentCount = respMsgs.filter(m => m.status?.groupId === 18 || m.status?.groupId === 20).length;
+      showToast(`Done — ${sentCount}/${targets.length} SMS sent`, "success");
     } catch (err) {
-      setSmsLog(withPhone.map(rec => ({ name: rec.name, status: "failed" })));
+      setSmsLog(targets.map(({rec}) => ({ name: rec.name, status: "failed" })));
       showToast(`Bulk SMS failed: ${err.message}`, "warn");
     }
     setSmsSending(false);
-    if (savedEventId) await saveCards(savedEventId);
+    // `records` in this closure is pre-send; apply the same updates to the latest list
+    if (savedEventId) await saveCards(savedEventId, applyResults(recordsRef.current));
   };
 
   // Exports phone+message pairs as a CSV, for sending via a third-party bulk SMS tool
@@ -1826,7 +2106,8 @@ export default function App() {
     showToast(`Downloaded SMS list (${rows.length-1} recipients)`,"success");
   };
 
-  const downloadSmsReport = () => {
+  // Exports an Excel (.xlsx) report of SMS status per record, named after the event
+  const downloadSmsReport = async () => {
     const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
     const rows = records.map(r => ({
       "Name":       r.name     || "",
@@ -1834,6 +2115,7 @@ export default function App() {
       "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
       "SMS Status": smsLabel[r.smsStatus] || "Pending",
     }));
+    const XLSX = await loadXlsx();
     const ws = XLSX.utils.json_to_sheet(rows);
     ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:14 }];
     const wb = XLSX.utils.book_new();
@@ -1846,6 +2128,8 @@ export default function App() {
   const waSentCount    = records.filter(r=>r.waStatus===WA.sent).length;
   const waInvalidCount = records.filter(r=>r.waStatus===WA.invalid).length;
   const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
+  const waReportReady  = records.some(r=>r.waStatus===WA.sent||r.waStatus===WA.invalid||r.waStatus===WA.notSent);
+  const smsReportReady = records.some(r=>r.smsStatus!==SMS.pending);   // reads records, not the log, so it outlives the log
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
   /* ── Michango: hide QR + Card Type on canvas and exports ── */
@@ -1857,6 +2141,15 @@ export default function App() {
   /* ══════════════════════════════════════════════════════
      RENDER
   ══════════════════════════════════════════════════════ */
+  if (user === undefined) return (
+    <div style={{minHeight:"100vh",background:"#050d1f",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{width:40,height:40,border:"3px solid #1e3a5f",borderTopColor:"#3b82f6",borderRadius:"50%",animation:"spin 0.8s linear infinite"}} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+
+  if (!user) return <LoginPage />;
+
   return (
     <>
       <style>{CSS}</style>
@@ -1873,6 +2166,35 @@ export default function App() {
         {/* Event modal */}
         {modalEvent !== null && (
           <EventModal initial={modalEvent} onSave={onModalSave} onClose={() => setModalEvent(null)} saving={isSaving} />
+        )}
+
+        {/* Activity logs — floating (position: fixed) so they never shift the page; each clears
+            itself 5 s after its run finishes */}
+        {(uploadLog.length > 0 || bulkLog.length > 0 || smsLog.length > 0) && (
+          <div className="nk-activity" role="log" aria-live="polite">
+            <LogSection title="Upload Log"   color={N.sky}   styles={LOG_STYLES.upload} log={uploadLog} onClose={()=>setUploadLog([])} />
+            <LogSection title="WhatsApp Log" color={N.green} styles={LOG_STYLES.wa}     log={bulkLog}   onClose={()=>setBulkLog([])} />
+            <LogSection title="SMS Log"      color={N.teal}  styles={LOG_STYLES.sms}    log={smsLog}    onClose={()=>setSmsLog([])} />
+          </div>
+        )}
+
+        {/* Choice dialog (bulk-send / re-send confirmations) */}
+        {dialog && (
+          <div className="nk-overlay" onClick={e => e.target===e.currentTarget && closeDialog(null)}>
+            <div className="nk-dialog" role="dialog" aria-modal="true" aria-labelledby="nk-dialog-title">
+              <div className="nk-dialog-title" id="nk-dialog-title">{dialog.title}</div>
+              <div className="nk-dialog-body">{dialog.body}</div>
+              <div className="nk-dialog-actions">
+                {/* Cancel is focused by default so a stray Enter can never trigger a send */}
+                <button className="nk-btn nk-btn-ghost" autoFocus onClick={()=>closeDialog(null)}>Cancel</button>
+                {dialog.actions.map(a => (
+                  <button key={a.value} className={`nk-btn nk-btn-${a.kind||"primary"}`} onClick={()=>closeDialog(a.value)}>
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Delete confirm */}
@@ -1916,6 +2238,21 @@ export default function App() {
             <button className="nk-btn nk-btn-primary" onClick={downloadAll}>
               ⬇ Download All ({records.length})
             </button>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
+              {user.user_metadata?.avatar_url && (
+                <img src={user.user_metadata.avatar_url} alt="" style={{width:28,height:28,borderRadius:"50%",objectFit:"cover"}} />
+              )}
+              <span style={{fontSize:12,color:N.textMid,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {user.user_metadata?.full_name || user.email}
+              </span>
+              <button
+                className="nk-btn nk-btn-ghost"
+                style={{fontSize:12,padding:"4px 10px"}}
+                onClick={() => supabase?.auth.signOut()}
+              >
+                Sign out
+              </button>
+            </div>
           </div>
         </header>
 
@@ -2368,12 +2705,18 @@ export default function App() {
               <div className="nk-page" style={{padding:"0 0 40px"}}>
                 <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
                   <div style={{flex:"0 0 340px"}}>
-<<<<<<< Updated upstream
-                    <div className="nk-sec nk-sec-teal">SMS Message</div>
+                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                      <div className="nk-sec nk-sec-teal" style={{margin:0}}>SMS Message</div>
+                      {savedEventId && (
+                        <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: smsDraftSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
+                          {smsDraftSaved ? "✓ draft saved" : "draft auto-saves"}
+                        </span>
+                      )}
+                    </div>
                     <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>
                       Separate from WhatsApp — sent as plain SMS.
                     </p>
-                    <textarea className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
+                    <textarea ref={smsTextareaRef} className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
                     <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8,marginBottom:14}}>
                       <button
                         className="nk-btn nk-btn-teal"
@@ -2389,22 +2732,7 @@ export default function App() {
                         <span style={{fontSize:11,color:N.textDim}}>Save the event first to persist this template</span>
                       )}
                     </div>
-                    <p style={{fontSize:10,color:N.textDim,lineHeight:1.7,marginBottom:14}}>
-                      Variables: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{name}"}</code> &nbsp;
-                      <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>{"{cardType}"}</code>
-                    </p>
-=======
-                    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-                      <div className="nk-sec nk-sec-teal" style={{margin:0}}>SMS Message</div>
-                      {savedEventId && (
-                        <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: smsDraftSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
-                          {smsDraftSaved ? "✓ draft saved" : "auto-saves to event"}
-                        </span>
-                      )}
-                    </div>
-                    <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>Separate from WhatsApp — sent as plain SMS.</p>
-                    <textarea ref={smsTextareaRef} className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
-                    {/* Clickable column chips — insert placeholder at cursor */}
+                    {/* Clickable column chips — insert the placeholder at the cursor */}
                     <div style={{marginBottom:14}}>
                       <div style={{fontSize:10,color:N.textDim,marginBottom:6}}>Click to insert variable:</div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
@@ -2430,7 +2758,6 @@ export default function App() {
                         ))}
                       </div>
                     </div>
->>>>>>> Stashed changes
                     {(()=>{
                       const sample   = buildSmsMsg(records[0]||{});
                       const len      = sample.length;
@@ -2581,19 +2908,7 @@ export default function App() {
 
                   <div style={{flex:1}}>
                     <div className="nk-sec nk-sec-teal">SMS Preview per Recipient</div>
-                    {smsLog.length > 0 && (
-                      <div className="nk-log" style={{marginBottom:12}}>
-                        <div className="nk-sec">Send Log</div>
-                        {smsLog.map((x,i)=>(
-                          <div key={i} className="nk-log-row" style={{color:x.status==="delivered"?N.green:x.status==="sent"?N.teal:x.status==="failed"?N.red:N.textMid}}>
-                            <span>{x.status==="delivered"?"✓✓":x.status==="sent"?"↑":x.status==="failed"?"✗":"⏳"}</span>
-                            <span>{x.name}</span>
-                            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {!smsSending && smsLog.length > 0 && (
+                    {!smsSending && smsReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadSmsReport}
                         style={{background:N.tealBg,color:N.teal,border:`1px solid ${N.teal}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
                         <span style={{fontSize:16}}>⬇</span> Download SMS Report (.xlsx)
@@ -2697,36 +3012,9 @@ export default function App() {
 
                   {/* Right: table */}
                   <div style={{flex:1}}>
-                    {/* Upload log */}
-                    {uploadLog.length > 0 && (
-                      <div className="nk-log" style={{marginBottom:12}}>
-                        <div className="nk-sec" style={{color:N.sky,marginBottom:6}}>Upload Log</div>
-                        {uploadLog.map((x,i)=>(
-                          <div key={i} className="nk-log-row"
-                            style={{color:x.status==="uploaded"?N.green:x.status==="failed"?N.red:N.textMid}}>
-                            <span>{x.status==="uploaded"?"✓":x.status==="failed"?"✗":"⏳"}</span>
-                            <span>{x.name}</span>
-                            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {/* Send log */}
-                    {bulkLog.length > 0 && (
-                      <div className="nk-log" style={{marginBottom:12}}>
-                        <div className="nk-sec" style={{color:N.green,marginBottom:6}}>Send Log</div>
-                        {bulkLog.map((x,i)=>(
-                          <div key={i} className="nk-log-row"
-                            style={{color:x.status==="sent"?N.green:x.status==="invalid"?N.amber:x.status==="not sent"?N.red:N.textMid}}>
-                            <span>{x.status==="sent"?"✓":x.status==="invalid"?"⚠":x.status==="not sent"?"✗":"⏳"}</span>
-                            <span>{x.name}</span>
-                            <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {/* Download report — shown after sending completes */}
-                    {!bulkSending && bulkLog.length > 0 && (
+                    {/* Download report — available once any WhatsApp send has finished (it reads the
+                        records, not the log, so it stays after the log clears itself) */}
+                    {!bulkSending && waReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadWaReport}
                         style={{background:N.greenBg,color:N.green,border:`1px solid ${N.green}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
                         <span style={{fontSize:16}}>⬇</span> Download WA Report (.xlsx)
@@ -2857,24 +3145,13 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                {bulkLog.length > 0 && (
-                  <div className="nk-log">
-                    <div className="nk-sec">WhatsApp Log</div>
-                    {bulkLog.map((x,i)=>(
-                      <div key={i} className="nk-log-row" style={{color:x.status==="sent"?N.green:N.textMid}}>
-                        <span>{x.status==="sent"?"✓":"⏳"}</span><span>{x.name}</span>
-                        <span style={{fontSize:11,color:N.textDim}}>{x.status==="sent"?"Sent":"Sending…"}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
                 <div className="nk-table-wrap">
                   <table className="nk-table">
                     <thead><tr>{["#","Name","Card Type","Phone","WA Status","SMS","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
                       {records.map((rec,i)=>(
                         <RecordRow key={i} rec={rec} idx={i}
-                          onEdit={editRecord} onSendWa={sendWaSingle} onDownload={downloadCard}
+                          onEdit={editRecord} onUpload={uploadCardWithToast} onSendWa={sendWaSingle} onDownload={downloadCard}
                           onSendSms={sendSmsToOne}
                           isActive={activeIdx===i}
                           onActivate={()=>{ setActiveIdx(i); setTab("design"); }} />
