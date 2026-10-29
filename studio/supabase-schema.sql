@@ -56,38 +56,70 @@ CREATE INDEX IF NOT EXISTS idx_saved_templates_created ON saved_templates(create
 
 -- =====================================================================
 -- ROW LEVEL SECURITY
+-- Only signed-in users can read or write app data. The anon/publishable key
+-- ships inside the browser bundle, so anything granted to `anon` is public:
+-- never add anon policies for these tables.
+--
+-- Every signed-in user can see every event (there is no per-user ownership yet),
+-- so also restrict WHO can sign in: Supabase Dashboard > Authentication >
+-- Sign In / Providers > turn OFF "Allow new users to sign up", then invite the
+-- team members (or keep sign-up on only while onboarding them).
 -- =====================================================================
 ALTER TABLE events           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_cards      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE saved_templates  ENABLE ROW LEVEL SECURITY;
 
+-- Legacy wide-open policies (anyone holding the anon key had full access)
 DROP POLICY IF EXISTS "allow_all_events"            ON events;
 DROP POLICY IF EXISTS "allow_all_event_cards"       ON event_cards;
 DROP POLICY IF EXISTS "allow_all_saved_templates"   ON saved_templates;
 
-CREATE POLICY "allow_all_events"          ON events           FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_event_cards"     ON event_cards      FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "allow_all_saved_templates" ON saved_templates  FOR ALL USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "authenticated_all_events"            ON events;
+DROP POLICY IF EXISTS "authenticated_all_event_cards"       ON event_cards;
+DROP POLICY IF EXISTS "authenticated_all_saved_templates"   ON saved_templates;
+
+CREATE POLICY "authenticated_all_events"          ON events           FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all_event_cards"     ON event_cards      FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all_saved_templates" ON saved_templates  FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
 -- =====================================================================
--- STORAGE BUCKET
+-- STORAGE BUCKETS
+--   templates : card background images (read back by the app via public URL)
+--   wa-cards  : per-guest rendered card JPEGs; the WhatsApp provider fetches
+--               them by public URL, so the bucket must stay public
+-- Public buckets serve files by URL without any policy; the policies below only
+-- control who can upload and list. Size and MIME limits stop the buckets being
+-- used to host arbitrary files.
 -- =====================================================================
--- In Supabase Dashboard:
---   1. Go to Storage > New Bucket
---   2. Name: templates
---   3. Public bucket: YES (toggle on)
---   4. Save
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES
+  ('templates', 'templates', true, 10485760,
+     ARRAY['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml']),
+  ('wa-cards',  'wa-cards',  true,  5242880,
+     ARRAY['image/jpeg'])
+ON CONFLICT (id) DO UPDATE
+  SET public             = EXCLUDED.public,
+      file_size_limit    = EXCLUDED.file_size_limit,
+      allowed_mime_types = EXCLUDED.allowed_mime_types;
 
--- Or via SQL:
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('templates', 'templates', true)
-ON CONFLICT (id) DO NOTHING;
-
+-- Legacy policies (public upload/listing)
 DROP POLICY IF EXISTS "public_read_templates"   ON storage.objects;
 DROP POLICY IF EXISTS "public_insert_templates" ON storage.objects;
 
-CREATE POLICY "public_read_templates"
-  ON storage.objects FOR SELECT USING (bucket_id = 'templates');
+DROP POLICY IF EXISTS "authenticated_read_templates"   ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_insert_templates" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_read_wa_cards"    ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_insert_wa_cards"  ON storage.objects;
 
-CREATE POLICY "public_insert_templates"
-  ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'templates');
+CREATE POLICY "authenticated_read_templates"
+  ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'templates');
+CREATE POLICY "authenticated_insert_templates"
+  ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'templates');
+CREATE POLICY "authenticated_read_wa_cards"
+  ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'wa-cards');
+CREATE POLICY "authenticated_insert_wa_cards"
+  ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'wa-cards');
+
+-- If the wa-cards bucket was created by hand in the dashboard earlier, also open
+-- Storage > Policies and delete any leftover policy that grants INSERT/SELECT to
+-- `anon` or `public` on it — this script can't know their names.

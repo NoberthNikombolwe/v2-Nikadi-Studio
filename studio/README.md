@@ -17,7 +17,7 @@ A web application for designing, managing, and distributing personalised event i
 9. [Step 5 — Run the Database Schema](#step-5--run-the-database-schema)
 10. [Step 6 — Run in Development](#step-6--run-in-development)
 11. [Step 7 — Build for Production](#step-7--build-for-production)
-12. [Step 8 — Deploy SMS Edge Function (Production Only)](#step-8--deploy-sms-edge-function-production-only)
+12. [Step 8 — Deploy the Messaging Edge Functions (Production Only)](#step-8--deploy-the-messaging-edge-functions-production-only)
 13. [Features](#features)
 14. [SMS Integration](#sms-integration)
 15. [WhatsApp Integration](#whatsapp-integration)
@@ -60,15 +60,22 @@ Nikadi Studio lets you:
 ```
 studio/
 ├── src/
-│   └── App.jsx               # Entire application (single-file architecture)
+│   ├── App.jsx               # Application UI + state (single-file architecture)
+│   ├── LoginPage.jsx         # Google sign-in gate
+│   └── lib/
+│       ├── supabase.js       # Supabase client
+│       ├── phone.js          # Phone normalisation / validation (unit-tested)
+│       └── recipients.js     # Bulk-send recipient selection (unit-tested)
 ├── supabase/
 │   └── functions/
-│       └── send-sms/
-│           └── index.ts      # Supabase Edge Function — SMS proxy (production)
+│       ├── _shared/proxy.ts  # Auth + endpoint allowlist shared by both proxies
+│       ├── send-sms/         # Supabase Edge Function — SMS proxy (production)
+│       └── send-wa/          # Supabase Edge Function — WhatsApp proxy (production)
 ├── public/                   # Static assets
-├── supabase-schema.sql       # Database schema (run once in Supabase)
-├── vite.config.js            # Vite config with SMS dev proxy
-├── .env.local                # Environment variables (not committed)
+├── supabase-schema.sql       # Database schema, RLS and storage (run in Supabase)
+├── vite.config.js            # Vite config with SMS/WhatsApp dev proxies
+├── .env.local                # Public config (not committed)
+├── .env.development.local    # Dev-only provider tokens (not committed)
 └── package.json
 ```
 
@@ -133,14 +140,21 @@ cp .env.example .env.local
 ```env
 VITE_SUPABASE_URL=https://your-project-ref.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key-here
-VITE_SMS_BEARER_TOKEN=your-messaging-service-bearer-token
 VITE_SMS_SENDER_ID=NIKADI
+```
+
+Replace the Supabase values with the ones you copied from Supabase in Step 3.
+
+For **local development only**, put the messaging-service.co.tz bearer token in a separate `.env.development.local`:
+
+```env
+VITE_SMS_BEARER_TOKEN=your-messaging-service-bearer-token
 VITE_WA_BEARER_TOKEN=your-messaging-service-bearer-token
 ```
 
-Replace the Supabase values with the ones you copied from Supabase in Step 3. Get the messaging-service.co.tz bearer token from your account there.
+Vite only loads that file for `npm run dev`, never for `npm run build`. **Never put the provider token in `.env.local`** — every `VITE_` value present at build time is baked into the public JavaScript bundle. In production the token lives in Supabase secrets (Step 8) and the browser only ever sends the signed-in user's session.
 
-> `.env.local` is listed in `.gitignore` and will never be committed to git.
+> `.env.local` and `.env.development.local` are git-ignored (`*.local`) and will never be committed.
 
 ---
 
@@ -160,9 +174,14 @@ This creates three tables:
 | `saved_templates` | Reusable card designs |
 
 It also sets up:
-- Row Level Security (RLS) policies (open read/write for internal use)
+- Row Level Security (RLS) so **only signed-in users** can read or write any table (it removes the old open-to-everyone policies if you ran an earlier version of this script)
 - Indexes for performance
-- The `templates` storage bucket (if not already created)
+- The `templates` and `wa-cards` storage buckets, with file-size and MIME-type limits and sign-in-only uploads (`wa-cards` must stay public: the WhatsApp provider downloads each card by URL)
+
+The script is safe to re-run. After running it:
+
+1. Go to **Authentication → Sign In / Providers** and turn **off "Allow new users to sign up"**, then invite your team. RLS gives every signed-in user access to every event, so who can sign in is your access control.
+2. Go to **Storage → Policies** and delete any leftover `anon`/`public` policy on `wa-cards` that you may have created by hand earlier.
 
 ---
 
@@ -178,9 +197,10 @@ The Vite dev server is pre-configured with a proxy so the SMS API calls work fro
 
 ```
 /sms-proxy/* → https://messaging-service.co.tz/*
+/wa-proxy/*  → https://messaging-service.co.tz/*
 ```
 
-This proxy is active **only in development**. For production see Step 8.
+These proxies are active **only in development**. For production see Step 8.
 
 ---
 
@@ -198,58 +218,64 @@ To preview the production build locally:
 npm run preview
 ```
 
-> In a production build, SMS calls are routed through the Supabase Edge Function. Make sure you have completed Step 8 before deploying.
+> In a production build, SMS and WhatsApp calls are routed through the `send-sms` / `send-wa` Supabase Edge Functions. Make sure you have completed Step 8 before deploying, and that `npm run build` was not run with provider tokens in `.env.local`.
 
 ---
 
-## Step 8 — Deploy SMS Edge Function (Production Only)
+## Step 8 — Deploy the Messaging Edge Functions (Production Only)
 
-The Edge Function (`supabase/functions/send-sms/index.ts`) acts as a server-side proxy for the SMS API, bypassing browser CORS restrictions.
+`send-sms` and `send-wa` are server-side proxies for the messaging API. They exist because the provider has no CORS headers and its token must not ship in the browser. Both share [`supabase/functions/_shared/proxy.ts`](supabase/functions/_shared/proxy.ts), which enforces:
 
-### 8.1 — Install Supabase CLI
+- **Sign-in required** — the caller's Supabase access token is verified; the bare anon key is rejected.
+- **Endpoint allowlist** — only the specific provider endpoints the app uses are reachable.
+- **Server-side token** — the provider token comes from a Supabase secret and is never accepted from, or returned to, the browser.
 
-```bash
-npm install -g supabase
-```
-
-Or use `npx supabase` for one-off commands without global install.
-
-### 8.2 — Log In
+### 8.1 — Log in to the Supabase CLI
 
 ```bash
 npx supabase login
 ```
 
-This opens your browser to authenticate with your Supabase account.
-
-### 8.3 — Set the SMS Bearer Token Secret
-
-The function reads its bearer token from a server-side secret, not from source:
+### 8.2 — Set the secrets
 
 ```bash
 npx supabase secrets set SMS_BEARER_TOKEN=your-messaging-service-bearer-token \
   --project-ref your-project-ref
+
+# Optional: only if WhatsApp uses a different token from SMS
+npx supabase secrets set WA_BEARER_TOKEN=your-whatsapp-bearer-token \
+  --project-ref your-project-ref
+
+# Recommended: only allow your app's origin(s) to call the functions from a browser
+npx supabase secrets set ALLOWED_ORIGINS=https://your-app-domain.example \
+  --project-ref your-project-ref
 ```
 
-### 8.4 — Deploy the Function
+### 8.3 — Deploy both functions
 
 ```bash
-npx supabase functions deploy send-sms \
-  --project-ref your-project-ref \
-  --no-verify-jwt
+npx supabase functions deploy send-sms --project-ref your-project-ref --no-verify-jwt
+npx supabase functions deploy send-wa  --project-ref your-project-ref --no-verify-jwt
 ```
 
-Replace `your-project-ref` with the short ID from your Supabase project URL (e.g. `cixtbtzxlnohxgeewtqc`).
+`--no-verify-jwt` is intentional: Supabase's publishable keys are not JWTs, so the gateway's legacy check would reject them. The functions perform their own, stricter, check (a valid signed-in user session).
 
-### 8.5 — Verify
+### 8.4 — Verify
 
-After deployment the function will be live at:
+Signed out, this must be rejected:
 
+```bash
+curl -i -X POST https://your-project-ref.supabase.co/functions/v1/send-sms/api/sms/v2/text/single
+# HTTP/2 401  {"error":"Sign in required"}
 ```
-https://your-project-ref.supabase.co/functions/v1/send-sms
-```
 
-In production builds, all SMS requests are automatically routed to this URL.
+Then sign in to the app and use the SMS balance button — it should load.
+
+### 8.5 — Test the functions locally (optional)
+
+```bash
+npm run test:functions   # needs Node 22.18+; mocks Deno and fetch, no Supabase needed
+```
 
 ---
 
@@ -304,7 +330,7 @@ Nikadi Studio uses the [messaging-service.co.tz](https://messaging-service.co.tz
 Authorization: Bearer <your-messaging-service-bearer-token>
 ```
 
-In development, the token comes from `VITE_SMS_BEARER_TOKEN` / `VITE_WA_BEARER_TOKEN` in `.env.local` (see Step 4). In production, the Edge Function reads it from the `SMS_BEARER_TOKEN` Supabase secret (see Step 8.3) instead of the browser-exposed value.
+In development, the token comes from `VITE_SMS_BEARER_TOKEN` / `VITE_WA_BEARER_TOKEN` in `.env.development.local` (see Step 4). In production the browser sends the signed-in user's Supabase session instead, and the Edge Function verifies it and attaches the `SMS_BEARER_TOKEN` secret (see Step 8.2) — the provider token never reaches the browser.
 
 ### Endpoints Used
 
@@ -339,6 +365,9 @@ All phone numbers are normalised to E.164 format without the `+` sign:
 - `0712345678` → `255712345678`
 - `+255712345678` → `255712345678`
 - `255712345678` → `255712345678`
+- `712345678` → `255712345678` (Excel drops the leading `0` from numeric phone cells)
+
+Numbers that are not 11–15 digits after normalising are treated as invalid and skipped by bulk sends.
 
 ### SMS Status Values
 
@@ -351,26 +380,29 @@ All phone numbers are normalised to E.164 format without the `+` sign:
 
 ### CORS Note
 
-The SMS API does not allow direct browser requests (no CORS headers). In development, Vite proxies all `/sms-proxy/*` requests server-side. In production, the Supabase Edge Function (`send-sms`) acts as the proxy.
+The SMS API does not allow direct browser requests (no CORS headers). In development, Vite proxies all `/sms-proxy/*` requests server-side. In production, the Supabase Edge Functions (`send-sms`, `send-wa`) act as the proxy and require a signed-in user.
 
 ---
 
 ## WhatsApp Integration
 
-WhatsApp sending uses `wa.me` deep links — no API key required.
+WhatsApp messages are sent as **template messages with the personalised card as the image header**, through the messaging-service.co.tz WhatsApp API (`POST /api/whatsapp/v2/text/single`).
 
-- Each contact gets a personalised card image exported from Canvas
-- The app opens `https://wa.me/{phone}?text={message}` in a new tab
-- You confirm or cancel sending in the WhatsApp Web interface
-- WhatsApp status is tracked per contact: `Not checked` → `Awaiting` → `On WhatsApp` / `Not on WA`
+### Flow
 
-### Batch Send
+1. **Upload cards** — each contact's card is rendered, compressed to JPEG and uploaded to the public `wa-cards` Storage bucket. The public URL is kept on the contact. (Available as ☁ **Upload** per row on both the WhatsApp and Batch & Send tabs, or **Upload All Cards**.)
+2. **Send** — the template (e.g. `Mwaliko`) is sent with that URL as the header image, one contact at a time with a 1 s delay.
+3. **Track** — the API's status codes are mapped to `Sent`, `Invalid` (number not on WhatsApp) or `Not Sent`; pending messages are re-checked in the background to catch late rejections. A `.xlsx` report can be downloaded after a bulk send.
 
-The **Batch & Send** tab automates the full flow:
+Progress for uploads, WhatsApp sends and SMS sends appears in a floating log panel in the bottom-left corner. It never moves the page, stays while a run is still in progress, and disappears by itself 5 seconds after the run finishes (✕ closes it sooner). Toast notifications also stay for 5 seconds. The per-contact status columns and the WhatsApp report keep the results after the log is gone.
 
-1. Export the card image for each contact
-2. Open the WhatsApp link for that contact
-3. Wait for you to send, then move to the next contact (1.5 s delay)
+### Safeguards
+
+- Bulk sends (WhatsApp and SMS) open a confirmation window showing how many contacts will be messaged, and skip contacts already sent and contacts without a valid number.
+- If several contacts share a phone number, that window lists them and lets you choose **Send without duplicates** (each number once) or **Send duplicates too** (every record).
+- Sending to a contact that was already sent asks first.
+- A card is never rendered without its QR code: if the QR image or template can't be loaded the export fails with a clear message instead of producing an incomplete card.
+- Uploaded card URLs are not persisted — after reloading or reopening an event, upload the cards again before sending.
 
 ---
 
@@ -432,8 +464,10 @@ The canvas is exported as a PNG image using `canvas.toDataURL("image/png")`.
 
 ## Known Limitations
 
-- **Single-file architecture** — the entire app lives in `src/App.jsx`. This works well for a focused internal tool but will need splitting if the codebase grows significantly.
-- **No user authentication** — the app uses the Supabase `anon` key with open RLS policies. It is designed for internal/private use. Do not expose to the public internet without adding auth.
-- **WhatsApp sending is semi-manual** — each `wa.me` link opens a browser tab that you must confirm. Full automation requires the WhatsApp Business API.
-- **SMS delivery status is immediate only** — the `Delivered` status is based on the API's synchronous response (`groupId: 20`). For asynchronous delivery reports you would need to set up a webhook.
-- **WhatsApp bearer token is still client-side** — `VITE_WA_BEARER_TOKEN` is embedded in the frontend bundle because there is no `send-wa` Edge Function in this repo yet. The SMS token no longer has this problem in production: the `send-sms` Edge Function forwards requests using its own `SMS_BEARER_TOKEN` secret, ignoring whatever the client sends.
+- **Single-file architecture** — the UI and state live in `src/App.jsx` (pure logic is being moved to `src/lib/`). This works for a focused internal tool but will need splitting if the codebase grows.
+- **No per-user data ownership** — authentication is Google sign-in via Supabase and RLS requires a signed-in user, but every signed-in user can see every event. Restrict who can sign in (Step 5) until ownership is added.
+- **QR codes are not signed** — a card's QR encodes only `Name=…;TypeCard=…`, so it can be reproduced by anyone and must not be treated as proof of entitlement. QR images are generated by `api.qrserver.com`, which therefore receives each guest's name and card type.
+- **Uploaded card URLs aren't persisted** — only name, card type, phone and send statuses are saved to `event_cards`.
+- **Delivery status is best-effort** — SMS `Delivered` comes from the API's synchronous response; for asynchronous delivery reports you would need a webhook. WhatsApp rejections are polled for about 40 s after sending.
+- **Card images are kept forever** — files in `wa-cards` are never cleaned up; they are public by URL so the WhatsApp provider can fetch them.
+- **No rate limiting on the Edge Functions** — they require sign-in and an allowlisted endpoint, but a signed-in user can still send as many messages as the provider account allows.
