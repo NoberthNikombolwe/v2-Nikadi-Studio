@@ -37,6 +37,7 @@ Nikadi Studio lets you:
 - Send personalised SMS messages via the messaging-service.co.tz API
 - Track WhatsApp and SMS delivery statuses per contact
 - Save and reuse card templates
+- Leads & customers — record enquiries (name, phone, event type and date, package 800 / 1k / 1.2k / 1.5k or a custom price, region, venue, description), log follow-ups with next-follow-up reminders, qualify a lead into a customer (and its event); each customer can have many events, and an event's Overview shows its customer, lead, follow-ups, sending stats and history together
 - Event history — a permanent log of every card and SMS sent (with result, time and who sent it), card uploads and event changes, filterable and exportable to Excel
 - Light and dark mode — follows your browser/OS setting by default, or pick one with the header toggle
 - Store all events and contacts in a Supabase database
@@ -213,6 +214,27 @@ npm run build
 ```
 
 The compiled output goes to `dist/`. Serve it with any static host (Netlify, Vercel, Nginx, etc.).
+
+### Deploy to GitHub Pages
+
+[`.github/workflows/deploy-pages.yml`](../.github/workflows/deploy-pages.yml) lints, tests, builds and publishes the app on every push to `main` (or by hand: **Actions → Deploy to GitHub Pages → Run workflow**). The site is served at `https://<user>.github.io/<repo>/`.
+
+One-time setup:
+
+1. **Plan:** GitHub Pages on a *private* repository needs GitHub Pro, Team or Enterprise. On the free plan the repository must be public.
+2. **Settings → Pages → Build and deployment → Source:** choose **GitHub Actions**.
+3. **Settings → Secrets and variables → Actions → Variables** (variables, not secrets — these values are public and end up in the browser bundle):
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+   - `VITE_SMS_SENDER_ID` (optional, defaults to `NIKADI`)
+   - `PAGES_BASE_PATH` (optional — set to `/` only if you use a custom domain)
+   - `SITE_URL` (optional — the full address, e.g. `https://studio.nikadi.co.tz/`, only for a custom domain; used by the link-preview tags)
+
+   Never add the SMS/WhatsApp provider tokens here; production sends go through the Edge Functions (Step 8).
+4. **Supabase → Authentication → URL Configuration:** set the Site URL to the Pages address (e.g. `https://<user>.github.io/<repo>/`) and add it to Redirect URLs, or Google sign-in will return to the wrong page.
+5. If you set the `ALLOWED_ORIGINS` Edge Function secret, add `https://<user>.github.io` to it (an origin has no path).
+
+**Link previews:** `index.html` has title, description, Open Graph and Twitter tags; the preview image is [`public/og-image.jpg`](public/og-image.jpg) (1200×630, with a QR code to www.nikadi.co.tz). Crawlers need absolute URLs, so `index.html` uses a `%SITE_URL%` placeholder that `vite.config.js` fills from `VITE_SITE_URL` (set by the workflow). After deploying, check a preview with the [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/) — it also refreshes cached previews.
 
 To preview the production build locally:
 
@@ -444,6 +466,16 @@ The canvas is exported as a PNG image using `canvas.toDataURL("image/png")`.
 | `sms_message` | TEXT | Main SMS message template |
 | `sms_draft` | TEXT | Autosaved working copy of the main SMS message |
 | `sms_messages` | JSONB | Extra SMS messages: title, text, recipient source (contacts or uploaded list) and per-message statuses |
+
+### `leads`, `lead_followups`, `customers`
+
+| Table | Key columns |
+|---|---|
+| `leads` | `name`, `phone`, `event_type`, `event_date`, `package_price` (TZS), `region`, `venue`, `description`, `status` (`new` / `contacted` / `qualified` / `lost`), `next_followup_date`, `customer_id`, `event_id`, `qualified_at`, `created_by` |
+| `lead_followups` | `lead_id` (deleted with the lead), `method` (call / whatsapp / sms / meeting / other), `note`, `next_followup_date`, `created_by` |
+| `customers` | `name`, `phone`, `region`, `notes`, `created_by` |
+
+`events` also has `customer_id`, `lead_id`, `package_price` and `region`. Deleting a customer or lead keeps the events and only removes the link.
 
 ### `event_logs`
 

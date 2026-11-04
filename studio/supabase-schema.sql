@@ -60,6 +60,55 @@ CREATE TABLE IF NOT EXISTS event_logs (
   detail          TEXT
 );
 
+-- ── CRM: customers, leads and their follow-ups ──────────────────────────
+-- A lead is a prospective event (name, phone, event details, package price). Follow-ups
+-- record each contact with the lead. Qualifying a lead creates (or reuses, by phone) a
+-- customer and usually an event; one customer can have many events.
+CREATE TABLE IF NOT EXISTS customers (
+  id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name        TEXT NOT NULL,
+  phone       TEXT,                     -- normalised, e.g. 255712345678
+  region      TEXT,
+  notes       TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  created_by  TEXT DEFAULT (auth.jwt() ->> 'email')
+);
+
+CREATE TABLE IF NOT EXISTS leads (
+  id                 UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name               TEXT NOT NULL,
+  phone              TEXT,
+  event_type         TEXT,
+  event_date         DATE,
+  package_price      NUMERIC(12,2),     -- TZS: 800 / 1000 / 1200 / 1500 or a custom amount
+  region             TEXT,
+  venue              TEXT,
+  description        TEXT,
+  status             TEXT NOT NULL DEFAULT 'new',   -- new | contacted | qualified | lost
+  next_followup_date DATE,              -- from the latest follow-up; drives the "due" list
+  customer_id        UUID REFERENCES customers(id) ON DELETE SET NULL,
+  event_id           UUID REFERENCES events(id)    ON DELETE SET NULL,
+  qualified_at       TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ DEFAULT NOW(),
+  created_by         TEXT DEFAULT (auth.jwt() ->> 'email')
+);
+
+CREATE TABLE IF NOT EXISTS lead_followups (
+  id                 UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  lead_id            UUID REFERENCES leads(id) ON DELETE CASCADE,
+  created_at         TIMESTAMPTZ DEFAULT clock_timestamp(),
+  created_by         TEXT DEFAULT (auth.jwt() ->> 'email'),
+  method             TEXT,              -- call | whatsapp | sms | meeting | other
+  note               TEXT NOT NULL,
+  next_followup_date DATE
+);
+
+-- Events belong to a customer and remember the lead they came from
+ALTER TABLE events ADD COLUMN IF NOT EXISTS customer_id   UUID REFERENCES customers(id) ON DELETE SET NULL;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS lead_id       UUID REFERENCES leads(id)     ON DELETE SET NULL;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS package_price NUMERIC(12,2);
+ALTER TABLE events ADD COLUMN IF NOT EXISTS region        TEXT;
+
 -- Saved templates table (reusable card designs)
 CREATE TABLE IF NOT EXISTS saved_templates (
   id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -76,6 +125,11 @@ CREATE INDEX IF NOT EXISTS idx_event_cards_event_id    ON event_cards(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at       ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_saved_templates_created ON saved_templates(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_event_logs_event_created ON event_logs(event_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_status_followup   ON leads(status, next_followup_date);
+CREATE INDEX IF NOT EXISTS idx_leads_created           ON leads(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lead_followups_lead     ON lead_followups(lead_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_customers_phone         ON customers(phone);
+CREATE INDEX IF NOT EXISTS idx_events_customer         ON events(customer_id);
 
 -- =====================================================================
 -- ROW LEVEL SECURITY
@@ -92,6 +146,9 @@ ALTER TABLE events           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_cards      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE saved_templates  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_logs       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customers        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE leads            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lead_followups   ENABLE ROW LEVEL SECURITY;
 
 -- Legacy wide-open policies (anyone holding the anon key had full access)
 DROP POLICY IF EXISTS "allow_all_events"            ON events;
@@ -105,6 +162,13 @@ DROP POLICY IF EXISTS "authenticated_all_saved_templates"   ON saved_templates;
 CREATE POLICY "authenticated_all_events"          ON events           FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "authenticated_all_event_cards"     ON event_cards      FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "authenticated_all_saved_templates" ON saved_templates  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "authenticated_all_customers"      ON customers;
+DROP POLICY IF EXISTS "authenticated_all_leads"          ON leads;
+DROP POLICY IF EXISTS "authenticated_all_lead_followups" ON lead_followups;
+CREATE POLICY "authenticated_all_customers"      ON customers      FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all_leads"          ON leads          FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all_lead_followups" ON lead_followups FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
 -- event_logs is append-only: read + insert (as yourself) only, no update/delete policies
 DROP POLICY IF EXISTS "authenticated_read_event_logs"   ON event_logs;
@@ -121,18 +185,27 @@ REVOKE ALL ON public.events          FROM anon;
 REVOKE ALL ON public.event_cards     FROM anon;
 REVOKE ALL ON public.saved_templates FROM anon;
 REVOKE ALL ON public.event_logs      FROM anon;
+REVOKE ALL ON public.customers       FROM anon;
+REVOKE ALL ON public.leads           FROM anon;
+REVOKE ALL ON public.lead_followups  FROM anon;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.events          TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.event_cards     TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.saved_templates TO authenticated;
 REVOKE UPDATE, DELETE ON public.event_logs FROM authenticated;
 GRANT SELECT, INSERT                 ON public.event_logs      TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.customers       TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads           TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.lead_followups  TO authenticated;
 
 -- service_role: Edge Functions and other server-side calls
 GRANT ALL ON public.events          TO service_role;
 GRANT ALL ON public.event_cards     TO service_role;
 GRANT ALL ON public.saved_templates TO service_role;
 GRANT ALL ON public.event_logs      TO service_role;
+GRANT ALL ON public.customers       TO service_role;
+GRANT ALL ON public.leads           TO service_role;
+GRANT ALL ON public.lead_followups  TO service_role;
 
 -- =====================================================================
 -- STORAGE BUCKETS

@@ -5,6 +5,7 @@ import { selectRecipients, dropDuplicates, describeSkipped } from "./recipients.
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./messages.js";
 import { N, alpha, nextThemePref } from "./theme.js";
 import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory } from "./history.js";
+import { parsePrice, formatTsh, validateLead, leadToRow, eventFromLead, matchCustomer, followupDue, localDate, filterLeads, sortLeads, summariseLeads, validateCustomer } from "./crm.js";
 
 test("normalisePhone handles every local/international format", () => {
   for (const raw of ["0712345678", "+255712345678", "255712345678", "00255712345678", "712345678", 712345678, " 0712 345 678 "]) {
@@ -190,4 +191,86 @@ test("mergeHistory de-duplicates by id and sorts newest first", () => {
   const a = [{ id: 1, created_at: "2026-11-04T10:00:00Z" }, { id: 2, created_at: "2026-11-04T09:00:00Z" }];
   const b = [{ id: 3, created_at: "2026-11-04T11:00:00Z" }, { id: 1, created_at: "2026-11-04T10:00:00Z" }];
   assert.deepEqual(mergeHistory(a, b).map(r => r.id), [3, 1, 2]);
+});
+
+test("parsePrice reads package prices the way people type them", () => {
+  for (const [input, want] of [["1k", 1000], ["1.2k", 1200], ["1,500", 1500], ["TSh 2,000", 2000], ["tzs 800", 800], [1200, 1200], ["950", 950], [" 1.5K ", 1500]]) {
+    assert.equal(parsePrice(input), want, `input: ${input}`);
+  }
+  assert.equal(parsePrice(""), null);
+  assert.equal(parsePrice(null), null);
+  assert.ok(Number.isNaN(parsePrice("abc")));
+  assert.ok(Number.isNaN(parsePrice("1.2.3k")));
+  assert.equal(formatTsh(1200), "TSh 1,200");
+  assert.equal(formatTsh(null), "—");
+});
+
+test("validateLead requires name and a valid phone, and checks the price", () => {
+  assert.deepEqual(validateLead({ name: "Amina", phone: "0712345678", package_price: "1.2k" }), {});
+  const e = validateLead({ name: " ", phone: "123", package_price: "lots", event_date: "04/11/2026" });
+  assert.deepEqual(Object.keys(e).sort(), ["event_date", "name", "package_price", "phone"]);
+  assert.ok(validateLead({ name: "A", phone: "0712345678", package_price: "0" }).package_price);
+  assert.deepEqual(validateLead({ name: "A", phone: "0712345678" }), {}, "price is optional");
+});
+
+test("leadToRow trims, normalises the phone and blanks empty fields", () => {
+  assert.deepEqual(leadToRow({ name: " Amina ", phone: "0712 345 678", event_type: "Wedding", event_date: "2026-12-20",
+    package_price: "1.5k", region: " Arusha ", venue: "", description: "  " }),
+    { name: "Amina", phone: "255712345678", event_type: "Wedding", event_date: "2026-12-20", package_price: 1500,
+      region: "Arusha", venue: null, description: null });
+});
+
+test("eventFromLead links the new event to the customer and the lead", () => {
+  const ev = eventFromLead({ id: "L1", name: "Harusi ya Amina", phone: "255712345678", event_type: "Wedding", event_date: "2026-12-20",
+    venue: "Serena", package_price: 1200, region: "Dar es Salaam" }, "C1");
+  assert.deepEqual(ev, { username: "Harusi ya Amina", phone: "255712345678", event_type: "Wedding", venue_name: "Serena",
+    start_datetime: "2026-12-20", status: "active", customer_id: "C1", lead_id: "L1", package_price: 1200, region: "Dar es Salaam" });
+});
+
+test("matchCustomer finds an existing customer by phone in any format", () => {
+  const customers = [{ id: "C1", phone: "255712345678" }, { id: "C2", phone: "255755000001" }];
+  assert.equal(matchCustomer(customers, "0712 345 678").id, "C1");
+  assert.equal(matchCustomer(customers, "0755000009"), null);
+  assert.equal(matchCustomer(customers, ""), null);
+});
+
+test("followupDue classifies dates relative to today", () => {
+  const today = "2026-11-04";
+  assert.equal(followupDue("2026-11-03", today), "overdue");
+  assert.equal(followupDue("2026-11-04", today), "today");
+  assert.equal(followupDue("2026-11-07", today), "soon");
+  assert.equal(followupDue("2026-11-08", today), "later");
+  assert.equal(followupDue(null, today), null);
+  assert.equal(localDate(new Date(2026, 0, 5)), "2026-01-05");
+});
+
+const leadRows = [
+  { id: "a", name: "Amina",  phone: "255712345678", status: "new",       region: "Arusha", next_followup_date: null,         created_at: "2026-11-01" },
+  { id: "b", name: "Baraka", phone: "255755000001", status: "contacted", region: "Mwanza", next_followup_date: "2026-11-02", created_at: "2026-10-20" },
+  { id: "c", name: "Cleo",   phone: "255755000002", status: "contacted", venue: "Serena",  next_followup_date: "2026-11-04", created_at: "2026-10-25" },
+  { id: "d", name: "Dora",   phone: "255755000003", status: "qualified",                    next_followup_date: "2026-10-01", created_at: "2026-11-03" },
+  { id: "e", name: "Eli",    phone: "255755000004", status: "lost",                                                           created_at: "2026-09-01" },
+];
+
+test("filterLeads: open by default, status filters and text/phone search", () => {
+  assert.deepEqual(filterLeads(leadRows).map(l => l.id), ["a", "b", "c"]);
+  assert.deepEqual(filterLeads(leadRows, { status: "all" }).length, 5);
+  assert.deepEqual(filterLeads(leadRows, { status: "lost" }).map(l => l.id), ["e"]);
+  assert.deepEqual(filterLeads(leadRows, { status: "all", q: "0755 000 002" }).map(l => l.id), ["c"]);
+  assert.deepEqual(filterLeads(leadRows, { q: "serena" }).map(l => l.id), ["c"]);
+});
+
+test("sortLeads puts overdue and due follow-ups first, closed leads last", () => {
+  assert.deepEqual(sortLeads(leadRows, "2026-11-04").map(l => l.id), ["b", "c", "a", "d", "e"]);
+});
+
+test("summariseLeads counts stages and due follow-ups (open leads only)", () => {
+  assert.deepEqual(summariseLeads(leadRows, "2026-11-04"),
+    { new: 1, contacted: 2, qualified: 1, lost: 1, dueToday: 1, overdue: 1 });
+});
+
+test("validateCustomer needs a name; phone is optional but must be valid", () => {
+  assert.deepEqual(validateCustomer({ name: "Amina", phone: "" }), {});
+  assert.deepEqual(validateCustomer({ name: "Amina", phone: "0712345678" }), {});
+  assert.deepEqual(Object.keys(validateCustomer({ name: "", phone: "12" })).sort(), ["name", "phone"]);
 });

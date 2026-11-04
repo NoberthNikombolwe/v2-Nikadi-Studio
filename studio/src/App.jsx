@@ -1,10 +1,12 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useId } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
 import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
+import { PACKAGE_OPTIONS, EVENT_TYPES, TZ_REGIONS, LEAD_STATUSES, OPEN_STATUSES, FOLLOWUP_METHODS, parsePrice, formatTsh, validateLead, validateCustomer,
+         leadToRow, eventFromLead, matchCustomer, localDate, followupDue, filterLeads, sortLeads, summariseLeads } from "./lib/crm";
 import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory, HISTORY_CHANNELS, HISTORY_ACTIONS, HISTORY_STATUSES } from "./lib/history";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -23,6 +25,9 @@ import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeH
      CARD CANVAS  — <CardCanvas> renders the draggable card preview;
                     exportCard() rasterises one canvas to an image
      EVENT MODAL  — <EventModal> create/edit form for an event's details
+     CRM          — useCrm() + <LeadsTab>, <CustomersTab>, <LeadModal>,
+                    <CustomerModal>, <EventOverview>: leads → follow-ups →
+                    customers → events
      MAIN APP     — <App>, the default export. Holds all state and renders
                     the tabbed UI: Events, Design, Contacts, WhatsApp, SMS,
                     VCard. Gated behind <LoginPage> until Supabase auth
@@ -467,6 +472,10 @@ const defaultElements = () => [
 const WA  = { idle:"idle", sending:"sending", sent:"sent", notSent:"notSent", invalid:"invalid" };
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
+// Columns the event form may write (persistEvent sends only these). The CRM links are only
+// present once supabase-schema.sql has added them, so they are sent only when the form has them.
+const EVENT_FORM_FIELDS     = [...Object.keys(BLANK_EVENT), "customer_id", "package_price", "region"];
+const NULLABLE_EVENT_FIELDS = ["customer_id", "package_price", "region"];   // "" → NULL (uuid / numeric columns)
 // Placeholder contacts for a fresh session / an event with no saved cards, so the
 // designer has something to preview. They carry no phone number (so they can never
 // be messaged) and are flagged `sample` so saveCards() never writes them to the DB.
@@ -715,10 +724,19 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
 // Create/Edit form modal for an event's details (username, type, venue, dates, status).
 // Purely local form state until "Save Event" calls onSave(form) — the parent (App)
 // owns the actual Supabase write via persistEvent/onModalSave.
-function EventModal({ initial, onSave, onClose, saving }) {
+function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
   const [form, setForm] = useState({ ...BLANK_EVENT, ...initial });
+  const [priceError, setPriceError] = useState(null);
   // Returns a field-specific onChange handler that writes one key into the form state
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  // The package price is picked/typed as text and saved as a number (or NULL); untouched
+  // CRM fields are left out so the form still works before the CRM columns exist
+  const save = () => {
+    if (!("package_price" in form)) { onSave(form); return; }
+    const price = parsePrice(form.package_price);
+    if (Number.isNaN(price) || (price !== null && price <= 0)) { setPriceError("Enter a price like 1000 or 1.2k"); return; }
+    onSave({ ...form, package_price: price });
+  };
   return (
     <div className="nk-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
       <div className="nk-modal">
@@ -736,7 +754,7 @@ function EventModal({ initial, onSave, onClose, saving }) {
               <label className="nk-label">Event Type</label>
               <select className="nk-select" value={form.event_type} onChange={set("event_type")}>
                 <option value="">— Select —</option>
-                {["Wedding","Conference","Birthday","Corporate","Graduation","Religious","Workshop","Michango","Other"].map(t => <option key={t}>{t}</option>)}
+                {EVENT_TYPES.map(t => <option key={t}>{t}</option>)}
               </select>
             </div>
             <div>
@@ -750,6 +768,25 @@ function EventModal({ initial, onSave, onClose, saving }) {
                 <option value="completed">Completed</option>
                 <option value="cancelled">Cancelled</option>
               </select>
+            </div>
+            {customers.length > 0 && (
+              <div>
+                <label className="nk-label">Customer</label>
+                <select className="nk-select" value={form.customer_id || ""} onChange={e => setForm(f => ({ ...f, customer_id: e.target.value || null }))}>
+                  <option value="">— None —</option>
+                  {customers.map(c => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` · +${c.phone}` : ""}</option>)}
+                </select>
+              </div>
+            )}
+            <div>
+              <label className="nk-label">Region</label>
+              <RegionInput value={form.region} onChange={set("region")} />
+            </div>
+            <div style={{ gridColumn:"span 2" }}>
+              <label className="nk-label">Package (TSh)</label>
+              <PackagePicker value={form.package_price == null ? "" : String(form.package_price)}
+                onChange={v => { setPriceError(null); setForm(f => ({ ...f, package_price: v })); }} />
+              {priceError && <div style={{fontSize:11,color:N.red,marginTop:-6,marginBottom:8}}>{priceError}</div>}
             </div>
             <div>
               <label className="nk-label">Venue Name</label>
@@ -775,7 +812,7 @@ function EventModal({ initial, onSave, onClose, saving }) {
         </div>
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="nk-btn nk-btn-primary" onClick={() => onSave(form)} disabled={saving||!form.username}>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving||!form.username}>
             {saving ? "⏳ Saving…" : "💾 Save Event"}
           </button>
         </div>
@@ -836,6 +873,953 @@ const THEME_ICONS  = { system:"🖥", light:"☀️", dark:"🌙" };
 // Id of an event's main SMS message (events.sms_message, statuses in event_cards.sms_status).
 // Extra messages (events.sms_messages) use random ids — see src/lib/messages.js.
 const MAIN_MSG = "main";
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CRM — leads, follow-ups, customers and the event overview
+   Pure helpers (validation, prices, sorting, due dates) are in src/lib/crm.js.
+   useCrm() owns the CRM data and actions; <LeadsTab>, <CustomersTab>, <LeadModal>,
+   <CustomerModal> and <EventOverview> render it. Tables: leads, lead_followups,
+   customers, plus events.customer_id / lead_id (supabase-schema.sql).
+══════════════════════════════════════════════════════════════════════════ */
+const CRM_LIMIT = 1000;   // leads / customers loaded per list (newest first)
+const TONE    = { good:N.green,   info:N.sky,     warn:N.amber,   bad:N.red };
+const TONE_BG = { good:N.greenBg, info:N.navy700, warn:N.amberBg, bad:N.redBg };
+const DUE_LABEL = { overdue:["Overdue","bad"], today:["Today","warn"], soon:["Soon","info"] };
+const BLANK_LEAD     = { name:"", phone:"", event_type:"", event_date:"", package_price:"", region:"", venue:"", description:"" };
+const BLANK_CUSTOMER = { name:"", phone:"", region:"", notes:"" };
+
+// Formats a DATE ("2026-12-20", read as a local day) or a timestamp as "20 Dec 2026"
+const fmtDay = (d) => {
+  if (!d) return "—";
+  const x = new Date(String(d).length === 10 ? `${d}T00:00:00` : d);
+  return Number.isNaN(x.getTime()) ? "—" : x.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" });
+};
+const fmtWhen    = (d) => d ? new Date(d).toLocaleString("en-GB", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" }) : "";
+const phoneLabel = (p) => p ? `+${normalisePhone(p)}` : "—";
+const addDays    = (n) => localDate(new Date(Date.now() + n * 86400000));
+const errMsg     = (e) => e?.message || String(e);
+
+// Small coloured status label
+function Pill({ tone = "info", children }) {
+  return (
+    <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:5,whiteSpace:"nowrap",
+      color:TONE[tone], background:TONE_BG[tone], border:`1px solid ${alpha(TONE[tone],"44")}`}}>
+      {children}
+    </span>
+  );
+}
+
+// A lead's stage as a coloured label
+const LeadStatus = ({ status }) => <Pill tone={LEAD_STATUSES[status]?.tone}>{LEAD_STATUSES[status]?.label || status}</Pill>;
+
+// Next follow-up date with an Overdue / Today / Soon label (labels only for open leads)
+function DueTag({ date, open = true }) {
+  if (!date) return <span style={{color:N.textDim,fontSize:12}}>—</span>;
+  const [label, tone] = (open && DUE_LABEL[followupDue(date)]) || [];
+  return (
+    <span style={{display:"inline-flex",gap:6,alignItems:"center",fontSize:12,color:N.textMid,whiteSpace:"nowrap"}}>
+      {fmtDay(date)}{label && <Pill tone={tone}>{label}</Pill>}
+    </span>
+  );
+}
+
+// Form field: label, the input, and an error line under it
+function Field({ label, error, span, children }) {
+  return (
+    <div style={span ? { gridColumn:"span 2" } : undefined}>
+      <label className="nk-label">{label}</label>
+      {children}
+      {error && <div style={{fontSize:11,color:N.red,marginTop:-6,marginBottom:8}}>{error}</div>}
+    </div>
+  );
+}
+
+// Region text box that suggests Tanzania's regions but accepts anything
+function RegionInput({ value, onChange }) {
+  const id = useId();
+  return (
+    <>
+      <input className="nk-input" list={id} placeholder="e.g. Dar es Salaam" value={value ?? ""} onChange={onChange} />
+      <datalist id={id}>{TZ_REGIONS.map(r => <option key={r} value={r} />)}</datalist>
+    </>
+  );
+}
+
+// Package price chooser: the preset prices (800 / 1k / 1.2k / 1.5k) or "Other price" with a typed amount.
+// `value` is what the user picked or typed (string); clicking the selected preset clears it.
+function PackagePicker({ value, onChange }) {
+  const current = parsePrice(value);
+  const [custom, setCustom] = useState(value !== "" && value != null && !PACKAGE_OPTIONS.includes(current));
+  const chip = (on) => ({
+    padding:"6px 12px", borderRadius:7, fontSize:12, fontWeight:700, cursor:"pointer",
+    background: on ? N.tealBg : N.navy700, color: on ? N.teal : N.textMid, border:`1.5px solid ${on ? N.teal : N.border}`,
+  });
+  return (
+    <div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+        {PACKAGE_OPTIONS.map(p => {
+          const on = !custom && current === p;
+          return (
+            <button type="button" key={p} style={chip(on)} title={formatTsh(p)}
+              onClick={() => { setCustom(false); onChange(on ? "" : String(p)); }}>
+              {p >= 1000 ? `${p / 1000}k` : p}
+            </button>
+          );
+        })}
+        <button type="button" style={chip(custom)}
+          onClick={() => { setCustom(true); if (PACKAGE_OPTIONS.includes(current)) onChange(""); }}>
+          ＋ Other price
+        </button>
+      </div>
+      {custom && (
+        <input className="nk-input" autoFocus placeholder="Amount in TSh, e.g. 2000 or 2.5k"
+          value={value ?? ""} onChange={e => onChange(e.target.value)} />
+      )}
+    </div>
+  );
+}
+
+// Create / edit a lead. Validates with validateLead before calling onSave(form).
+function LeadModal({ initial, onSave, onClose, saving }) {
+  const [form, setForm] = useState(() =>
+    Object.fromEntries(Object.keys(BLANK_LEAD).map(k => [k, initial?.[k] == null ? "" : String(initial[k])])));
+  const [errors, setErrors] = useState({});
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const save = () => {
+    const errs = validateLead(form);
+    setErrors(errs);
+    if (!Object.keys(errs).length) onSave(form);
+  };
+  return (
+    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="nk-modal">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title">{initial?.id ? "Edit Lead" : "New Lead"}</div>
+          <button className="nk-modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="nk-modal-body">
+          <div className="nk-form-grid">
+            <Field label="Name *" error={errors.name}>
+              <input className="nk-input" autoFocus placeholder="e.g. Amina Said" value={form.name} onChange={set("name")} />
+            </Field>
+            <Field label="Phone Number *" error={errors.phone}>
+              <input className="nk-input" placeholder="0712 345 678" value={form.phone} onChange={set("phone")} />
+            </Field>
+            <Field label="Event Type">
+              <select className="nk-select" value={form.event_type} onChange={set("event_type")}>
+                <option value="">— Select —</option>
+                {EVENT_TYPES.map(t => <option key={t}>{t}</option>)}
+              </select>
+            </Field>
+            <Field label="Event Date" error={errors.event_date}>
+              <input type="date" className="nk-input" value={form.event_date} onChange={set("event_date")} />
+            </Field>
+            <Field label="Package (TSh)" error={errors.package_price} span>
+              <PackagePicker value={form.package_price} onChange={v => setForm(f => ({ ...f, package_price: v }))} />
+            </Field>
+            <Field label="Region">
+              <RegionInput value={form.region} onChange={set("region")} />
+            </Field>
+            <Field label="Venue">
+              <input className="nk-input" placeholder="Hall / Hotel" value={form.venue} onChange={set("venue")} />
+            </Field>
+            <Field label="Description" span>
+              <textarea className="nk-input nk-textarea" rows={3} placeholder="Guests expected, card style, budget, how they found us…"
+                value={form.description} onChange={set("description")} />
+            </Field>
+          </div>
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving}>{saving ? "⏳ Saving…" : "💾 Save Lead"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Create / edit a customer (name required; phone optional but must be valid)
+function CustomerModal({ initial, onSave, onClose, saving }) {
+  const [form, setForm] = useState(() =>
+    Object.fromEntries(Object.keys(BLANK_CUSTOMER).map(k => [k, initial?.[k] == null ? "" : String(initial[k])])));
+  const [errors, setErrors] = useState({});
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const save = () => {
+    const errs = validateCustomer(form);
+    setErrors(errs);
+    if (!Object.keys(errs).length) onSave(form);
+  };
+  return (
+    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="nk-modal" style={{maxWidth:520}}>
+        <div className="nk-modal-head">
+          <div className="nk-modal-title">{initial?.id ? "Edit Customer" : "New Customer"}</div>
+          <button className="nk-modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="nk-modal-body">
+          <div className="nk-form-grid">
+            <Field label="Name *" error={errors.name}>
+              <input className="nk-input" autoFocus value={form.name} onChange={set("name")} />
+            </Field>
+            <Field label="Phone Number" error={errors.phone}>
+              <input className="nk-input" placeholder="0712 345 678" value={form.phone} onChange={set("phone")} />
+            </Field>
+            <Field label="Region" span>
+              <RegionInput value={form.region} onChange={set("region")} />
+            </Field>
+            <Field label="Notes" span>
+              <textarea className="nk-input nk-textarea" rows={3} value={form.notes} onChange={set("notes")} />
+            </Field>
+          </div>
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving}>{saving ? "⏳ Saving…" : "💾 Save Customer"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// CRM data and actions, used by the Leads / Customers tabs, the Events table and the
+// event overview. Lists load once per sign-in (loadAll); follow-ups load per lead.
+// Every write updates local state from the row the database returns.
+// Without the CRM tables `error` holds the database message so the tabs can explain.
+function useCrm({ enabled, showToast, askDialog, logHistory, reloadEvents }) {
+  const [leads,       setLeads]       = useState([]);
+  const [customers,   setCustomers]   = useState([]);
+  const [eventCounts, setEventCounts] = useState({});   // customer id → number of events
+  const [followups,   setFollowups]   = useState({});   // lead id → follow-ups, newest first
+  const [loading,     setLoading]     = useState(false);
+  const [busy,        setBusy]        = useState(false); // a write is in progress
+  const [error,       setError]       = useState(null);
+  const fail = (what, err) => { showToast(`${what}: ${errMsg(err)}`, "warn"); return null; };
+  const putLead = (row) => setLeads(ls => ls.some(l => l.id === row.id) ? ls.map(l => l.id === row.id ? row : l) : [row, ...ls]);
+  const putCustomer = (row) => setCustomers(cs => cs.some(c => c.id === row.id) ? cs.map(c => c.id === row.id ? row : c) : [row, ...cs]);
+
+  // Number of events per customer (for the Customers list)
+  const loadEventCounts = async () => {
+    if (!supabase || !enabled) return;
+    const { data, error: e } = await supabase.from("events").select("customer_id").not("customer_id", "is", null);
+    if (e) return;
+    const counts = {};
+    data.forEach(r => { counts[r.customer_id] = (counts[r.customer_id] || 0) + 1; });
+    setEventCounts(counts);
+  };
+
+  // Loads the newest CRM_LIMIT leads and customers
+  const loadAll = async () => {
+    if (!supabase || !enabled) return;
+    setLoading(true);
+    const [l, c] = await Promise.all([
+      supabase.from("leads").select("*").order("created_at", { ascending:false }).limit(CRM_LIMIT),
+      supabase.from("customers").select("*").order("created_at", { ascending:false }).limit(CRM_LIMIT),
+    ]);
+    setLoading(false);
+    const e = l.error || c.error;
+    if (e) { setError(e.message); return; }
+    setError(null);
+    setLeads(l.data);
+    setCustomers(c.data);
+    loadEventCounts();
+  };
+
+  const loadFollowups = async (leadId) => {
+    if (!supabase || !leadId) return;
+    const { data, error: e } = await supabase.from("lead_followups").select("*").eq("lead_id", leadId).order("created_at", { ascending:false });
+    if (e) { fail("Could not load follow-ups", e); return; }
+    setFollowups(f => ({ ...f, [leadId]: data }));
+  };
+
+  // Creates (no id) or updates a lead from the lead form; resolves to the saved row or null
+  const saveLead = async (form, id) => {
+    setBusy(true);
+    const q = id ? supabase.from("leads").update(leadToRow(form)).eq("id", id) : supabase.from("leads").insert([leadToRow(form)]);
+    const { data, error: e } = await q.select().single();
+    setBusy(false);
+    if (e) return fail("Could not save lead", e);
+    putLead(data);
+    showToast(id ? "Lead updated" : `Lead "${data.name}" added`, "success");
+    return data;
+  };
+
+  const deleteLead = async (lead) => {
+    const n = followups[lead.id]?.length;
+    const ok = await askDialog({
+      title: `Delete lead "${lead.name}"?`,
+      body: `This permanently removes the lead${n ? ` and its ${n} follow-up${n === 1 ? "" : "s"}` : " and its follow-ups"}. ${lead.status === "qualified" ? "The customer and event it created are kept." : ""}`,
+      actions: [{ value:"yes", label:"Delete lead", kind:"danger" }],
+    });
+    if (ok !== "yes") return false;
+    const { error: e } = await supabase.from("leads").delete().eq("id", lead.id);
+    if (e) { fail("Could not delete lead", e); return false; }
+    setLeads(ls => ls.filter(l => l.id !== lead.id));
+    showToast("Lead deleted", "success");
+    return true;
+  };
+
+  // Records a follow-up and moves the lead's next follow-up date to the one given (or none).
+  // A "new" lead becomes "contacted". Resolves true when saved.
+  const addFollowup = async (lead, { method, note, next }) => {
+    setBusy(true);
+    try {
+      const { data: f, error: e1 } = await supabase.from("lead_followups")
+        .insert([{ lead_id: lead.id, method, note, next_followup_date: next || null }]).select().single();
+      if (e1) throw e1;
+      setFollowups(m => ({ ...m, [lead.id]: [f, ...(m[lead.id] || [])] }));
+      const { data: l, error: e2 } = await supabase.from("leads")
+        .update({ next_followup_date: next || null, ...(lead.status === "new" ? { status: "contacted" } : {}) })
+        .eq("id", lead.id).select().single();
+      if (e2) throw e2;
+      putLead(l);
+      showToast("Follow-up saved", "success");
+      return true;
+    } catch (e) { fail("Could not save follow-up", e); return false; }
+    finally { setBusy(false); }
+  };
+
+  // Moves a lead to another stage ("lost" asks first; reopening goes back to "contacted")
+  const setLeadStatus = async (lead, status) => {
+    if (status === "lost") {
+      const ok = await askDialog({
+        title: `Mark "${lead.name}" as lost?`,
+        body: "The lead leaves the open list. You can reopen it later — add a follow-up note to record why it was lost.",
+        actions: [{ value:"yes", label:"Mark as lost", kind:"warn" }],
+      });
+      if (ok !== "yes") return;
+    }
+    const { data, error: e } = await supabase.from("leads").update({ status }).eq("id", lead.id).select().single();
+    if (e) { fail("Could not update lead", e); return; }
+    putLead(data);
+  };
+
+  // Qualifies a lead: links it to the customer with the same phone number (or creates one)
+  // and, if chosen, creates the event from the lead's details. Retrying after a failure is
+  // safe for the customer step (it's matched by phone).
+  const qualifyLead = async (lead) => {
+    if (busy) return null;
+    const existing = matchCustomer(customers, lead.phone);
+    const choice = await askDialog({
+      title: `Qualify "${lead.name}" as a customer?`,
+      body: (
+        <>
+          <div>
+            {existing
+              ? <>Their number matches existing customer <strong style={{color:N.text}}>{existing.name}</strong> — the lead is linked to them.</>
+              : <>A new customer <strong style={{color:N.text}}>{lead.name}</strong> is created.</>}
+          </div>
+          <div style={{marginTop:10}}>
+            <strong style={{color:N.text}}>Qualify &amp; create event</strong> also creates the event
+            {lead.event_type || lead.event_date ? ` (${[lead.event_type, lead.event_date && fmtDay(lead.event_date)].filter(Boolean).join(", ")})` : ""} so you can start designing cards.
+          </div>
+        </>
+      ),
+      actions: [
+        { value:"only",  label:"Qualify only",           kind:"primary" },
+        { value:"event", label:"Qualify & create event", kind:"success" },
+      ],
+    });
+    if (!choice) return null;
+    setBusy(true);
+    try {
+      let customer = existing;
+      if (!customer) {
+        const { data, error: e } = await supabase.from("customers")
+          .insert([{ name: lead.name, phone: lead.phone || null, region: lead.region || null }]).select().single();
+        if (e) throw e;
+        customer = data;
+        putCustomer(data);
+      }
+      let event = null;
+      if (choice === "event") {
+        const { data, error: e } = await supabase.from("events").insert([eventFromLead(lead, customer.id)]).select().single();
+        if (e) throw e;
+        event = data;
+        logHistory({ channel:"event", action:"create", detail:`Event created from lead: ${lead.name}` }, data.id);
+        setEventCounts(c => ({ ...c, [customer.id]: (c[customer.id] || 0) + 1 }));
+        reloadEvents();
+      }
+      const { data: upd, error: e } = await supabase.from("leads")
+        .update({ status:"qualified", customer_id: customer.id, event_id: event?.id ?? lead.event_id ?? null, qualified_at: new Date().toISOString() })
+        .eq("id", lead.id).select().single();
+      if (e) throw e;
+      putLead(upd);
+      showToast(`${lead.name} is now a customer${event ? " — event created" : ""}`, "success");
+      return { customer, event };
+    } catch (e) { return fail("Could not qualify lead", e); }
+    finally { setBusy(false); }
+  };
+
+  // Creates (no id) or updates a customer; resolves to the saved row or null
+  const saveCustomer = async (form, id) => {
+    setBusy(true);
+    const row = { name: form.name.trim(), phone: form.phone.trim() ? normalisePhone(form.phone) : null,
+                  region: form.region.trim() || null, notes: form.notes.trim() || null };
+    const q = id ? supabase.from("customers").update(row).eq("id", id) : supabase.from("customers").insert([row]);
+    const { data, error: e } = await q.select().single();
+    setBusy(false);
+    if (e) return fail("Could not save customer", e);
+    putCustomer(data);
+    showToast(id ? "Customer updated" : `Customer "${data.name}" added`, "success");
+    return data;
+  };
+
+  const deleteCustomer = async (c) => {
+    const n = eventCounts[c.id] || 0;
+    const ok = await askDialog({
+      title: `Delete customer "${c.name}"?`,
+      body: `Their ${n ? `${n} event${n === 1 ? "" : "s"} and ` : ""}leads are kept but no longer linked to a customer.`,
+      actions: [{ value:"yes", label:"Delete customer", kind:"danger" }],
+    });
+    if (ok !== "yes") return false;
+    const { error: e } = await supabase.from("customers").delete().eq("id", c.id);
+    if (e) { fail("Could not delete customer", e); return false; }
+    setCustomers(cs => cs.filter(x => x.id !== c.id));
+    setLeads(ls => ls.map(l => l.customer_id === c.id ? { ...l, customer_id: null } : l));
+    reloadEvents();
+    return true;
+  };
+
+  // A customer's events, latest event date first
+  const customerEvents = async (customerId) => {
+    const { data, error: e } = await supabase.from("events").select("*").eq("customer_id", customerId)
+      .order("start_datetime", { ascending:false, nullsFirst:false });
+    if (e) { fail("Could not load events", e); return []; }
+    return data;
+  };
+
+  return {
+    leads, customers, eventCounts, followups, loading, busy, error,
+    loadAll, loadEventCounts, loadFollowups, saveLead, deleteLead, addFollowup, setLeadStatus, qualifyLead,
+    saveCustomer, deleteCustomer, customerEvents,
+  };
+}
+
+// Shown in place of a CRM tab when the tables are missing or can't be read
+function CrmUnavailable({ error, onRetry }) {
+  return (
+    <div style={{textAlign:"center",padding:60,color:N.textDim,background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+      <div style={{fontSize:44,marginBottom:12}}>🗃️</div>
+      <p style={{fontWeight:700,marginBottom:6,color:N.text}}>Leads &amp; customers aren't set up in the database yet</p>
+      <p style={{fontSize:12,marginBottom:6}}>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.</p>
+      <p style={{fontSize:11,marginBottom:18,fontFamily:"JetBrains Mono, monospace"}}>{error}</p>
+      <button className="nk-btn nk-btn-ghost" onClick={onRetry}>↻ Retry</button>
+    </div>
+  );
+}
+
+// Add-a-follow-up box: how they were contacted, what was said, and when to follow up next
+function FollowupComposer({ onAdd, busy }) {
+  const [method, setMethod] = useState("call");
+  const [note,   setNote]   = useState("");
+  const [next,   setNext]   = useState("");
+  const submit = async () => {
+    if (!note.trim()) return;
+    if (await onAdd({ method, note: note.trim(), next })) { setNote(""); setNext(""); }
+  };
+  const quick = [["Tomorrow", 1], ["3 days", 3], ["1 week", 7], ["2 weeks", 14]];
+  return (
+    <div style={{background:N.navy700,border:`1px solid ${N.border}`,borderRadius:10,padding:12,marginBottom:14}}>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
+        {Object.entries(FOLLOWUP_METHODS).map(([k, m]) => (
+          <button key={k} type="button" onClick={() => setMethod(k)}
+            style={{padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",
+              background: method === k ? N.tealBg : "transparent", color: method === k ? N.teal : N.textMid,
+              border:`1px solid ${method === k ? N.teal : N.border}`}}>
+            {m.icon} {m.label}
+          </button>
+        ))}
+      </div>
+      <textarea className="nk-input nk-textarea" rows={2} style={{minHeight:60}} placeholder="What happened? e.g. Called — wants 300 cards, will confirm date"
+        value={note} onChange={e => setNote(e.target.value)} />
+      <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+        <span style={{fontSize:11,color:N.textDim}}>Next follow-up:</span>
+        <input type="date" className="nk-input" style={{width:150,marginBottom:0,padding:"5px 8px"}} value={next} onChange={e => setNext(e.target.value)} />
+        {quick.map(([label, d]) => (
+          <button key={label} type="button" className="nk-btn-sm" onClick={() => setNext(addDays(d))}
+            style={{background:"transparent",color:N.sky,borderColor:alpha(N.sky,"44")}}>{label}</button>
+        ))}
+        <button className="nk-btn nk-btn-teal" style={{marginLeft:"auto",padding:"6px 14px",fontSize:12}} onClick={submit} disabled={busy || !note.trim()}>
+          {busy ? "⏳" : "＋"} Add follow-up
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Follow-ups, newest first
+function FollowupList({ items }) {
+  if (!items) return <div style={{fontSize:12,color:N.textDim,padding:"8px 0"}}>Loading follow-ups…</div>;
+  if (!items.length) return <div style={{fontSize:12,color:N.textDim,padding:"8px 0"}}>No follow-ups yet.</div>;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {items.map(f => {
+        const m = FOLLOWUP_METHODS[f.method] || FOLLOWUP_METHODS.other;
+        return (
+          <div key={f.id} style={{borderLeft:`3px solid ${alpha(N.teal,"66")}`,padding:"4px 0 4px 10px"}}>
+            <div style={{fontSize:13,color:N.text,whiteSpace:"pre-wrap",lineHeight:1.5}}>{m.icon} {f.note}</div>
+            <div style={{fontSize:11,color:N.textDim,marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
+              <span>{fmtWhen(f.created_at)}</span>
+              {f.created_by && <span>{f.created_by}</span>}
+              {f.next_followup_date && <span style={{color:N.sky}}>Next: {fmtDay(f.next_followup_date)}</span>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Label + value pair in a details grid
+const Info = ({ label, children }) => (
+  <div>
+    <div style={{fontSize:10,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:.6,marginBottom:2}}>{label}</div>
+    <div style={{fontSize:13,color:N.text}}>{children || <span style={{color:N.textDim}}>—</span>}</div>
+  </div>
+);
+
+const panelStyle = { flex:"1 1 380px", maxWidth:520, background:N.navy800, border:`1px solid ${N.border}`, borderRadius:14,
+                     padding:20, position:"sticky", top:80, maxHeight:"calc(100vh - 100px)", overflowY:"auto" };
+const segStyle = (on) => ({ padding:"6px 12px", borderRadius:7, fontSize:12, fontWeight:600, cursor:"pointer",
+  background: on ? N.navy600 : "transparent", color: on ? N.text : N.textMid, border:`1px solid ${on ? N.sky : N.border}` });
+
+// Leads tab: pipeline numbers, filterable list (open leads with due follow-ups first) and
+// the selected lead's details, follow-ups and actions (qualify → customer, lost, reopen)
+function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
+  const [filter,  setFilter]  = useState({ status:"open", q:"" });
+  const [editing, setEditing] = useState(null);   // null | {} (new) | lead row
+  const lead = crm.leads.find(l => l.id === selectedId) || null;
+  useEffect(() => { if (selectedId) crm.loadFollowups(selectedId); }, [selectedId]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (crm.error) return <CrmUnavailable error={crm.error} onRetry={crm.loadAll} />;
+
+  const rows = sortLeads(filterLeads(crm.leads, filter));
+  const sum  = summariseLeads(crm.leads);
+  const customer = lead?.customer_id ? crm.customers.find(c => c.id === lead.customer_id) : null;
+  const open = lead && OPEN_STATUSES.includes(lead.status);
+  const onSave = async (form) => {
+    const saved = await crm.saveLead(form, editing?.id);
+    if (saved) { setEditing(null); onSelect(saved.id); }
+  };
+  const statuses = [["open","Open"],["new","New"],["contacted","Contacted"],["qualified","Customers"],["lost","Lost"],["all","All"]];
+
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Leads</h2>
+          <p style={{fontSize:12,color:N.textDim,marginTop:2}}>Track enquiries, follow up, and qualify them into customers</p>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={crm.loadAll} disabled={crm.loading}>{crm.loading ? "⏳" : "↺"} Refresh</button>
+          <button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}>+ New Lead</button>
+        </div>
+      </div>
+
+      <div className="nk-stats">
+        {[
+          ["New",              sum.new,       N.sky,     "new"],
+          ["Contacted",        sum.contacted, N.amber,   "contacted"],
+          ["Follow-ups today", sum.dueToday,  N.amber,   "open"],
+          ["Overdue",          sum.overdue,   N.red,     "open"],
+          ["Became customers", sum.qualified, N.green,   "qualified"],
+          ["Lost",             sum.lost,      N.textDim, "lost"],
+        ].map(([l, v, c, st]) => (
+          <button key={l} className="nk-stat" onClick={() => setFilter(f => ({ ...f, status: st }))}
+            style={{borderColor:alpha(c,"33"),cursor:"pointer",fontFamily:"inherit"}} title={`Show ${st === "open" ? "open" : l.toLowerCase()} leads`}>
+            <div className="nk-stat-num" style={{color:c}}>{v}</div>
+            <div className="nk-stat-label">{l}</div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+        <input className="nk-input" style={{flex:"1 1 220px",maxWidth:320,marginBottom:0}} placeholder="Search name, phone, region, venue…"
+          value={filter.q} onChange={e => setFilter(f => ({ ...f, q: e.target.value }))} />
+        {statuses.map(([k, label]) => (
+          <button key={k} style={segStyle(filter.status === k)} onClick={() => setFilter(f => ({ ...f, status: k }))}>{label}</button>
+        ))}
+        <span style={{fontSize:11,color:N.textDim,marginLeft:"auto"}}>{rows.length} lead{rows.length === 1 ? "" : "s"}</span>
+      </div>
+
+      <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
+        <div className="nk-table-wrap" style={{flex:"2 1 560px",margin:0}}>
+          <table className="nk-table">
+            <thead><tr>{["Lead","Event","Package","Region","Stage","Next follow-up"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+            <tbody>
+              {rows.map(l => (
+                <tr key={l.id} onClick={() => onSelect(l.id)} style={{cursor:"pointer"}} className={l.id === selectedId ? "row-active" : ""}>
+                  <td>
+                    <div style={{fontWeight:700,color:N.text,whiteSpace:"nowrap"}}>{l.name}</div>
+                    <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>{phoneLabel(l.phone)}</div>
+                  </td>
+                  <td>
+                    <div style={{fontSize:12,color:N.textMid}}>{l.event_type || "—"}</div>
+                    {l.event_date && <div style={{fontSize:11,color:N.textDim,whiteSpace:"nowrap"}}>{fmtDay(l.event_date)}</div>}
+                  </td>
+                  <td style={{fontSize:12,color:N.textMid,whiteSpace:"nowrap"}}>{formatTsh(l.package_price)}</td>
+                  <td style={{fontSize:12,color:N.textMid}}>{l.region || "—"}</td>
+                  <td><LeadStatus status={l.status} /></td>
+                  <td><DueTag date={l.next_followup_date} open={OPEN_STATUSES.includes(l.status)} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && (
+            <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>
+              {crm.loading ? "Loading leads…" : crm.leads.length ? "No leads match." : "No leads yet — add your first enquiry with “+ New Lead”."}
+            </div>
+          )}
+        </div>
+
+        {lead ? (
+          <div style={panelStyle}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:14}}>
+              <div>
+                <div style={{fontSize:18,fontWeight:800,color:N.text}}>{lead.name}</div>
+                <div style={{fontSize:12,color:N.textDim,fontFamily:"JetBrains Mono, monospace",marginTop:2}}>{phoneLabel(lead.phone)}</div>
+              </div>
+              <LeadStatus status={lead.status} />
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+              <Info label="Event type">{lead.event_type}</Info>
+              <Info label="Event date">{lead.event_date && fmtDay(lead.event_date)}</Info>
+              <Info label="Package">{lead.package_price != null && formatTsh(lead.package_price)}</Info>
+              <Info label="Region">{lead.region}</Info>
+              <Info label="Venue">{lead.venue}</Info>
+              <Info label="Added">{fmtDay(lead.created_at)}{lead.created_by ? ` · ${lead.created_by}` : ""}</Info>
+            </div>
+            {lead.description && (
+              <div style={{fontSize:13,color:N.textMid,background:N.navy700,borderRadius:8,padding:"8px 10px",marginBottom:12,whiteSpace:"pre-wrap",lineHeight:1.5}}>
+                {lead.description}
+              </div>
+            )}
+
+            {lead.status === "qualified" && (
+              <div style={{background:N.greenBg,border:`1px solid ${alpha(N.green,"44")}`,borderRadius:10,padding:"10px 12px",marginBottom:12,fontSize:12,color:N.textMid}}>
+                <div style={{color:N.green,fontWeight:700,marginBottom:6}}>✓ Customer since {fmtDay(lead.qualified_at)}</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {customer && <Sb bg={N.navy700} col={N.green} border={alpha(N.green,"44")} onClick={() => onOpenCustomer(customer.id)}>👤 {customer.name}</Sb>}
+                  {lead.event_id && <Sb bg={N.navy700} col={N.sky} border={alpha(N.sky,"44")} onClick={() => onOpenEvent(lead.event_id)}>🗂 View event</Sb>}
+                </div>
+              </div>
+            )}
+
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18}}>
+              {open && (
+                <button className="nk-btn nk-btn-success" style={{padding:"7px 14px",fontSize:12}} onClick={() => crm.qualifyLead(lead)} disabled={crm.busy}>
+                  ✓ Qualify → Customer
+                </button>
+              )}
+              <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => setEditing(lead)}>✏ Edit</button>
+              {open && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "lost")}>✗ Lost</button>}
+              {lead.status === "lost" && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "contacted")}>↺ Reopen</button>}
+              <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12,color:N.red}}
+                onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}>🗑</button>
+            </div>
+
+            <div className="nk-sec nk-sec-teal" style={{marginBottom:8}}>Follow-ups</div>
+            {open && <FollowupComposer busy={crm.busy} onAdd={(f) => crm.addFollowup(lead, f)} />}
+            {open && lead.next_followup_date && (
+              <div style={{fontSize:12,color:N.textMid,marginBottom:10}}>Next follow-up: <DueTag date={lead.next_followup_date} /></div>
+            )}
+            <FollowupList items={crm.followups[lead.id]} />
+          </div>
+        ) : (
+          <div style={{...panelStyle,textAlign:"center",color:N.textDim,fontSize:13,padding:40,position:"static"}}>
+            Select a lead to see its details and follow-ups.
+          </div>
+        )}
+      </div>
+
+      {editing && <LeadModal initial={editing} saving={crm.busy} onSave={onSave} onClose={() => setEditing(null)} />}
+    </div>
+  );
+}
+
+// Customers tab: customer list (with event counts) and the selected customer's details,
+// events (click one for the full overview) and the leads they came from
+function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNewEvent, eventsVersion }) {
+  const [q, setQ] = useState("");
+  const [editing, setEditing] = useState(null);   // null | {} (new) | customer row
+  const [loaded,  setLoaded]  = useState({ id:null, list:[] });   // events of customer `id`
+  const customer = crm.customers.find(c => c.id === selectedId) || null;
+  const events = loaded.id === selectedId ? loaded.list : null;    // null while loading
+  useEffect(() => {
+    if (!selectedId) return;
+    let live = true;
+    crm.customerEvents(selectedId).then(list => { if (live) setLoaded({ id: selectedId, list }); });
+    return () => { live = false; };
+  }, [selectedId, eventsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (crm.error) return <CrmUnavailable error={crm.error} onRetry={crm.loadAll} />;
+
+  const needle = q.trim().toLowerCase();
+  const digits = needle.replace(/\D/g, "");
+  const rows = crm.customers.filter(c => !needle
+    || [c.name, c.region, c.notes].filter(Boolean).join(" ").toLowerCase().includes(needle)
+    || (digits.length >= 4 && (c.phone || "").includes(normalisePhone(digits))));
+  const leadsOf = customer ? crm.leads.filter(l => l.customer_id === customer.id) : [];
+  const totalEvents = Object.values(crm.eventCounts).reduce((a, b) => a + b, 0);
+  const onSave = async (form) => {
+    const saved = await crm.saveCustomer(form, editing?.id);
+    if (saved) { setEditing(null); onSelect(saved.id); }
+  };
+
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Customers</h2>
+          <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{crm.customers.length} customer{crm.customers.length === 1 ? "" : "s"} · {totalEvents} linked event{totalEvents === 1 ? "" : "s"}</p>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={crm.loadAll} disabled={crm.loading}>{crm.loading ? "⏳" : "↺"} Refresh</button>
+          <button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}>+ New Customer</button>
+        </div>
+      </div>
+
+      <input className="nk-input" style={{maxWidth:320}} placeholder="Search name, phone, region…" value={q} onChange={e => setQ(e.target.value)} />
+
+      <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
+        <div className="nk-table-wrap" style={{flex:"2 1 480px",margin:0}}>
+          <table className="nk-table">
+            <thead><tr>{["Customer","Region","Events","Since"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+            <tbody>
+              {rows.map(c => (
+                <tr key={c.id} onClick={() => onSelect(c.id)} style={{cursor:"pointer"}} className={c.id === selectedId ? "row-active" : ""}>
+                  <td>
+                    <div style={{fontWeight:700,color:N.text}}>{c.name}</div>
+                    <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>{phoneLabel(c.phone)}</div>
+                  </td>
+                  <td style={{fontSize:12,color:N.textMid}}>{c.region || "—"}</td>
+                  <td style={{fontSize:13,fontWeight:700,color:crm.eventCounts[c.id] ? N.sky : N.textDim}}>{crm.eventCounts[c.id] || 0}</td>
+                  <td style={{fontSize:12,color:N.textMid,whiteSpace:"nowrap"}}>{fmtDay(c.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!rows.length && (
+            <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>
+              {crm.loading ? "Loading customers…" : crm.customers.length ? "No customers match." : "No customers yet — qualify a lead or add one with “+ New Customer”."}
+            </div>
+          )}
+        </div>
+
+        {customer ? (
+          <div style={panelStyle}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:14}}>
+              <div>
+                <div style={{fontSize:18,fontWeight:800,color:N.text}}>{customer.name}</div>
+                <div style={{fontSize:12,color:N.textDim,fontFamily:"JetBrains Mono, monospace",marginTop:2}}>{phoneLabel(customer.phone)}</div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => setEditing(customer)}>✏ Edit</button>
+                <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12,color:N.red}}
+                  onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}>🗑</button>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+              <Info label="Region">{customer.region}</Info>
+              <Info label="Customer since">{fmtDay(customer.created_at)}</Info>
+            </div>
+            {customer.notes && <div style={{fontSize:13,color:N.textMid,background:N.navy700,borderRadius:8,padding:"8px 10px",marginBottom:12,whiteSpace:"pre-wrap"}}>{customer.notes}</div>}
+
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",margin:"18px 0 8px"}}>
+              <div className="nk-sec" style={{margin:0}}>Events {events ? `(${events.length})` : ""}</div>
+              <button className="nk-btn nk-btn-primary" style={{padding:"5px 12px",fontSize:11}} onClick={() => onNewEvent(customer)}>+ New event</button>
+            </div>
+            {!events ? <div style={{fontSize:12,color:N.textDim}}>Loading events…</div>
+              : !events.length ? <div style={{fontSize:12,color:N.textDim}}>No events yet.</div>
+              : (
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {events.map(ev => (
+                    <button key={ev.id} onClick={() => onOpenEvent(ev.id)} title="See everything about this event"
+                      style={{textAlign:"left",background:N.navy700,border:`1px solid ${N.border}`,borderRadius:9,padding:"9px 12px",cursor:"pointer",color:N.text,fontFamily:"inherit"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",gap:8,alignItems:"center"}}>
+                        <span style={{fontWeight:700,fontSize:13}}>{ev.username}</span>
+                        <span className={`nk-badge ${ev.status==="active"?"badge-yes":ev.status==="completed"?"badge-sent":"badge-no"}`}>{ev.status}</span>
+                      </div>
+                      <div style={{fontSize:11,color:N.textDim,marginTop:3}}>
+                        {[ev.event_type, ev.start_datetime && fmtDay(ev.start_datetime), ev.venue_name, ev.package_price != null && formatTsh(ev.package_price)].filter(Boolean).join(" · ") || "No details yet"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+            <div className="nk-sec" style={{margin:"18px 0 8px"}}>Leads</div>
+            {!leadsOf.length ? <div style={{fontSize:12,color:N.textDim}}>Added directly, not from a lead.</div> : (
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {leadsOf.map(l => (
+                  <button key={l.id} onClick={() => onOpenLead(l.id)}
+                    style={{textAlign:"left",background:"transparent",border:`1px dashed ${N.border}`,borderRadius:9,padding:"8px 12px",cursor:"pointer",color:N.textMid,fontFamily:"inherit",fontSize:12}}>
+                    🎯 {l.event_type || "Lead"}{l.event_date ? ` · ${fmtDay(l.event_date)}` : ""} · added {fmtDay(l.created_at)} <LeadStatus status={l.status} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div style={{...panelStyle,textAlign:"center",color:N.textDim,fontSize:13,padding:40,position:"static"}}>
+            Select a customer to see their events and history.
+          </div>
+        )}
+      </div>
+
+      {editing && <CustomerModal initial={editing} saving={crm.busy} onSave={onSave} onClose={() => setEditing(null)} />}
+    </div>
+  );
+}
+
+// Everything about one event in a single view: details, customer (and their other events),
+// the lead it came from with its follow-ups, card/send counts and the latest history.
+// Loads its own data; `onOpen(ev, tab)` jumps into the designer / report / history.
+function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCustomer, onOpenLead }) {
+  const [d, setD] = useState(null);   // fresh per event: the parent renders <EventOverview key={eventId}>
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const { data: ev, error } = await supabase.from("events").select("*").eq("id", eventId).single();
+      if (!live) return;
+      if (error) { setD({ error: error.message }); return; }
+      const none = Promise.resolve({ data: null });
+      const [cust, lead, cards, logs, siblings] = await Promise.all([
+        ev.customer_id ? supabase.from("customers").select("*").eq("id", ev.customer_id).maybeSingle() : none,
+        ev.lead_id ? supabase.from("leads").select("*").eq("id", ev.lead_id).maybeSingle()
+                   : supabase.from("leads").select("*").eq("event_id", ev.id).limit(1).maybeSingle(),
+        supabase.from("event_cards").select("wa_status,sms_status").eq("event_id", ev.id),
+        supabase.from("event_logs").select("*").eq("event_id", ev.id).order("created_at", { ascending:false }).limit(8),
+        ev.customer_id ? supabase.from("events").select("id,username,event_type,start_datetime,status").eq("customer_id", ev.customer_id)
+                           .order("start_datetime", { ascending:false, nullsFirst:false }) : none,
+      ]);
+      const fu = lead.data ? await supabase.from("lead_followups").select("*").eq("lead_id", lead.data.id).order("created_at", { ascending:false }) : { data: [] };
+      if (live) setD({ ev, customer: cust.data, lead: lead.data, followups: fu.data || [], cards: cards.data || [], logs: logs.data || [], siblings: siblings.data || [] });
+    })();
+    return () => { live = false; };
+  }, [eventId]);
+
+  const ev = d?.ev;
+  const count = (fn) => (d?.cards || []).filter(fn).length;
+  const card = { background:N.navy700, border:`1px solid ${N.border}`, borderRadius:12, padding:14, marginBottom:12 };
+  return (
+    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="nk-modal" style={{maxWidth:920}}>
+        <div className="nk-modal-head">
+          <div>
+            <div className="nk-modal-title">{ev ? ev.username : "Event"}</div>
+            {ev && (
+              <div style={{fontSize:12,color:N.textDim,marginTop:3}}>
+                {[ev.event_type, ev.start_datetime && fmtDay(ev.start_datetime), ev.venue_name, ev.region].filter(Boolean).join(" · ") || "No details yet"}
+              </div>
+            )}
+          </div>
+          <button className="nk-modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="nk-modal-body">
+          {!d ? <div style={{padding:40,textAlign:"center",color:N.textDim}}>Loading…</div>
+            : d.error ? <div style={{padding:40,textAlign:"center",color:N.red}}>Could not load this event: {d.error}</div>
+            : (
+              <>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16,alignItems:"center"}}>
+                  <span className={`nk-badge ${ev.status==="active"?"badge-yes":ev.status==="completed"?"badge-sent":"badge-no"}`}>{ev.status}</span>
+                  {ev.package_price != null && <Pill tone="good">{formatTsh(ev.package_price)}</Pill>}
+                  <div style={{marginLeft:"auto",display:"flex",gap:6,flexWrap:"wrap"}}>
+                    <Sb bg={N.accent} col="#fff" border={N.accent} onClick={() => onOpen(ev, "design")}>🎨 Open in Design</Sb>
+                    <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} onClick={() => onOpen(ev, "reports")}>📋 Report</Sb>
+                    <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")} onClick={() => onOpen(ev, "history")}>🕘 History</Sb>
+                    <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={() => onEdit(ev)}>✏ Edit</Sb>
+                  </div>
+                </div>
+
+                <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-start"}}>
+                  <div style={{flex:"1 1 380px",minWidth:0}}>
+                    <div style={card}>
+                      <div className="nk-sec" style={{marginBottom:10}}>👤 Customer</div>
+                      {d.customer ? (
+                        <>
+                          <button onClick={() => onOpenCustomer(d.customer.id)} style={{background:"none",border:"none",padding:0,cursor:"pointer",textAlign:"left",color:N.text,fontFamily:"inherit"}}>
+                            <div style={{fontWeight:800,fontSize:15}}>{d.customer.name}</div>
+                            <div style={{fontSize:12,color:N.textDim}}><span style={{fontFamily:"JetBrains Mono, monospace"}}>{phoneLabel(d.customer.phone)}</span>{d.customer.region ? ` · ${d.customer.region}` : ""}</div>
+                          </button>
+                          {d.siblings.length > 1 && (
+                            <div style={{marginTop:10}}>
+                              <div style={{fontSize:11,color:N.textDim,marginBottom:5}}>All {d.siblings.length} events for this customer</div>
+                              {d.siblings.map(s => (
+                                <button key={s.id} onClick={() => s.id !== ev.id && onSwitch(s.id)} disabled={s.id === ev.id}
+                                  style={{display:"block",width:"100%",textAlign:"left",background: s.id === ev.id ? N.navy600 : "transparent",
+                                    border:`1px solid ${s.id === ev.id ? N.sky : N.border}`,borderRadius:7,padding:"5px 9px",marginBottom:4,
+                                    cursor: s.id === ev.id ? "default" : "pointer",color:N.textMid,fontSize:12,fontFamily:"inherit"}}>
+                                  <strong style={{color:N.text}}>{s.username}</strong>{[s.event_type, s.start_datetime && fmtDay(s.start_datetime)].filter(Boolean).map(x => ` · ${x}`).join("")}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      ) : <div style={{fontSize:12,color:N.textDim}}>Not linked to a customer — use ✏ Edit to choose one.</div>}
+                    </div>
+
+                    <div style={card}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                        <div className="nk-sec" style={{margin:0}}>🎯 Lead &amp; follow-ups</div>
+                        {d.lead && <Sb bg="transparent" col={N.sky} border={alpha(N.sky,"44")} onClick={() => onOpenLead(d.lead.id)}>Open lead</Sb>}
+                      </div>
+                      {d.lead ? (
+                        <>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+                            <Info label="Stage"><LeadStatus status={d.lead.status} /></Info>
+                            <Info label="Enquiry">{fmtDay(d.lead.created_at)}</Info>
+                            <Info label="Package">{d.lead.package_price != null && formatTsh(d.lead.package_price)}</Info>
+                            <Info label="Venue">{d.lead.venue}</Info>
+                          </div>
+                          {d.lead.description && <div style={{fontSize:12,color:N.textMid,marginBottom:10,whiteSpace:"pre-wrap"}}>{d.lead.description}</div>}
+                          <FollowupList items={d.followups} />
+                        </>
+                      ) : <div style={{fontSize:12,color:N.textDim}}>This event wasn't created from a lead.</div>}
+                    </div>
+                  </div>
+
+                  <div style={{flex:"1 1 320px",minWidth:0}}>
+                    <div style={card}>
+                      <div className="nk-sec" style={{marginBottom:10}}>🖼 Cards &amp; sending</div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        {[
+                          ["Contacts",   d.cards.length,                                                         N.textMid],
+                          ["WA sent",    count(c => c.wa_status === WA.sent),                                    N.green],
+                          ["WA invalid", count(c => c.wa_status === WA.invalid),                                 N.amber],
+                          ["SMS sent",   count(c => c.sms_status === SMS.sent || c.sms_status === SMS.delivered), N.teal],
+                        ].map(([l, v, c]) => (
+                          <div key={l} style={{background:N.navy800,borderRadius:9,padding:"8px 10px",border:`1px solid ${alpha(c,"33")}`}}>
+                            <div style={{fontSize:20,fontWeight:800,color:c}}>{v}</div>
+                            <div style={{fontSize:10,color:N.textDim,textTransform:"uppercase",letterSpacing:.5}}>{l}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={card}>
+                      <div className="nk-sec" style={{marginBottom:10}}>🕘 Latest activity</div>
+                      {!d.logs.length ? <div style={{fontSize:12,color:N.textDim}}>Nothing recorded yet.</div> : d.logs.map(r => {
+                        const st = HISTORY_STATUSES[r.status] || { label: r.status, tone: "info" };
+                        return (
+                          <div key={r.id} style={{display:"flex",gap:8,alignItems:"baseline",fontSize:12,padding:"4px 0",borderBottom:`1px solid ${N.border}`}}>
+                            <span style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:10,whiteSpace:"nowrap"}}>{fmtWhen(r.created_at)}</span>
+                            <span style={{flex:1,minWidth:0,color:N.textMid,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                              {HISTORY_CHANNELS[r.channel]?.icon} {HISTORY_ACTIONS[r.action] || r.action}{r.recipient_name ? ` — ${r.recipient_name}` : ""}{!r.recipient_name && r.detail ? ` — ${r.detail}` : ""}
+                            </span>
+                            <Pill tone={st.tone}>{st.label}</Pill>
+                          </div>
+                        );
+                      })}
+                      <button className="nk-btn nk-btn-ghost nk-btn-full" style={{marginTop:10,marginBottom:0,fontSize:12}} onClick={() => onOpen(ev, "history")}>See full history →</button>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    MAIN APP
@@ -1204,6 +2188,23 @@ export default function App() {
     XLSX.writeFile(wb, `${evName}_History_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
+  /* ── CRM: leads → follow-ups → customers → events ── */
+  const crm = useCrm({ enabled: !!userId, showToast, askDialog, logHistory, reloadEvents: loadSavedEvents });
+  const [leadSel,     setLeadSel]     = useState(null);   // lead open in the Leads tab
+  const [customerSel, setCustomerSel] = useState(null);   // customer open in the Customers tab
+  const [overviewId,  setOverviewId]  = useState(null);   // event shown in <EventOverview>
+  useEffect(() => { if (userId) crm.loadAll(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Keep the per-customer event counts current as events are created, edited or deleted
+  useEffect(() => { if (userId) crm.loadEventCounts(); }, [savedEvents]); // eslint-disable-line react-hooks/exhaustive-deps
+  const customerById = Object.fromEntries(crm.customers.map(c => [c.id, c]));
+  const leadSummary  = summariseLeads(crm.leads);
+  // Cross-links between the Leads / Customers tabs, the overview and the event tabs
+  const openLead     = (id) => { setOverviewId(null); setLeadSel(id); setTab("leads"); };
+  const openCustomer = (id) => { setOverviewId(null); setCustomerSel(id); setTab("customers"); };
+  const openEventIn  = (ev, target) => { setOverviewId(null); selectEvent(ev, target); };
+  const editEvent    = (ev) => setModalEvent({ ...ev, start_datetime: ev.start_datetime ? ev.start_datetime.slice(0,16) : "", end_datetime: ev.end_datetime ? ev.end_datetime.slice(0,16) : "" });
+  const newEventForCustomer = (c) => setModalEvent({ ...BLANK_EVENT, username: c.name, phone: c.phone || "", region: c.region || "", customer_id: c.id });
+
   /* Auto-save the extra SMS messages (debounced 1.5 s), only when they changed since the last load/save */
   useEffect(() => {
     if (!supabase || !savedEventId || JSON.stringify(extraMessages) === extraMsgsBase.current) return;
@@ -1423,19 +2424,20 @@ export default function App() {
 
   /* ── Save / upsert event ── */
   // Inserts a new event row or updates an existing one (branches on `currentId`).
-  // Also stamps the designer's cover image, element layout, and — only when saving
-  // the currently-loaded event, not a brand-new one — the SMS message.
+  // Only the event-form fields (EVENT_FORM_FIELDS) are written — the Edit button passes
+  // the whole DB row, and writing that back would restore stale copies of other columns
+  // (sms_draft, sms_messages…). The designer's cover image, element layout and SMS
+  // message are stamped only onto the event that is open in the designer, or a brand-new one.
   const persistEvent = async (formData, currentId = savedEventId) => {
     if (!supabase) { showToast("Supabase not configured","warn"); return null; }
     setIsSaving(true);
     try {
-      // Only stamp the designer's SMS message onto the loaded event or a brand-new one
       const isLoadedEvent = !currentId || currentId === savedEventId;
+      const fields = Object.fromEntries(EVENT_FORM_FIELDS.filter(k => k in formData)
+        .map(k => [k, NULLABLE_EVENT_FIELDS.includes(k) && formData[k] === "" ? null : formData[k]]));
       const payload = {
-        ...formData,
-        cover_image_url: coverUrl||null,
-        elements_layout: elements,
-        ...(isLoadedEvent ? { sms_message: smsMessage } : {}),
+        ...fields,
+        ...(isLoadedEvent ? { cover_image_url: coverUrl||null, elements_layout: elements, sms_message: smsMessage } : {}),
         start_datetime: formData.start_datetime||null,
         end_datetime:   formData.end_datetime||null,
       };
@@ -1444,7 +2446,7 @@ export default function App() {
         if (error) throw error;
         if (isLoadedEvent) { smsPersistedMsg.current = smsMessage; smsDraftBase.current = smsMessage; }
         logHistory({ channel:"event", action:"update", detail:`Event details saved: ${formData.username || ""}` }, currentId);
-        setEventData(formData);
+        if (isLoadedEvent) setEventData(formData);   // editing another event must not relabel the open one
         showToast("Event updated", "success");
         await loadSavedEvents();
         return currentId;
@@ -2448,7 +3450,7 @@ export default function App() {
 
         {/* Event modal */}
         {modalEvent !== null && (
-          <EventModal initial={modalEvent} onSave={onModalSave} onClose={() => setModalEvent(null)} saving={isSaving} />
+          <EventModal initial={modalEvent} onSave={onModalSave} onClose={() => setModalEvent(null)} saving={isSaving} customers={crm.customers} />
         )}
 
         {/* Activity logs — floating (position: fixed) so they never shift the page; each clears
@@ -2459,6 +3461,13 @@ export default function App() {
             <LogSection title="WhatsApp Log" color={N.green} styles={LOG_STYLES.wa}     log={bulkLog}   onClose={()=>setBulkLog([])} />
             <LogSection title="SMS Log"      color={N.teal}  styles={LOG_STYLES.sms}    log={smsLog}    onClose={()=>setSmsLog([])} />
           </div>
+        )}
+
+        {/* Event overview: everything related to one event */}
+        {overviewId && (
+          <EventOverview key={overviewId} eventId={overviewId} onClose={() => setOverviewId(null)} onSwitch={setOverviewId}
+            onOpen={openEventIn} onEdit={(ev) => { setOverviewId(null); editEvent(ev); }}
+            onOpenCustomer={openCustomer} onOpenLead={openLead} />
         )}
 
         {/* Choice dialog (bulk-send / re-send confirmations) */}
@@ -2549,6 +3558,16 @@ export default function App() {
         {/* Tabs */}
         <nav className="nk-tabs">
           <button className={`nk-tab${tab==="events"?" active":""}`}    onClick={()=>{ loadSavedEvents(); setTab("events"); }}>🗂 Events</button>
+          <button className={`nk-tab${tab==="leads"?" active":""}`}     onClick={()=>setTab("leads")}>
+            🎯 Leads
+            {leadSummary.dueToday + leadSummary.overdue > 0 && (
+              <span title="Follow-ups due today or overdue"
+                style={{marginLeft:6,background:N.red,color:"#fff",borderRadius:10,padding:"0 6px",fontSize:10,fontWeight:800}}>
+                {leadSummary.dueToday + leadSummary.overdue}
+              </span>
+            )}
+          </button>
+          <button className={`nk-tab${tab==="customers"?" active":""}`} onClick={()=>setTab("customers")}>👥 Customers</button>
           <button className={`nk-tab${tab==="design"?" active":""}`}    onClick={()=>setTab("design")}>🎨 Design</button>
           <button className={`nk-tab${tab==="vcard"?" active":""}`}     onClick={()=>setTab("vcard")}>📇 VCard</button>
           <button className={`nk-tab${tab==="sms"?" active":""}`}       onClick={()=>setTab("sms")}>💬 SMS</button>
@@ -2845,6 +3864,12 @@ export default function App() {
                             <td>
                               <div style={{fontWeight:700,color:N.text}}>{ev.username}</div>
                               {ev.phone && <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>+{normalisePhone(ev.phone)}</div>}
+                              {customerById[ev.customer_id] && (
+                                <button onClick={(e)=>{ e.stopPropagation(); openCustomer(ev.customer_id); }} title="Open this customer"
+                                  style={{background:"none",border:"none",padding:0,marginTop:2,cursor:"pointer",fontSize:11,color:N.green,fontFamily:"inherit"}}>
+                                  👤 {customerById[ev.customer_id].name}
+                                </button>
+                              )}
                             </td>
                             <td><span style={{color:N.textMid,fontSize:12}}>{ev.event_type||"—"}</span></td>
                             <td>
@@ -2862,6 +3887,11 @@ export default function App() {
                             </td>
                             <td>
                               <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                                <Sb bg={N.navy600} col={N.green} border={alpha(N.green,"44")}
+                                  onClick={(e)=>{ e.stopPropagation(); setOverviewId(ev.id); }}
+                                  title="Customer, lead, follow-ups, sending and history for this event">
+                                  🔎 Overview
+                                </Sb>
                                 <Sb bg={N.accent} col="#fff" border={N.accent}
                                   onClick={(e)=>{ e.stopPropagation(); createCardsFromEvent(ev); }}
                                   title="Load this event and open card designer">
@@ -2878,7 +3908,7 @@ export default function App() {
                                   🕘 History
                                 </Sb>
                                 <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
-                                  onClick={(e)=>{ e.stopPropagation(); setModalEvent({...ev, start_datetime: ev.start_datetime?ev.start_datetime.slice(0,16):"", end_datetime: ev.end_datetime?ev.end_datetime.slice(0,16):""}); }}
+                                  onClick={(e)=>{ e.stopPropagation(); editEvent(ev); }}
                                   title="Edit event details">
                                   ✏ Edit
                                 </Sb>
@@ -2903,6 +3933,16 @@ export default function App() {
                   </div>
                 )}
               </div>
+            )}
+
+            {/* ─── LEADS / CUSTOMERS ─── */}
+            {tab === "leads" && (
+              <LeadsTab crm={crm} selectedId={leadSel} onSelect={setLeadSel}
+                onOpenEvent={setOverviewId} onOpenCustomer={openCustomer} />
+            )}
+            {tab === "customers" && (
+              <CustomersTab crm={crm} selectedId={customerSel} onSelect={setCustomerSel} eventsVersion={savedEvents}
+                onOpenEvent={setOverviewId} onOpenLead={openLead} onNewEvent={newEventForCustomer} />
             )}
 
             {/* ─── DESIGN ─── */}
