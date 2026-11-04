@@ -20,12 +20,14 @@ CREATE TABLE IF NOT EXISTS events (
   elements_layout JSONB,        -- saved card element positions / sizes / colors
   sms_message     TEXT,         -- per-event SMS message template (manual "Save Template")
   sms_draft       TEXT,         -- autosaved SMS working copy
+  sms_messages    JSONB DEFAULT '[]'::jsonb, -- extra SMS messages (title, body, recipients source, per-message statuses)
   created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE events ADD COLUMN IF NOT EXISTS elements_layout JSONB;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS sms_message TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS sms_draft TEXT;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS sms_messages JSONB DEFAULT '[]'::jsonb;
 
 -- Cards table (one row per attendee/contact in an event)
 CREATE TABLE IF NOT EXISTS event_cards (

@@ -9,6 +9,7 @@
 
 -- ── 1. Add columns added since the original schema ────────────────────
 ALTER TABLE public.events ADD COLUMN IF NOT EXISTS sms_draft TEXT;
+ALTER TABLE public.events ADD COLUMN IF NOT EXISTS sms_messages JSONB DEFAULT '[]'::jsonb;
 
 -- ── 2. Revoke from anon (app requires login — no public access needed) ─
 REVOKE ALL ON public.events          FROM anon;

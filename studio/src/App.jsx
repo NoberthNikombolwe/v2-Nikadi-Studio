@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
+import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -837,6 +838,9 @@ function LogSection({ title, color, styles, log, onClose }) {
 }
 
 const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
+// Id of an event's main SMS message (events.sms_message, statuses in event_cards.sms_status).
+// Extra messages (events.sms_messages) use random ids — see src/lib/messages.js.
+const MAIN_MSG = "main";
 
 /* ══════════════════════════════════════════════════════════════════════════
    MAIN APP
@@ -912,9 +916,21 @@ export default function App() {
   const [smsLog,          setSmsLog]          = useState([]);
   const [smsBalance,      setSmsBalance]      = useState(null);
   const [smsBalanceLoading, setSmsBalanceLoading] = useState(false);
+  // Extra SMS messages for this event (events.sms_messages): each has its own text and
+  // recipients — the event contacts or an uploaded list. `activeMsgId` is the one the SMS
+  // tab is editing/sending (MAIN_MSG = the event's main message above).
+  const [extraMessages,   setExtraMessages]   = useState([]);
+  const [activeMsgId,     setActiveMsgId]     = useState(MAIN_MSG);
+  const [extraMsgsSaved,  setExtraMsgsSaved]  = useState(false);
+  const extraMessagesRef  = useRef(extraMessages);   // always-current copy for async send flows
+  useEffect(() => { extraMessagesRef.current = extraMessages; });
+  const extraMsgsBase     = useRef("[]");   // JSON last loaded from / saved to events.sms_messages
+  const extraMsgsTimer    = useRef(null);
+  const extraMsgsWarned   = useRef(false);  // warn about a failed save once, not on every keystroke
 
   /* ── VCard ── */
   const [vcardContacts, setVcardContacts] = useState([]);
+  const [vcardColumns,  setVcardColumns]  = useState([]);   // every column of the VCard upload, for reuse as an SMS list
 
   /* ── Toast ── */
   const [toast, setToast] = useState(null);
@@ -1085,6 +1101,38 @@ export default function App() {
     return () => clearTimeout(smsDraftTimerRef.current);
   }, [smsMessage, savedEventId]);
 
+  // Writes the extra SMS messages (text, recipients, statuses) to events.sms_messages.
+  // Needs that column (supabase-schema.sql); a failure is reported once, not per keystroke.
+  const persistExtraMessages = async (eventId, msgs) => {
+    if (!supabase || !eventId) return false;
+    const { error } = await supabase.from("events").update({ sms_messages: msgs }).eq("id", eventId);
+    if (error) {
+      if (!extraMsgsWarned.current) {
+        extraMsgsWarned.current = true;
+        showToast(`Extra SMS messages not saved: ${error.message} (run supabase-schema.sql)`, "warn");
+      }
+      return false;
+    }
+    extraMsgsWarned.current = false;
+    extraMsgsBase.current = JSON.stringify(msgs);
+    setSavedEvents(es => es.map(e => e.id === eventId ? { ...e, sms_messages: msgs } : e));
+    return true;
+  };
+
+  /* Auto-save the extra SMS messages (debounced 1.5 s), only when they changed since the last load/save */
+  useEffect(() => {
+    if (!supabase || !savedEventId || JSON.stringify(extraMessages) === extraMsgsBase.current) return;
+    clearTimeout(extraMsgsTimer.current);
+    setExtraMsgsSaved(false);
+    extraMsgsTimer.current = setTimeout(async () => {
+      if (await persistExtraMessages(savedEventId, extraMessages)) {
+        setExtraMsgsSaved(true);
+        setTimeout(() => setExtraMsgsSaved(false), 2500);
+      }
+    }, 1500);
+    return () => clearTimeout(extraMsgsTimer.current);
+  }, [extraMessages, savedEventId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* Close event dropdown on outside click */
   useEffect(() => {
     if (!eventDropdownOpen) return;
@@ -1249,22 +1297,10 @@ export default function App() {
       const wb   = XLSX.read(ev.target.result, { type:"array" });
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
-      const colMap = {};  // original header → standard key
-      const extraCols = [];
-      const norm = data.map(row => {
-        const n = { waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle" };
-        Object.keys(row).forEach(k => {
-          const kl = k.trim().toLowerCase().replace(/[\s_]/g,"");
-          if      (kl==="name")                                      { n.name     = String(row[k]); colMap[k]="name"; }
-          else if (kl==="cardtype"||kl==="card")                    { n.cardType = String(row[k]); colMap[k]="cardType"; }
-          else if (kl==="phone"||kl==="phonenumber"||kl==="mobile") { n.phone    = String(row[k]); colMap[k]="phone"; }
-          else { n[k] = String(row[k]); if (!extraCols.includes(k)) extraCols.push(k); }
-        });
-        return n;
-      });
+      const { rows, columns } = normaliseSheetRows(data);
+      const norm = rows.map(r => ({ waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle", ...r }));
       // Ordered column list for the SMS variable chips: standard columns first, then any extras
-      const standard = ["name","cardType"].filter(c => Object.values(colMap).includes(c));
-      setCsvColumns([...standard, ...extraCols]);
+      setCsvColumns(columns);
       setRecords(norm); setActiveIdx(0);
       showToast(`Loaded ${norm.length} records`, "success");
     };
@@ -1272,8 +1308,9 @@ export default function App() {
   };
 
   /* ── VCard CSV upload ── */
-  // Parses an uploaded CSV into `vcardContacts` (name + phone only) feeding the
-  // VCard tab's export — independent of the main `records` table
+  // Parses an uploaded CSV into `vcardContacts` feeding the VCard tab's export —
+  // independent of the main `records` table. The .vcf only uses name + phone, but every
+  // column is kept so the same list can be reused as an SMS message's recipients.
   const onVcardCsvUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
@@ -1282,16 +1319,10 @@ export default function App() {
       const wb   = XLSX.read(ev.target.result, { type:"array" });
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
-      const contacts = data.map(row => {
-        const c = { name:"", phone:"" };
-        Object.keys(row).forEach(k => {
-          const kl = k.trim().toLowerCase().replace(/[\s_]/g,"");
-          if (kl==="name") c.name = String(row[k]);
-          else if (kl==="phone"||kl==="phonenumber"||kl==="mobile") c.phone = String(row[k]);
-        });
-        return c;
-      }).filter(c => c.name || c.phone);
+      const { rows, columns } = normaliseSheetRows(data);
+      const contacts = rows.map(c => ({ name:"", phone:"", ...c })).filter(c => c.name || c.phone);
       setVcardContacts(contacts);
+      setVcardColumns(columns.includes("name") ? columns : ["name", ...columns]);
       showToast(`${contacts.length} contacts loaded for VCard`, "success");
     };
     r.readAsArrayBuffer(f);
@@ -1336,6 +1367,12 @@ export default function App() {
         if (error) throw error;
         smsPersistedMsg.current = smsMessage;
         smsDraftBase.current = smsMessage;
+        // Extra SMS messages carry over to the new event like the main text, but not their send history
+        const carried = extraMessagesRef.current.map(m => ({
+          ...m, statuses: {}, recipients: m.recipients.map(r => ({ ...r, smsStatus: SMS.pending })),
+        }));
+        resetExtraMessages(carried);
+        if (carried.length) persistExtraMessages(data.id, carried);
         setEventData(formData);
         setSavedEventId(data.id);
         showToast("Event created", "success");
@@ -1404,6 +1441,19 @@ export default function App() {
     if (id) setModalEvent(null);
   };
 
+  // Replaces the extra SMS messages with an event's saved ones (default: none) without
+  // triggering an autosave, and goes back to editing the main message
+  const resetExtraMessages = (msgs = []) => {
+    clearTimeout(extraMsgsTimer.current);
+    // Flush edits still waiting for the debounced autosave so switching events can't lose them
+    const pending = extraMessagesRef.current;
+    if (savedEventId && JSON.stringify(pending) !== extraMsgsBase.current) persistExtraMessages(savedEventId, pending);
+    extraMsgsBase.current    = JSON.stringify(msgs);
+    extraMessagesRef.current = msgs;
+    setExtraMessages(msgs);
+    setActiveMsgId(MAIN_MSG);
+  };
+
   /* ── Delete event ── */
   // Deletes an event row from Supabase (cascades to its cards at the DB level);
   // if it was the currently-loaded event, also clears designer state back to blank
@@ -1416,6 +1466,7 @@ export default function App() {
       setSavedEventId(null); setEventData(BLANK_EVENT);
       smsPersistedMsg.current = null;
       setSmsMessage(DEFAULT_SMS_MESSAGE);
+      resetExtraMessages();
     }
     setDeleteTarget(null);
     showToast(`Event "${ev.username}" deleted`, "success");
@@ -1454,6 +1505,7 @@ export default function App() {
     smsPersistedMsg.current = ev.sms_message || DEFAULT_SMS_MESSAGE;   // the saved template
     smsDraftBase.current    = ev.sms_draft || smsPersistedMsg.current;  // an autosaved draft wins when present
     setSmsMessage(smsDraftBase.current);
+    resetExtraMessages(sanitiseMessages(ev.sms_messages));
 
     /* Clear canvas template when event has none */
     if (!ev.cover_image_url) {
@@ -1523,7 +1575,7 @@ export default function App() {
   /* ── Sidebar dropdown handler ── */
   // Loads the chosen event via selectEvent, or resets to a blank event when "— none —" is picked
   const onEventSelect = (id) => {
-    if (!id) { selectSeq.current++; setEventData(BLANK_EVENT); setSavedEventId(null); setCoverUrl(null); return; }
+    if (!id) { selectSeq.current++; setEventData(BLANK_EVENT); setSavedEventId(null); setCoverUrl(null); resetExtraMessages(); return; }
     selectEvent(id);
   };
 
@@ -1552,10 +1604,16 @@ export default function App() {
   // .env.development.local (the Vite proxy forwards it as-is). Production: the
   // signed-in user's Supabase access token — the Edge Functions verify it and attach
   // the provider token server-side, so no provider secret ever reaches the browser.
+  // Throws a readable error instead of letting the provider answer a bare "HTTP 401".
   const getApiToken = async (kind) => {
-    if (import.meta.env.DEV) return kind === "wa" ? WA_BEARER : smsSettings.bearerToken;
+    if (import.meta.env.DEV) {
+      const token = kind === "wa" ? (WA_BEARER || smsSettings.bearerToken) : smsSettings.bearerToken;
+      if (!token) throw new Error(`no ${kind === "wa" ? "VITE_WA_BEARER_TOKEN / " : ""}VITE_SMS_BEARER_TOKEN — add it to .env.development.local and restart npm run dev`);
+      return token;
+    }
     const { data } = await supabase.auth.getSession();
-    return data.session?.access_token || "";
+    if (!data.session?.access_token) throw new Error("not signed in — sign in again");
+    return data.session.access_token;
   };
 
   // Asks (in-app modal) before re-sending to someone who already received a message
@@ -1569,8 +1627,9 @@ export default function App() {
   // share a phone number the user chooses between "Send without duplicates" (the first
   // record per number) and "Send duplicates too" (every record). Resolves to the chosen
   // recipients, or null when there is nothing to send or the user cancels.
-  const pickBulkRecipients = async ({ title, emptyMsg, options }) => {
-    const { targets: all, skipped, duplicateGroups } = selectRecipients(records, { ...options, allowDuplicates: true });
+  // `recs` defaults to the event contacts; an SMS message with an uploaded list passes its own.
+  const pickBulkRecipients = async ({ title, emptyMsg, options, recs = records }) => {
+    const { targets: all, skipped, duplicateGroups } = selectRecipients(recs, { ...options, allowDuplicates: true });
     const note = describeSkipped(skipped);
     if (!all.length) { showToast(`${emptyMsg} ${note}`.trim(), "warn"); return null; }
     const unique = dropDuplicates(all);
@@ -1611,14 +1670,108 @@ export default function App() {
     return choice === "unique" ? unique : choice === "all" ? all : null;
   };
 
-  // Fills the {name}/{cardType} placeholders in the SMS template for one record
+  // Fills the {name}/{cardType} placeholders in an SMS template (default: the main message) for one record
   // Also supports {phone} and any extra spreadsheet column as {ColumnName}; unknown {x} is left as typed
-  const buildSmsMsg = (rec) => smsMessage.replace(/\{(\w+)\}/g, (_, key) => {
-    if (key === "name")     return rec.name     || "";
-    if (key === "cardType") return rec.cardType || "";
-    if (key === "phone")    return rec.phone ? `+${normalisePhone(rec.phone)}` : "";
-    return rec[key] !== undefined ? String(rec[key]) : `{${key}}`;
-  });
+  const buildSmsMsg = (rec, body = smsMessage) => fillTemplate(body, rec);
+
+  /* ── SMS messages: main + extras ── */
+  // The extra message being edited in the SMS tab (null while the main message is selected)
+  const activeExtra = extraMessages.find(m => m.id === activeMsgId) || null;
+  // Looks up a message by id (null for the main message) from the always-current list
+  const findMessage = (msgId) => msgId === MAIN_MSG ? null : extraMessagesRef.current.find(m => m.id === msgId) || null;
+  // Who a message goes to, each carrying its smsStatus *for that message*: the main message
+  // uses the event contacts as-is, an extra one its uploaded list or the contacts plus its own statuses
+  const messageRecipients = (msg, recs = records) => !msg ? recs
+    : msg.source === "upload" ? msg.recipients
+    : recs.map(r => ({ ...r, smsStatus: msg.statuses[recipientKey(r)] || SMS.pending }));
+  const activeRecipients = messageRecipients(activeExtra);
+  const activeBody       = activeExtra ? activeExtra.body : smsMessage;
+  const activeColumns    = activeExtra?.source === "upload" ? activeExtra.columns : csvColumns;
+  // Patches one extra message (object, or function of the message returning a patch)
+  const updateExtraMessage = (id, patch) =>
+    setExtraMessages(ms => ms.map(m => m.id === id ? { ...m, ...(typeof patch === "function" ? patch(m) : patch) } : m));
+  // Sets the text of whichever message is selected (accepts a value or an updater, like a setState)
+  const setActiveBody = (val) => {
+    if (!activeExtra) { setSmsMessage(val); return; }
+    updateExtraMessage(activeExtra.id, m => ({ body: typeof val === "function" ? val(m.body) : val }));
+  };
+
+  // Adds a new extra message (event contacts as recipients, empty text) and selects it
+  const addExtraMessage = () => {
+    const msg = {
+      id: crypto.randomUUID(), title: `Message ${extraMessages.length + 2}`, body: "",
+      source: "contacts", fileName: null, columns: [], recipients: [], statuses: {},
+    };
+    setExtraMessages(ms => [...ms, msg]);
+    setActiveMsgId(msg.id);
+  };
+
+  // Deletes the selected extra message after confirming (its send history goes with it)
+  const deleteExtraMessage = async (msg) => {
+    const sent = messageRecipients(msg).filter(r => r.smsStatus && r.smsStatus !== SMS.pending).length;
+    const ok = await askDialog({
+      title: `Delete "${msg.title}"?`,
+      body: `This removes the message text and its recipient list${sent ? `, including the send status of ${sent} recipient${sent === 1 ? "" : "s"}` : ""}. Messages already sent are not affected.`,
+      actions: [{ value: "yes", label: "Delete message", kind: "warn" }],
+    });
+    if (ok !== "yes") return;
+    setExtraMessages(ms => ms.filter(m => m.id !== msg.id));
+    setActiveMsgId(MAIN_MSG);
+  };
+
+  // Switches an extra message's recipients to the event contacts or to an uploaded list.
+  // Replacing a list that already has sends asks first, because its statuses are reset.
+  const setMessageList = async (msg, { source, rows = [], columns = [], fileName = null }) => {
+    const sent = messageRecipients(msg).filter(r => r.smsStatus && r.smsStatus !== SMS.pending).length;
+    if (sent) {
+      const ok = await askDialog({
+        title: "Replace recipient list?",
+        body: `${sent} recipient${sent === 1 ? " has" : "s have"} already been sent "${msg.title}". Changing the list resets those statuses, so they could be messaged again.`,
+        actions: [{ value: "yes", label: "Replace list", kind: "warn" }],
+      });
+      if (ok !== "yes") return;
+    }
+    updateExtraMessage(msg.id, source === "upload"
+      ? { source, fileName, columns, recipients: rows.map(r => ({ ...r, smsStatus: SMS.pending })), statuses: {} }
+      : { source: "contacts", fileName: null, columns: [], recipients: [], statuses: {} });
+    if (source === "upload") showToast(`${rows.length} recipients loaded for "${msg.title}"`, "success");
+  };
+
+  // Loads an Excel/CSV file as the selected extra message's own recipient list. Any column
+  // (Name, Phone, Table, Amount…) becomes a {placeholder} for that message.
+  const onMessageListUpload = (e) => {
+    const f = e.target.files[0]; e.target.value = ""; if (!f || !activeExtra) return;
+    const msg = activeExtra;
+    const r = new FileReader();
+    r.onload = async ev => {
+      const XLSX = await loadXlsx();
+      const wb   = XLSX.read(ev.target.result, { type:"array" });
+      const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval:"" });
+      const { rows, columns } = normaliseSheetRows(data);
+      const kept = rows.filter(x => x.name || x.phone);
+      if (!kept.length) { showToast("No rows with a Name or Phone column found", "warn"); return; }
+      await setMessageList(msg, { source: "upload", rows: kept, columns, fileName: f.name });
+    };
+    r.readAsArrayBuffer(f);
+  };
+
+  // Records send results for a message. `recs` is the recipient list the send was made from
+  // and `updates` maps an index in it to the new status. The main message updates `records`
+  // (the caller saves event_cards); an extra message is saved to events.sms_messages at once.
+  const setMessageStatuses = (msgId, recs, updates) => {
+    if (msgId === MAIN_MSG) {
+      setRecords(rs => rs.map((r, i) => updates.has(i) ? { ...r, smsStatus: updates.get(i) } : r));
+      return;
+    }
+    // The user may have switched event mid-send: the message is then no longer in the list
+    if (!extraMessagesRef.current.some(m => m.id === msgId)) return;
+    const apply = (ms) => ms.map(m => m.id === msgId ? applyMessageStatuses(m, recs, updates) : m);
+    const next  = apply(extraMessagesRef.current);
+    extraMessagesRef.current = next;
+    setExtraMessages(apply);
+    extraMsgsBase.current = JSON.stringify(next);   // saved right here, so the debounced autosave can skip it
+    if (savedEventId) persistExtraMessages(savedEventId, next);
+  };
 
   /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
   // Re-encodes a card PNG as JPEG, iteratively lowering quality (and downscaling
@@ -1987,14 +2140,21 @@ export default function App() {
   // Sends a single SMS to one record (rendered from the SMS template) and updates
   // its smsStatus from the provider's response groupId (18=sent, 20=delivered).
   // Guarded against double-clicks (in-flight set) and accidental re-sends (confirm).
-  const sendSmsToOne = async (idx) => {
-    const rec = records[idx];
+  // `msgId` picks the message (default: the main one, as the Batch & Send tab uses); `idx`
+  // is the row in that message's recipient list.
+  const sendSmsToOne = async (idx, msgId = MAIN_MSG) => {
+    const msg = findMessage(msgId);
+    if (msgId !== MAIN_MSG && !msg) return;
+    const recs = messageRecipients(msg);
+    const rec  = recs[idx];
+    if (!rec) return;
     if (!rec.phone) { showToast("No phone for " + rec.name, "warn"); return; }
     if (!isValidPhone(rec.phone)) { showToast(`Invalid phone number for ${rec.name}`, "warn"); return; }
-    if (smsInFlight.current.has(idx)) return;
+    const flightKey = `${msgId}:${idx}`;
+    if (smsInFlight.current.has(flightKey)) return;
     if ((rec.smsStatus === SMS.sent || rec.smsStatus === SMS.delivered)
-        && !(await confirmResend(rec.name, "this SMS"))) return;
-    smsInFlight.current.add(idx);
+        && !(await confirmResend(rec.name, msg ? `"${msg.title}"` : "this SMS"))) return;
+    smsInFlight.current.add(flightKey);
     setSmsLog(l => [...l, { name: rec.name, status: "sending" }]);
     try {
       const res = await fetch(`${SMS_API}/text/single`, {
@@ -2007,7 +2167,7 @@ export default function App() {
         body: JSON.stringify({
           from: smsSettings.senderId || "NIKADI",
           to:   normalisePhone(rec.phone),
-          text: buildSmsMsg(rec),
+          text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
           flash: 0,
         }),
       });
@@ -2017,20 +2177,20 @@ export default function App() {
       if (grp === 18 || grp === 20) {
         const status = grp === 20 ? SMS.delivered : SMS.sent;
         const logStatus = grp === 20 ? "delivered" : "sent";
-        setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: status } : r));
+        setMessageStatuses(msgId, recs, new Map([[idx, status]]));
         setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: logStatus } : x));
-        autoSaveCard(rec.dbId, undefined, status);
+        if (!msg) autoSaveCard(rec.dbId, undefined, status);
         showToast(`SMS ${logStatus} to ${rec.name}`, "success");
       } else {
         throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
       }
     } catch (err) {
       setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "failed" } : x));
-      setRecords(rs => rs.map((r, i) => i === idx ? { ...r, smsStatus: SMS.failed } : r));
-      autoSaveCard(rec.dbId, undefined, SMS.failed);
+      setMessageStatuses(msgId, recs, new Map([[idx, SMS.failed]]));
+      if (!msg) autoSaveCard(rec.dbId, undefined, SMS.failed);
       showToast(`SMS failed for ${rec.name}: ${err.message}`, "warn");
     } finally {
-      smsInFlight.current.delete(idx);
+      smsInFlight.current.delete(flightKey);
     }
   };
 
@@ -2038,13 +2198,18 @@ export default function App() {
   // the per-recipient results back onto `records` by matching normalised phone numbers,
   // and saves the updated statuses if an event is loaded. Skips contacts already sent and
   // asks in a modal first (it costs credits) — including whether to skip or include
-  // repeated numbers.
-  const sendAllSms = async () => {
+  // repeated numbers. `msgId` picks which message (and so which recipient list) is sent.
+  const sendAllSms = async (msgId = MAIN_MSG) => {
     if (smsSending) return;
+    const msg = findMessage(msgId);
+    if (msgId !== MAIN_MSG && !msg) return;
+    if (msg && !msg.body.trim()) { showToast(`"${msg.title}" has no text yet`, "warn"); return; }
+    const recs = messageRecipients(msg);
     const targets = await pickBulkRecipients({
-      title:    "Send SMS",
+      title:    msg ? `Send "${msg.title}"` : "Send SMS",
       emptyMsg: "No SMS to send.",
       options:  { isDone: r => r.smsStatus === SMS.sent || r.smsStatus === SMS.delivered },
+      recs,
     });
     if (!targets) return;
     setSmsSending(true);
@@ -2055,7 +2220,7 @@ export default function App() {
       const messages = targets.map(({rec}) => ({
         from: smsSettings.senderId || "NIKADI",
         to:   normalisePhone(rec.phone),
-        text: buildSmsMsg(rec),
+        text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
       }));
       const res = await fetch(`${SMS_API}/text/multi`, {
         method: "POST",
@@ -2081,8 +2246,11 @@ export default function App() {
       const statusOf = (grp) => grp === 20 ? SMS.delivered : grp === 18 ? SMS.sent : SMS.failed;
       // index → new smsStatus, only for recipients the provider actually reported on
       const updates = new Map(targets.flatMap(({index}, n) => groupIds[n] === undefined ? [] : [[index, statusOf(groupIds[n])]]));
-      applyResults = (rs) => rs.map((r, i) => updates.has(i) ? { ...r, smsStatus: updates.get(i) } : r);
-      setRecords(applyResults);
+      if (msg) setMessageStatuses(msgId, recs, updates);   // extra message: its own statuses, saved at once
+      else {
+        applyResults = (rs) => rs.map((r, i) => updates.has(i) ? { ...r, smsStatus: updates.get(i) } : r);
+        setRecords(applyResults);
+      }
       setSmsLog(targets.map(({rec}, n) => ({
         name: rec.name,
         status: groupIds[n] === 20 ? "delivered" : groupIds[n] === 18 ? "sent" : "failed",
@@ -2095,21 +2263,24 @@ export default function App() {
     }
     setSmsSending(false);
     // `records` in this closure is pre-send; apply the same updates to the latest list
-    if (savedEventId) await saveCards(savedEventId, applyResults(recordsRef.current));
+    if (!msg && savedEventId) await saveCards(savedEventId, applyResults(recordsRef.current));
   };
 
-  // Exports phone+message pairs as a CSV, for sending via a third-party bulk SMS tool
+  // Safe file-name fragment for the selected message ("" for the main message)
+  const activeMsgSlug = activeExtra ? "_" + activeExtra.title.replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_") : "";
+
+  // Exports phone+message pairs for the selected message as a CSV, for sending via a third-party bulk SMS tool
   const downloadSmsCsv = () => {
-    if (!records.length) { showToast("No records","warn"); return; }
-    const rows = [["Phone","Message"], ...records.filter(r=>r.phone).map(r=>[`+${normalisePhone(r.phone)}`,buildSmsMsg(r)])];
-    downloadBlob(rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n"), "nikadi_sms_list.csv", "text/csv");
+    if (!activeRecipients.length) { showToast("No records","warn"); return; }
+    const rows = [["Phone","Message"], ...activeRecipients.filter(r=>r.phone).map(r=>[`+${normalisePhone(r.phone)}`,buildSmsMsg(r, activeBody)])];
+    downloadBlob(rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n"), `nikadi_sms_list${activeMsgSlug}.csv`, "text/csv");
     showToast(`Downloaded SMS list (${rows.length-1} recipients)`,"success");
   };
 
-  // Exports an Excel (.xlsx) report of SMS status per record, named after the event
+  // Exports an Excel (.xlsx) report of SMS status per recipient of the selected message, named after the event
   const downloadSmsReport = async () => {
     const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
-    const rows = records.map(r => ({
+    const rows = activeRecipients.map(r => ({
       "Name":       r.name     || "",
       "Card Type":  r.cardType || "",
       "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
@@ -2121,7 +2292,7 @@ export default function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "SMS Report");
     const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
-    XLSX.writeFile(wb, `${evName}_SMS_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
+    XLSX.writeFile(wb, `${evName}${activeMsgSlug}_SMS_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
   /* ── Counts ── */
@@ -2129,7 +2300,7 @@ export default function App() {
   const waInvalidCount = records.filter(r=>r.waStatus===WA.invalid).length;
   const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
   const waReportReady  = records.some(r=>r.waStatus===WA.sent||r.waStatus===WA.invalid||r.waStatus===WA.notSent);
-  const smsReportReady = records.some(r=>r.smsStatus!==SMS.pending);   // reads records, not the log, so it outlives the log
+  const smsReportReady = activeRecipients.some(r=>r.smsStatus && r.smsStatus!==SMS.pending);   // reads statuses, not the log, so it outlives the log
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
   /* ── Michango: hide QR + Card Type on canvas and exports ── */
@@ -2705,47 +2876,129 @@ export default function App() {
               <div className="nk-page" style={{padding:"0 0 40px"}}>
                 <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
                   <div style={{flex:"0 0 340px"}}>
+                    {/* Message picker — the main message plus any extra ones (reminder, thank-you…) */}
+                    <div className="nk-sec nk-sec-teal" style={{marginBottom:6}}>Messages</div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
+                      {[{ id: MAIN_MSG, title: "Main message" }, ...extraMessages].map(m => {
+                        const on = m.id === activeMsgId;
+                        return (
+                          <button key={m.id} onClick={()=>setActiveMsgId(m.id)}
+                            style={{
+                              padding:"4px 11px", borderRadius:6, fontSize:11, fontWeight:600, cursor:"pointer",
+                              background: on ? N.tealBg : N.navy700, color: on ? N.teal : N.textMid,
+                              border:`1px solid ${on ? N.teal : N.border}`,
+                            }}>
+                            {m.title}
+                          </button>
+                        );
+                      })}
+                      <button onClick={addExtraMessage}
+                        style={{padding:"4px 11px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",background:"transparent",color:N.sky,border:`1px dashed ${N.sky}66`}}>
+                        ＋ Add message
+                      </button>
+                    </div>
+
+                    {/* Extra message: title + who it goes to */}
+                    {activeExtra && (
+                      <div style={{background:N.cardBg,border:`1px solid ${N.border}`,borderRadius:8,padding:"10px 12px",marginBottom:14}}>
+                        <label className="nk-label">Message title</label>
+                        <div style={{display:"flex",gap:6,marginBottom:10}}>
+                          <input className="nk-input" style={{flex:1}} value={activeExtra.title} maxLength={60}
+                            onChange={e=>updateExtraMessage(activeExtra.id, { title: e.target.value })} />
+                          <button className="nk-btn nk-btn-ghost" style={{padding:"4px 10px",fontSize:11,color:N.red}}
+                            onClick={()=>deleteExtraMessage(activeExtra)} title="Delete this message">🗑</button>
+                        </div>
+                        <label className="nk-label">Send to</label>
+                        <div style={{display:"flex",gap:5,marginBottom:8}}>
+                          {[["contacts","👥 Event contacts"],["upload","📄 Uploaded list"]].map(([src,label]) => {
+                            const on = activeExtra.source === src;
+                            return (
+                              <button key={src}
+                                onClick={()=>{ if (src === "contacts" && !on) setMessageList(activeExtra, { source:"contacts" }); }}
+                                disabled={src === "upload" && !on}
+                                title={src === "upload" && !on ? "Upload a file or use the VCard list below" : undefined}
+                                style={{
+                                  flex:1, padding:"5px 8px", borderRadius:6, fontSize:11, fontWeight:600,
+                                  cursor: on || src === "upload" ? "default" : "pointer",
+                                  background: on ? N.tealBg : N.navy700, color: on ? N.teal : N.textDim,
+                                  border:`1px solid ${on ? N.teal : N.border}`,
+                                }}>
+                                {label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {activeExtra.source === "upload" && (
+                          <div style={{fontSize:11,color:N.textMid,marginBottom:8}}>
+                            📄 {activeExtra.fileName || "List"} — {activeExtra.recipients.length} recipients
+                          </div>
+                        )}
+                        <div style={{display:"flex",gap:6}}>
+                          <label className="nk-btn nk-btn-ghost" style={{flex:1,fontSize:11,padding:"6px 8px",textAlign:"center",cursor:"pointer"}}>
+                            <input type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onMessageListUpload} />
+                            ⬆ {activeExtra.source === "upload" ? "Replace list" : "Upload list"}
+                          </label>
+                          <button className="nk-btn nk-btn-ghost" style={{flex:1,fontSize:11,padding:"6px 8px"}}
+                            disabled={!vcardContacts.length}
+                            title={vcardContacts.length ? `Use the ${vcardContacts.length} contacts loaded in the VCard tab` : "Upload a list in the VCard tab first"}
+                            onClick={()=>setMessageList(activeExtra, { source:"upload", rows: vcardContacts, columns: vcardColumns, fileName:"VCard tab list" })}>
+                            📇 Use VCard list
+                          </button>
+                        </div>
+                        <p style={{fontSize:10,color:N.textDim,marginTop:8,lineHeight:1.6}}>
+                          Excel/CSV with a Name and Phone column. Every other column (Table, Amount…) becomes a {"{placeholder}"} for this message.
+                        </p>
+                      </div>
+                    )}
+
                     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-                      <div className="nk-sec nk-sec-teal" style={{margin:0}}>SMS Message</div>
+                      <div className="nk-sec nk-sec-teal" style={{margin:0}}>{activeExtra ? activeExtra.title : "SMS Message"}</div>
                       {savedEventId && (
-                        <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: smsDraftSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
-                          {smsDraftSaved ? "✓ draft saved" : "draft auto-saves"}
-                        </span>
+                        activeExtra
+                          ? <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: extraMsgsSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
+                              {extraMsgsSaved ? "✓ saved" : "auto-saves"}
+                            </span>
+                          : <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: smsDraftSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
+                              {smsDraftSaved ? "✓ draft saved" : "draft auto-saves"}
+                            </span>
                       )}
                     </div>
                     <p style={{fontSize:11,color:N.textDim,marginBottom:8,lineHeight:1.6}}>
                       Separate from WhatsApp — sent as plain SMS.
                     </p>
-                    <textarea ref={smsTextareaRef} className="nk-input nk-textarea" value={smsMessage} onChange={e=>setSmsMessage(e.target.value)} rows={5} />
+                    <textarea ref={smsTextareaRef} className="nk-input nk-textarea" value={activeBody} onChange={e=>setActiveBody(e.target.value)} rows={5}
+                      placeholder={activeExtra ? "e.g. Habari {name}, kumbuka sherehe ni kesho…" : undefined} />
                     <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8,marginBottom:14}}>
-                      <button
-                        className="nk-btn nk-btn-teal"
-                        style={{fontSize:11,padding:"6px 14px"}}
-                        onClick={saveSmsMessage}
-                        disabled={smsMsgSaving || !savedEventId || smsMessage===smsPersistedMsg.current}>
-                        {smsMsgSaving?"⏳ Saving…":"💾 Save Template"}
-                      </button>
-                      {savedEventId && smsMessage!==smsPersistedMsg.current && (
+                      {!activeExtra && (
+                        <button
+                          className="nk-btn nk-btn-teal"
+                          style={{fontSize:11,padding:"6px 14px"}}
+                          onClick={saveSmsMessage}
+                          disabled={smsMsgSaving || !savedEventId || smsMessage===smsPersistedMsg.current}>
+                          {smsMsgSaving?"⏳ Saving…":"💾 Save Template"}
+                        </button>
+                      )}
+                      {!activeExtra && savedEventId && smsMessage!==smsPersistedMsg.current && (
                         <span style={{fontSize:11,color:N.amber}}>● Unsaved changes</span>
                       )}
                       {!savedEventId && (
-                        <span style={{fontSize:11,color:N.textDim}}>Save the event first to persist this template</span>
+                        <span style={{fontSize:11,color:N.textDim}}>Save the event first to persist {activeExtra ? "this message" : "this template"}</span>
                       )}
                     </div>
                     {/* Clickable column chips — insert the placeholder at the cursor */}
                     <div style={{marginBottom:14}}>
                       <div style={{fontSize:10,color:N.textDim,marginBottom:6}}>Click to insert variable:</div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                        {csvColumns.map(col => (
+                        {activeColumns.map(col => (
                           <button key={col}
                             onClick={() => {
                               const ta  = smsTextareaRef.current;
                               const ph  = `{${col}}`;
-                              if (!ta) { setSmsMessage(m => m + ph); return; }
+                              if (!ta) { setActiveBody(m => m + ph); return; }
                               const s   = ta.selectionStart;
                               const e2  = ta.selectionEnd;
-                              const nxt = smsMessage.slice(0,s) + ph + smsMessage.slice(e2);
-                              setSmsMessage(nxt);
+                              const nxt = activeBody.slice(0,s) + ph + activeBody.slice(e2);
+                              setActiveBody(nxt);
                               setTimeout(() => { ta.focus(); ta.setSelectionRange(s+ph.length, s+ph.length); }, 0);
                             }}
                             style={{
@@ -2759,10 +3012,10 @@ export default function App() {
                       </div>
                     </div>
                     {(()=>{
-                      const sample   = buildSmsMsg(records[0]||{});
+                      const sample   = buildSmsMsg(activeRecipients[0]||{}, activeBody);
                       const len      = sample.length;
                       const parts    = len === 0 ? 1 : len <= 160 ? 1 : Math.ceil(len / 153);
-                      const contacts = records.filter(r=>r.phone).length;
+                      const contacts = activeRecipients.filter(r=>r.phone).length;
                       const total    = parts * contacts;
                       return (
                         <div style={{background:N.cardBg,border:`1px solid ${N.border}`,borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:11}}>
@@ -2823,8 +3076,8 @@ export default function App() {
                         <div style={{color:N.textDim,fontSize:12,padding:"8px 0"}}>Click Refresh to load balance</div>
                       )}
                     </div>
-                    <button className="nk-btn nk-btn-teal nk-btn-full" onClick={sendAllSms} disabled={smsSending}>
-                      {smsSending?"⏳ Sending…":`💬 Send SMS to All (${records.filter(r=>r.phone).length})`}
+                    <button className="nk-btn nk-btn-teal nk-btn-full" onClick={()=>sendAllSms(activeMsgId)} disabled={smsSending}>
+                      {smsSending?"⏳ Sending…":`💬 Send ${activeExtra ? `"${activeExtra.title}"` : "SMS"} to All (${activeRecipients.filter(r=>r.phone).length})`}
                     </button>
                     <button className="nk-btn nk-btn-ghost nk-btn-full" onClick={downloadSmsCsv}>
                       ⬇ Download SMS CSV
@@ -2888,7 +3141,7 @@ export default function App() {
                                 wordBreak:"break-word",
                                 whiteSpace:"pre-wrap",
                               }}>
-                                {buildSmsMsg(records[0]||{name:"Mwanakadi",cardType:"VIP"})}
+                                {buildSmsMsg(activeRecipients[0]||{name:"Mwanakadi",cardType:"VIP"}, activeBody)}
                               </div>
                             </div>
                             <div style={{textAlign:"left",paddingLeft:28,fontSize:8,color:"#8e8e93"}}>Delivered</div>
@@ -2907,7 +3160,7 @@ export default function App() {
                   </div>
 
                   <div style={{flex:1}}>
-                    <div className="nk-sec nk-sec-teal">SMS Preview per Recipient</div>
+                    <div className="nk-sec nk-sec-teal">SMS Preview per Recipient{activeExtra ? ` — ${activeExtra.title}` : ""}</div>
                     {!smsSending && smsReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadSmsReport}
                         style={{background:N.tealBg,color:N.teal,border:`1px solid ${N.teal}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
@@ -2918,7 +3171,7 @@ export default function App() {
                       <table className="nk-table">
                         <thead><tr>{["#","Name","Phone","SMS Preview","Status",""].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
-                          {records.map((rec,i)=>(
+                          {activeRecipients.map((rec,i)=>(
                             <tr key={i}>
                               <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i+1}</td>
                               <td style={{fontWeight:600}}>{rec.name}</td>
@@ -2926,14 +3179,14 @@ export default function App() {
                                 {rec.phone?`+${normalisePhone(rec.phone)}`:<span style={{color:N.textDim}}>—</span>}
                               </td>
                               <td style={{fontSize:11,color:N.textMid,maxWidth:260}}>
-                                <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{buildSmsMsg(rec)}</div>
+                                <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{buildSmsMsg(rec, activeBody)}</div>
                               </td>
                               <td>
                                 <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
                                   {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
                                 </span>
                               </td>
-                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={N.teal+"44"} onClick={()=>sendSmsToOne(i)}>💬 Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
+                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={N.teal+"44"} onClick={()=>sendSmsToOne(i, activeMsgId)}>💬 Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
                             </tr>
                           ))}
                         </tbody>

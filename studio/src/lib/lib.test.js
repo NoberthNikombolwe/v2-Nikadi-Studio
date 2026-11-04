@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { normalisePhone, isValidPhone } from "./phone.js";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./recipients.js";
+import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./messages.js";
 
 test("normalisePhone handles every local/international format", () => {
   for (const raw of ["0712345678", "+255712345678", "255712345678", "00255712345678", "712345678", 712345678, " 0712 345 678 "]) {
@@ -86,4 +87,43 @@ test("describeSkipped is empty when nothing was skipped", () => {
   assert.equal(describeSkipped({ noPhone: 0, invalid: 0, alreadySent: 0, duplicate: 0, ineligible: 0 }), "");
   assert.equal(describeSkipped({ noPhone: 2, invalid: 0, alreadySent: 1, duplicate: 0, ineligible: 0 }),
     "Skipping: 2 no phone, 1 already sent.");
+});
+
+test("fillTemplate fills standard and extra columns, leaves unknown placeholders", () => {
+  const rec = { name: "Juma", cardType: "VIP", phone: "0712345678", Table: 4 };
+  assert.equal(fillTemplate("{name} {name} {cardType} {phone} T{Table} {Seat}", rec),
+    "Juma Juma VIP +255712345678 T4 {Seat}");
+  assert.equal(fillTemplate("Hi {name}", {}), "Hi ");
+});
+
+test("normaliseSheetRows maps header variants and keeps extra columns in order", () => {
+  const { rows, columns } = normaliseSheetRows([
+    { " Name ": "Anna", "Phone Number": 712345678, Card_Type: "VIP", Table: 3 },
+    { Name: "Ben", Mobile: "0755000001", Seat: "B2" },
+  ]);
+  assert.deepEqual(rows, [
+    { name: "Anna", phone: "712345678", cardType: "VIP", Table: "3" },
+    { name: "Ben", phone: "0755000001", Seat: "B2" },
+  ]);
+  assert.deepEqual(columns, ["name", "cardType", "Table", "Seat"]);
+});
+
+test("applyMessageStatuses updates uploaded lists by index and contact lists by key", () => {
+  const upload = { source: "upload", recipients: [{ name: "A", phone: "1" }, { name: "B", phone: "2" }] };
+  const u = applyMessageStatuses(upload, upload.recipients, new Map([[1, "sent"]]));
+  assert.equal(u.recipients[0].smsStatus, undefined);
+  assert.equal(u.recipients[1].smsStatus, "sent");
+  assert.equal(upload.recipients[1].smsStatus, undefined, "does not mutate the input");
+
+  const recs = [{ name: "Anna", phone: "0712345678" }, { name: "Anna M", phone: "+255712345678" }];
+  const c = applyMessageStatuses({ source: "contacts", statuses: {} }, recs, new Map([[1, "delivered"]]));
+  assert.deepEqual(c.statuses, { [recipientKey(recs[1])]: "delivered" });
+  assert.notEqual(recipientKey(recs[0]), recipientKey(recs[1]), "same number, different contact");
+  assert.equal(recipientKey({ name: " Anna ", phone: "712345678" }), recipientKey(recs[0]));
+});
+
+test("sanitiseMessages drops junk and fills defaults", () => {
+  assert.deepEqual(sanitiseMessages(null), []);
+  const [m] = sanitiseMessages([null, { title: "no id" }, { id: 7, source: "weird", statuses: [] }]);
+  assert.deepEqual(m, { id: "7", title: "Message 2", body: "", source: "contacts", fileName: null, columns: [], recipients: [], statuses: {} });
 });

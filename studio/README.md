@@ -345,6 +345,8 @@ In development, the token comes from `VITE_SMS_BEARER_TOKEN` / `VITE_WA_BEARER_T
 | Feature | Description |
 |---|---|
 | **Message editor** | Compose the SMS with `{name}` and `{cardType}` template variables |
+| **Multiple messages** | **＋ Add message** creates extra messages per event (e.g. reminder, thank-you), each with its own title, text and send status. They auto-save to `events.sms_messages` |
+| **Recipients per message** | An extra message goes to the event contacts or to its own uploaded Excel/CSV list (or the list loaded in the VCard tab). Every column of that list becomes a `{Column}` placeholder for that message |
 | **iPhone mockup** | Live preview of how the SMS looks on iPhone — scrollable for long messages |
 | **Cost calculator** | Shows characters, SMS parts per message, contacts with phone, total credits needed, and estimated cost in TZS (credits × 16) |
 | **Remaining SMS panel** | Fetches your account balance and displays SMS remaining (`balance ÷ 16`) with channel info |
@@ -437,6 +439,9 @@ The canvas is exported as a PNG image using `canvas.toDataURL("image/png")`.
 | `end_datetime` | TIMESTAMPTZ | Event end |
 | `cover_image_url` | TEXT | Card background image URL |
 | `elements_layout` | JSONB | Card element positions and styles |
+| `sms_message` | TEXT | Main SMS message template |
+| `sms_draft` | TEXT | Autosaved working copy of the main SMS message |
+| `sms_messages` | JSONB | Extra SMS messages: title, text, recipient source (contacts or uploaded list) and per-message statuses |
 
 ### `event_cards`
 

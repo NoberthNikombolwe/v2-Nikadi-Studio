@@ -37,7 +37,7 @@ To add a template: add its name to the `["Mwaliko","Mchango","ImageTemp"]` butto
 
 ## 4. Send an SMS
 
-`sendSmsToOne(idx)` (single; in-flight guard + confirm on re-send) and `sendAllSms` (bulk via `selectRecipients`, confirm, then results mapped back by normalised phone and saved). Message text comes from `smsMessage` with `{name}` / `{cardType}` filled by `buildSmsMsg` (every occurrence is replaced). The template is saved per event to `events.sms_message` (manual save button). Endpoints are under `${SMS_API}/…` — `/text/single`, `/text/multi`, plus `${SMS_BASE}/api/v2/balance`; the bearer comes from `getApiToken("sms")`.
+`sendSmsToOne(idx, msgId = MAIN_MSG)` (single; in-flight guard + confirm on re-send) and `sendAllSms(msgId = MAIN_MSG)` (bulk via `pickBulkRecipients({ …, recs })`, confirm, then results mapped back by normalised phone and saved). `msgId` picks the main message or an extra one; `idx` indexes that message's `messageRecipients(msg)` list, and results go through `setMessageStatuses`. Extra messages (reminder, thank-you…) live in `extraMessages` / `events.sms_messages` and choose their recipients: the event contacts or an uploaded list (`onMessageListUpload`, or the VCard tab list via `setMessageList`). Message text comes from `smsMessage` with `{name}` / `{cardType}` filled by `buildSmsMsg` (every occurrence is replaced). The template is saved per event to `events.sms_message` (manual save button). Endpoints are under `${SMS_API}/…` — `/text/single`, `/text/multi`, plus `${SMS_BASE}/api/v2/balance`; the bearer comes from `getApiToken("sms")`.
 
 ## 5. Add or change a tab
 
