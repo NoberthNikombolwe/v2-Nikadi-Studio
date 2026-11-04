@@ -114,7 +114,8 @@ export default function LoginPage() {
     setError(null);
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: window.location.origin },
+      // Come back to the app's own URL — includes the sub-folder on GitHub Pages (BASE_URL)
+      options: { redirectTo: window.location.origin + import.meta.env.BASE_URL },
     });
     if (err) {
       setError(err.message);

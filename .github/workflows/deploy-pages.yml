@@ -1,0 +1,83 @@
+# Builds studio/ and publishes it to GitHub Pages on every push to main (or by hand
+# from the Actions tab). One-time setup is in studio/README.md ("Deploy to GitHub Pages").
+#
+# Only PUBLIC values go into the build: they come from repository *variables*
+# (Settings → Secrets and variables → Actions → Variables). Never add the SMS/WhatsApp
+# provider tokens here — in production those live in Supabase secrets, used by the
+# send-sms / send-wa Edge Functions.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-progress deploy finish
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: studio/package-lock.json
+
+      - name: Check repository variables are set
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_ANON_KEY" ]; then
+            echo "::error::Set the VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY repository variables (Settings → Secrets and variables → Actions → Variables)."
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+      - name: Build
+        run: |
+          # Full address for the link-preview tags (og:image needs an absolute URL).
+          # Pages hosts are lowercase: https://<owner>.github.io/<repo>/
+          owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          export VITE_SITE_URL="${SITE_URL_OVERRIDE:-https://$owner.github.io/$REPO_NAME/}"
+          echo "Site URL: $VITE_SITE_URL"
+          npm run build
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          # Custom domain? Set the SITE_URL variable (e.g. https://studio.nikadi.co.tz/) and PAGES_BASE_PATH to "/"
+          SITE_URL_OVERRIDE: ${{ vars.SITE_URL }}
+          VITE_BASE_PATH: ${{ vars.PAGES_BASE_PATH || format('/{0}/', github.event.repository.name) }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_SMS_SENDER_ID: ${{ vars.VITE_SMS_SENDER_ID || 'NIKADI' }}
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: studio/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
