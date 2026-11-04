@@ -89,8 +89,9 @@ Source: [send-sms](supabase/functions/send-sms/index.ts) and [send-wa](supabase/
 
 1. Pick recipients with `await pickBulkRecipients({ title, emptyMsg, options: { isDone, isEligible } })` (a thin UI wrapper over `selectRecipients`) — never `records.filter(r => r.phone)`. It shows the in-app modal with the recipient count, the skipped summary and, if contacts share a number, the "Send without duplicates" / "Send duplicates too" choice.
 2. Return early when it resolves to `null` (nothing to send, or the user cancelled). Never use `window.confirm` — for a one-off question use `askDialog({ title, body, actions })`, which resolves with the clicked action's `value` or `null`.
-3. Guard re-entry (`if (busy) return`), pace requests, and don't log phone numbers.
-4. Persist with `saveCards(eventId, <latest records>)` — use `recordsRef.current` or a locally computed list, not the closure's `records`.
+3. Guard re-entry (`if (busy) return`), pace requests, and don't `console.log` phone numbers.
+4. Record every recipient's result with `logHistory({ channel, action:"send", status, name, phone, title, detail })`, plus one `action:"bulk"` summary row, so it shows in the History tab. Add a new channel/action/status to the maps in `src/lib/history.js` first.
+5. Persist with `saveCards(eventId, <latest records>)` — use `recordsRef.current` or a locally computed list, not the closure's `records`.
 
 ## 12. Pre-commit checklist
 

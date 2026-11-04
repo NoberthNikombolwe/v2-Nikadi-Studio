@@ -4,6 +4,7 @@ import { normalisePhone, isValidPhone } from "./phone.js";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./recipients.js";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./messages.js";
 import { N, alpha, nextThemePref } from "./theme.js";
+import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory } from "./history.js";
 
 test("normalisePhone handles every local/international format", () => {
   for (const raw of ["0712345678", "+255712345678", "255712345678", "00255712345678", "712345678", 712345678, " 0712 345 678 "]) {
@@ -139,4 +140,54 @@ test("theme toggle cycles system -> light -> dark -> system", () => {
   assert.equal(nextThemePref("system"), "light");
   assert.equal(nextThemePref("light"), "dark");
   assert.equal(nextThemePref("dark"), "system");
+});
+
+test("buildLogRow normalises the phone, clips text and rejects unknown values", () => {
+  const row = buildLogRow("ev1", { channel: "sms", action: "send", status: "sent", name: "Juma", phone: "0712345678", title: "Reminder", detail: "x".repeat(600) });
+  assert.equal(row.event_id, "ev1");
+  assert.equal(row.recipient_phone, "255712345678");
+  assert.equal(row.detail.length, 500);
+  assert.equal(row.message_title, "Reminder");
+  assert.equal(buildLogRow("ev1", { channel: "event", action: "update" }).recipient_phone, null);
+  assert.throws(() => buildLogRow("ev1", { channel: "fax", action: "send" }));
+  assert.throws(() => buildLogRow("ev1", { channel: "sms", action: "send", status: "maybe" }));
+  assert.throws(() => buildLogRow(null, { channel: "sms", action: "send" }));
+});
+
+const historyRows = [
+  { channel: "whatsapp", action: "send",   status: "sent",     recipient_name: "Anna", recipient_phone: "255712345678", created_at: "2026-11-04T10:00:00Z" },
+  { channel: "whatsapp", action: "status", status: "invalid",  recipient_name: "Anna", recipient_phone: "255712345678", created_at: "2026-11-04T10:00:09Z" },
+  { channel: "whatsapp", action: "send",   status: "sent",     recipient_name: "Ben",  recipient_phone: "255755000001", created_at: "2026-11-04T10:01:00Z" },
+  { channel: "sms",      action: "send",   status: "delivered", recipient_name: "Ben", recipient_phone: "255755000001", message_title: "Reminder", created_at: "2026-11-04T11:00:00Z" },
+  { channel: "sms",      action: "send",   status: "failed",   recipient_name: "Cleo", recipient_phone: "255755000002", created_at: "2026-11-04T11:00:01Z" },
+  { channel: "sms",      action: "bulk",   status: "ok",       detail: "1/2 sent", user_email: "ops@example.com", created_at: "2026-11-04T11:00:02Z" },
+  { channel: "card",     action: "upload", status: "ok",       recipient_name: "Ben", created_at: "2026-11-04T09:00:00Z" },
+];
+
+test("summariseHistory counts sends, lets late reports override, ignores bulk rows", () => {
+  assert.deepEqual(summariseHistory(historyRows),
+    { cardsSent: 1, waProblems: 1, smsSent: 1, smsFailed: 1, uploads: 1, lastAt: "2026-11-04T11:00:02Z" });
+  assert.deepEqual(summariseHistory([]), { cardsSent: 0, waProblems: 0, smsSent: 0, smsFailed: 0, uploads: 0, lastAt: null });
+});
+
+test("filterHistory filters by channel, status and text or local-format phone", () => {
+  assert.equal(filterHistory(historyRows, { channel: "sms" }).length, 3);
+  assert.equal(filterHistory(historyRows, { status: "sent" }).length, 2);
+  assert.equal(filterHistory(historyRows, { q: "0755 000 001" }).length, 2);
+  assert.equal(filterHistory(historyRows, { q: "reminder" }).length, 1);
+  assert.equal(filterHistory(historyRows, { q: "ops@" }).length, 1);
+});
+
+test("historyExportRows gives readable labels", () => {
+  const [row] = historyExportRows([historyRows[1]]);
+  assert.equal(row.Channel, "WhatsApp");
+  assert.equal(row.Action, "Delivery report");
+  assert.equal(row.Status, "Invalid");
+  assert.equal(row.Phone, "+255712345678");
+});
+
+test("mergeHistory de-duplicates by id and sorts newest first", () => {
+  const a = [{ id: 1, created_at: "2026-11-04T10:00:00Z" }, { id: 2, created_at: "2026-11-04T09:00:00Z" }];
+  const b = [{ id: 3, created_at: "2026-11-04T11:00:00Z" }, { id: 1, created_at: "2026-11-04T10:00:00Z" }];
+  assert.deepEqual(mergeHistory(a, b).map(r => r.id), [3, 1, 2]);
 });

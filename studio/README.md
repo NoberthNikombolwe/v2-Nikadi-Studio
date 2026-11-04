@@ -37,6 +37,7 @@ Nikadi Studio lets you:
 - Send personalised SMS messages via the messaging-service.co.tz API
 - Track WhatsApp and SMS delivery statuses per contact
 - Save and reuse card templates
+- Event history — a permanent log of every card and SMS sent (with result, time and who sent it), card uploads and event changes, filterable and exportable to Excel
 - Light and dark mode — follows your browser/OS setting by default, or pick one with the header toggle
 - Store all events and contacts in a Supabase database
 
@@ -443,6 +444,23 @@ The canvas is exported as a PNG image using `canvas.toDataURL("image/png")`.
 | `sms_message` | TEXT | Main SMS message template |
 | `sms_draft` | TEXT | Autosaved working copy of the main SMS message |
 | `sms_messages` | JSONB | Extra SMS messages: title, text, recipient source (contacts or uploaded list) and per-message statuses |
+
+### `event_logs`
+
+Append-only history (signed-in users can add and read rows, never edit or delete them).
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `event_id` | UUID | Foreign key → events (deleted with the event) |
+| `created_at` | TIMESTAMPTZ | When it happened |
+| `user_email` | TEXT | Who did it (set by the database from the login) |
+| `channel` | TEXT | `whatsapp`, `sms`, `card` or `event` |
+| `action` | TEXT | `send`, `status` (late delivery report), `upload`, `bulk`, `create`, `update`, `contacts` |
+| `status` | TEXT | `sent`, `delivered`, `invalid`, `not_sent`, `failed` or `ok` |
+| `recipient_name` / `recipient_phone` | TEXT | Who it was sent to |
+| `message_title` | TEXT | SMS message title or WhatsApp template |
+| `detail` | TEXT | Error or summary text |
 
 ### `event_cards`
 

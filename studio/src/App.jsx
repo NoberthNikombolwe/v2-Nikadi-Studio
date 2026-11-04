@@ -5,6 +5,7 @@ import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipie
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
 import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
+import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory, HISTORY_CHANNELS, HISTORY_ACTIONS, HISTORY_STATUSES } from "./lib/history";
 
 /* ══════════════════════════════════════════════════════════════════════════
    NIKADI STUDIO — event card designer & distribution tool
@@ -928,6 +929,16 @@ export default function App() {
   const extraMsgsTimer    = useRef(null);
   const extraMsgsWarned   = useRef(false);  // warn about a failed save once, not on every keystroke
 
+  /* ── Event history (event_logs) ── */
+  const [historyRows,    setHistoryRows]    = useState([]);   // loaded entries for historyEventRef's event, newest first
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyFilter,  setHistoryFilter]  = useState({ channel:"all", status:"all", q:"" });
+  const historyEventRef = useRef(null);   // event whose history is in historyRows
+  const historyQueue    = useRef([]);     // rows waiting to be written
+  const historyTimer    = useRef(null);
+  const historyWarned   = useRef(false);  // warn about a failed write once, not per send
+
   /* ── VCard ── */
   const [vcardContacts, setVcardContacts] = useState([]);
   const [vcardColumns,  setVcardColumns]  = useState([]);   // every column of the VCard upload, for reuse as an SMS list
@@ -1117,6 +1128,80 @@ export default function App() {
     extraMsgsBase.current = JSON.stringify(msgs);
     setSavedEvents(es => es.map(e => e.id === eventId ? { ...e, sms_messages: msgs } : e));
     return true;
+  };
+
+  /* ── Event history ── */
+  // Writes every queued history row in one insert. Entries for the event whose History
+  // tab is loaded are added to it straight away. Never throws: history must not break a send.
+  const flushHistory = async () => {
+    clearTimeout(historyTimer.current);
+    const rows = historyQueue.current.splice(0);
+    if (!rows.length || !supabase) return;
+    const { data, error } = await supabase.from("event_logs").insert(rows).select();
+    if (error) {
+      if (!historyWarned.current) {
+        historyWarned.current = true;
+        showToast(`Event history not saved: ${error.message} (run supabase-schema.sql)`, "warn");
+      }
+      return;
+    }
+    historyWarned.current = false;
+    const mine = (data || []).filter(r => r.event_id === historyEventRef.current);
+    if (mine.length) setHistoryRows(hs => mergeHistory(hs, mine));
+  };
+
+  // Records one history entry for an event (default: the open one) — see buildLogRow for
+  // the fields. Entries are batched (written ~1 s after the last one, or every 50) so a bulk
+  // send doesn't make one request per contact. No-op when no event is saved yet.
+  const logHistory = (entry, eventId = savedEventId) => {
+    if (!supabase || !eventId) return;
+    try { historyQueue.current.push(buildLogRow(eventId, entry)); }
+    catch (e) { console.warn(e.message); return; }
+    clearTimeout(historyTimer.current);
+    if (historyQueue.current.length >= 50) flushHistory();
+    else historyTimer.current = setTimeout(flushHistory, 1000);
+  };
+
+  // Best effort: write what's still queued when the tab is closed or hidden
+  useEffect(() => {
+    const flush = () => { if (document.visibilityState === "hidden") flushHistory(); };
+    document.addEventListener("visibilitychange", flush);
+    return () => document.removeEventListener("visibilitychange", flush);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Loads the open event's history, newest first, HISTORY_PAGE rows at a time
+  // (`more` appends the next page). Anything still queued is written first so it shows up.
+  const HISTORY_PAGE = 300;
+  const loadHistory = async (more = false) => {
+    const evId = savedEventId;
+    if (!supabase || !evId) { historyEventRef.current = null; setHistoryRows([]); setHistoryHasMore(false); return; }
+    if (!more && historyEventRef.current !== evId) setHistoryRows([]);
+    historyEventRef.current = evId;
+    setHistoryLoading(true);
+    await flushHistory();
+    const from = more ? historyRows.length : 0;
+    const { data, error } = await supabase.from("event_logs").select("*").eq("event_id", evId)
+      .order("created_at", { ascending:false }).range(from, from + HISTORY_PAGE - 1);
+    if (historyEventRef.current !== evId) return;   // another event was opened meanwhile
+    setHistoryLoading(false);
+    if (error) { showToast("Could not load history: " + error.message, "warn"); return; }
+    setHistoryRows(hs => mergeHistory(more ? hs : hs.filter(r => r.event_id === evId), data || []));
+    setHistoryHasMore((data || []).length === HISTORY_PAGE);
+  };
+  // (Re)load when the History tab is opened or another event is opened while it's showing
+  useEffect(() => { if (tab === "history") loadHistory(); }, [tab, savedEventId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Exports the filtered history as .xlsx, named after the event
+  const downloadHistory = async () => {
+    const rows = filterHistory(historyRows, historyFilter);
+    if (!rows.length) { showToast("No history to export", "warn"); return; }
+    const XLSX = await loadXlsx();
+    const ws = XLSX.utils.json_to_sheet(historyExportRows(rows));
+    ws["!cols"] = [{ wch:20 }, { wch:10 }, { wch:16 }, { wch:10 }, { wch:24 }, { wch:16 }, { wch:18 }, { wch:26 }, { wch:50 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "History");
+    const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
+    XLSX.writeFile(wb, `${evName}_History_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
   /* Auto-save the extra SMS messages (debounced 1.5 s), only when they changed since the last load/save */
@@ -1358,6 +1443,7 @@ export default function App() {
         const { error } = await supabase.from("events").update(payload).eq("id", currentId);
         if (error) throw error;
         if (isLoadedEvent) { smsPersistedMsg.current = smsMessage; smsDraftBase.current = smsMessage; }
+        logHistory({ channel:"event", action:"update", detail:`Event details saved: ${formData.username || ""}` }, currentId);
         setEventData(formData);
         showToast("Event updated", "success");
         await loadSavedEvents();
@@ -1373,6 +1459,7 @@ export default function App() {
         }));
         resetExtraMessages(carried);
         if (carried.length) persistExtraMessages(data.id, carried);
+        logHistory({ channel:"event", action:"create", detail:`Event created: ${formData.username || ""}` }, data.id);
         setEventData(formData);
         setSavedEventId(data.id);
         showToast("Event created", "success");
@@ -1418,6 +1505,10 @@ export default function App() {
     if (old?.length) {
       const { error: delErr } = await supabase.from("event_cards").delete().in("id", old.map(o => o.id));
       if (delErr) { showToast("Cards saved, but old rows could not be removed: " + delErr.message, "warn"); return; }
+    }
+    // Status-only saves (after every send) keep the same count — only log real list changes
+    if ((old?.length || 0) !== toSave.length) {
+      logHistory({ channel:"event", action:"contacts", detail:`Contact list saved: ${toSave.length} contacts (was ${old?.length || 0})` }, eventId);
     }
     showToast(`${toSave.length} cards saved`, "success");
   };
@@ -1819,10 +1910,12 @@ export default function App() {
       if (upErr) throw new Error(upErr.message);
       const { data: { publicUrl } } = supabase.storage.from("wa-cards").getPublicUrl(storageKey);
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, cardUrl:publicUrl, uploadStatus:"uploaded"} : r));
+      logHistory({ channel:"card", action:"upload", name:rec.name, phone:rec.phone });
       return publicUrl;
     } catch (err) {
       // Any failure (render, QR/template load, compression, Storage) — never leave the row on "uploading"
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"failed"} : r));
+      logHistory({ channel:"card", action:"upload", status:"failed", name:rec.name, phone:rec.phone, detail:err.message });
       throw err;
     }
   };
@@ -1876,7 +1969,7 @@ export default function App() {
   // delays) to catch late rejections — e.g. the number turns out not to be on
   // WhatsApp — after it was already optimistically marked Sent. groupId/id are the
   // provider's status codes; see the branches below for what each combination means.
-  const pollWaStatus = async (messageId, idx, recName, dbId) => {
+  const pollWaStatus = async (messageId, idx, recName, dbId, phone) => {
     const delays = [4000, 6000, 8000, 10000, 12000];
     for (const delay of delays) {
       await new Promise(r => setTimeout(r, delay));
@@ -1902,6 +1995,7 @@ export default function App() {
           setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
           setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"invalid"} : x));
           autoSaveCard(dbId, WA.invalid);
+          logHistory({ channel:"whatsapp", action:"status", status:"invalid", name:recName, phone, title:waTemplate, detail:"Late delivery report: number not on WhatsApp" });
           showToast(`${recName} — number not on WhatsApp`, "warn");
           return;
         }
@@ -1909,6 +2003,7 @@ export default function App() {
           setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
           setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"not sent"} : x));
           autoSaveCard(dbId, WA.notSent);
+          logHistory({ channel:"whatsapp", action:"status", status:"not_sent", name:recName, phone, title:waTemplate, detail:`Late delivery report: ${result.status?.name || "not sent"}` });
           return;
         }
       } catch { /* network error, retry */ }
@@ -1957,12 +2052,14 @@ export default function App() {
         setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sent} : r));
         setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"sent"} : x));
         autoSaveCard(rec.dbId, WA.sent);
+        logHistory({ channel:"whatsapp", action:"send", status:"sent", name:rec.name, phone:rec.phone, title:waTemplate });
         showToast(`WA sent to ${rec.name}`, "success");
       };
       const markInvalid = (reason) => {
         setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
         setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"invalid"} : x));
         autoSaveCard(rec.dbId, WA.invalid);
+        logHistory({ channel:"whatsapp", action:"send", status:"invalid", name:rec.name, phone:rec.phone, title:waTemplate, detail:reason });
         showToast(`${rec.name} — ${reason}`, "warn");
       };
 
@@ -1993,7 +2090,7 @@ export default function App() {
         // PENDING — accepted by API; mark Sent now, poll in background for rejection
         markSent();
         const messageId = msg?.messageId;
-        if (messageId) pollWaStatus(messageId, idx, rec.name, rec.dbId);
+        if (messageId) pollWaStatus(messageId, idx, rec.name, rec.dbId, rec.phone);
       } else if (grp === 20 && [73, 109, 77].includes(id)) {
         // DELIVERED_TO_HANDSET / SENT_TO_OPERATOR / DELIVERED_TO_OPERATOR
         markSent();
@@ -2011,6 +2108,7 @@ export default function App() {
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
       setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"not sent"} : x));
       autoSaveCard(rec.dbId, WA.notSent);
+      logHistory({ channel:"whatsapp", action:"send", status:"not_sent", name:rec.name, phone:rec.phone, title:waTemplate, detail:err.message });
       showToast(`WA failed for ${rec.name}: ${err.message}`, "warn");
     }
   };
@@ -2036,6 +2134,9 @@ export default function App() {
     }
     setBulkSending(false);
     showToast(`Done — ${targets.length} WA messages dispatched`, "success");
+    const waNow = (s) => targets.filter(({index}) => recordsRef.current[index]?.waStatus === s).length;
+    logHistory({ channel:"whatsapp", action:"bulk", title:waTemplate,
+      detail:`${targets.length} cards: ${waNow(WA.sent)} sent, ${waNow(WA.invalid)} invalid, ${waNow(WA.notSent)} not sent` });
     // recordsRef is current here: the 1s pacing delay above lets React flush the status updates
     if (savedEventId) await saveCards(savedEventId, recordsRef.current);
   };
@@ -2178,6 +2279,7 @@ export default function App() {
         const status = grp === 20 ? SMS.delivered : SMS.sent;
         const logStatus = grp === 20 ? "delivered" : "sent";
         setMessageStatuses(msgId, recs, new Map([[idx, status]]));
+        logHistory({ channel:"sms", action:"send", status:logStatus, name:rec.name, phone:rec.phone, title: msg ? msg.title : "Main message" });
         setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: logStatus } : x));
         if (!msg) autoSaveCard(rec.dbId, undefined, status);
         showToast(`SMS ${logStatus} to ${rec.name}`, "success");
@@ -2187,6 +2289,7 @@ export default function App() {
     } catch (err) {
       setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "failed" } : x));
       setMessageStatuses(msgId, recs, new Map([[idx, SMS.failed]]));
+      logHistory({ channel:"sms", action:"send", status:"failed", name:rec.name, phone:rec.phone, title: msg ? msg.title : "Main message", detail:err.message });
       if (!msg) autoSaveCard(rec.dbId, undefined, SMS.failed);
       showToast(`SMS failed for ${rec.name}: ${err.message}`, "warn");
     } finally {
@@ -2214,6 +2317,7 @@ export default function App() {
     if (!targets) return;
     setSmsSending(true);
     setSmsLog(targets.map(({rec}) => ({ name: rec.name, status: "sending" })));
+    const msgTitle = msg ? msg.title : "Main message";
     // How this run changes `records`; applied to state and to the copy that gets saved
     let applyResults = (rs) => rs;
     try {
@@ -2256,9 +2360,17 @@ export default function App() {
         status: groupIds[n] === 20 ? "delivered" : groupIds[n] === 18 ? "sent" : "failed",
       })));
       const sentCount = respMsgs.filter(m => m.status?.groupId === 18 || m.status?.groupId === 20).length;
+      targets.forEach(({rec}, n) => logHistory({
+        channel:"sms", action:"send", name:rec.name, phone:rec.phone, title:msgTitle,
+        status: groupIds[n] === 20 ? "delivered" : groupIds[n] === 18 ? "sent" : "failed",
+        detail: groupIds[n] === undefined ? "No result from the SMS provider" : undefined,
+      }));
+      logHistory({ channel:"sms", action:"bulk", title:msgTitle, detail:`${sentCount}/${targets.length} SMS sent` });
       showToast(`Done — ${sentCount}/${targets.length} SMS sent`, "success");
     } catch (err) {
       setSmsLog(targets.map(({rec}) => ({ name: rec.name, status: "failed" })));
+      targets.forEach(({rec}) => logHistory({ channel:"sms", action:"send", status:"failed", name:rec.name, phone:rec.phone, title:msgTitle, detail:err.message }));
+      logHistory({ channel:"sms", action:"bulk", status:"failed", title:msgTitle, detail:`Bulk SMS to ${targets.length} failed: ${err.message}` });
       showToast(`Bulk SMS failed: ${err.message}`, "warn");
     }
     setSmsSending(false);
@@ -2374,7 +2486,7 @@ export default function App() {
             <div className="nk-confirm">
               <div className="nk-confirm-title">Delete Event?</div>
               <div className="nk-confirm-body">
-                This will permanently delete <strong style={{color:N.text}}>"{deleteTarget.username}"</strong> and all its cards from the database. This cannot be undone.
+                This will permanently delete <strong style={{color:N.text}}>"{deleteTarget.username}"</strong> and all its cards and history from the database. This cannot be undone.
               </div>
               <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
                 <button className="nk-btn nk-btn-ghost" onClick={()=>setDeleteTarget(null)}>Cancel</button>
@@ -2443,6 +2555,7 @@ export default function App() {
           <button className={`nk-tab${tab==="whatsapp"?" active":""}`}  onClick={()=>setTab("whatsapp")}>📲 WhatsApp</button>
           <button className={`nk-tab${tab==="batch"?" active":""}`}     onClick={()=>setTab("batch")}>📊 Batch & Send</button>
           <button className={`nk-tab${tab==="reports"?" active":""}`}   onClick={()=>setTab("reports")}>📋 Reports</button>
+          <button className={`nk-tab${tab==="history"?" active":""}`}   onClick={()=>setTab("history")}>🕘 History</button>
         </nav>
 
         {/* Info banners */}
@@ -2758,6 +2871,11 @@ export default function App() {
                                   onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "reports"); }}
                                   title="View this event's cards and download the send report">
                                   📋 Report
+                                </Sb>
+                                <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")}
+                                  onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "history"); }}
+                                  title="Every card and SMS sent for this event, with results">
+                                  🕘 History
                                 </Sb>
                                 <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setModalEvent({...ev, start_datetime: ev.start_datetime?ev.start_datetime.slice(0,16):"", end_datetime: ev.end_datetime?ev.end_datetime.slice(0,16):""}); }}
@@ -3388,6 +3506,143 @@ export default function App() {
                 </div>
               </div>
             )}
+
+            {/* ─── HISTORY ─── */}
+            {tab === "history" && (()=>{
+              const shown    = filterHistory(historyRows, historyFilter);
+              const sum      = summariseHistory(historyRows);
+              const tone     = { good:N.green, info:N.sky, warn:N.amber, bad:N.red };
+              const toneBg   = { good:N.greenBg, info:N.navy700, warn:N.amberBg, bad:N.redBg };
+              const fmt      = (t) => t ? new Date(t).toLocaleString("en-GB", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit", second:"2-digit" }) : "";
+              const setF     = (patch) => setHistoryFilter(f => ({ ...f, ...patch }));
+              const filtered = historyFilter.channel !== "all" || historyFilter.status !== "all" || !!historyFilter.q;
+              return (
+              <div className="nk-page" style={{padding:"0 0 40px"}}>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20,flexWrap:"wrap",gap:12}}>
+                  <div>
+                    <div style={{fontSize:18,fontWeight:700,color:N.text}}>{eventData.username||"Event"} — History</div>
+                    <div style={{fontSize:12,color:N.textDim,marginTop:2}}>
+                      {savedEventId
+                        ? <>Every card and SMS sent for this event, with results{sum.lastAt ? <> · last activity {fmt(sum.lastAt)}</> : null}</>
+                        : "Open or save an event to see its history"}
+                    </div>
+                  </div>
+                  {savedEventId && (
+                    <div style={{display:"flex",gap:8}}>
+                      <button className="nk-btn nk-btn-ghost" onClick={()=>loadHistory()} disabled={historyLoading}>
+                        {historyLoading ? "⏳" : "↻"} Refresh
+                      </button>
+                      <button className="nk-btn nk-btn-success" onClick={downloadHistory} disabled={!shown.length}>
+                        ⬇ Export (.xlsx)
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {!savedEventId ? (
+                  <div style={{textAlign:"center",padding:60,color:N.textDim}}>
+                    <div style={{fontSize:48,marginBottom:12}}>🕘</div>
+                    <p>No event open. Pick one in the Events tab.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="nk-stats" style={{marginBottom:16}}>
+                      {[
+                        ["Cards sent (WA)",  sum.cardsSent,  N.green],
+                        ["WA problems",      sum.waProblems, N.amber],
+                        ["SMS sent",         sum.smsSent,    N.teal],
+                        ["SMS failed",       sum.smsFailed,  N.red],
+                        ["Cards uploaded",   sum.uploads,    N.sky],
+                      ].map(([l,v,c])=>(
+                        <div key={l} className="nk-stat" style={{borderColor:alpha(c,"33")}}>
+                          <div className="nk-stat-num" style={{color:c}}>{v}</div>
+                          <div className="nk-stat-label">{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {historyHasMore && (
+                      <div style={{fontSize:11,color:N.textDim,marginBottom:10}}>
+                        Counts cover the {historyRows.length} most recent entries — load older entries below for the full picture.
+                      </div>
+                    )}
+
+                    {/* Filters */}
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,alignItems:"center"}}>
+                      <input className="nk-input" style={{flex:"1 1 220px",maxWidth:320}} placeholder="Search name, phone, message, user…"
+                        value={historyFilter.q} onChange={e=>setF({ q:e.target.value })} />
+                      <select className="nk-input" style={{width:150}} value={historyFilter.channel} onChange={e=>setF({ channel:e.target.value })}>
+                        <option value="all">All channels</option>
+                        {Object.entries(HISTORY_CHANNELS).map(([k,c])=><option key={k} value={k}>{c.icon} {c.label}</option>)}
+                      </select>
+                      <select className="nk-input" style={{width:150}} value={historyFilter.status} onChange={e=>setF({ status:e.target.value })}>
+                        <option value="all">All results</option>
+                        {Object.entries(HISTORY_STATUSES).map(([k,st])=><option key={k} value={k}>{st.label}</option>)}
+                      </select>
+                      {filtered && (
+                        <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"6px 10px"}}
+                          onClick={()=>setHistoryFilter({ channel:"all", status:"all", q:"" })}>✕ Clear</button>
+                      )}
+                      <span style={{fontSize:11,color:N.textDim,marginLeft:"auto"}}>
+                        {shown.length}{filtered ? ` of ${historyRows.length}` : ""} entr{shown.length===1?"y":"ies"}
+                      </span>
+                    </div>
+
+                    {/* Log table */}
+                    <div className="nk-table-wrap">
+                      <table className="nk-table">
+                        <thead><tr>{["Time","Channel","Action","Recipient","Message / Template","Result","By","Detail"].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                        <tbody>
+                          {shown.map(r => {
+                            const st = HISTORY_STATUSES[r.status] || { label:r.status, tone:"info" };
+                            const ch = HISTORY_CHANNELS[r.channel] || { icon:"•", label:r.channel };
+                            return (
+                              <tr key={r.id}>
+                                <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:11,color:N.textMid,whiteSpace:"nowrap"}}>{fmt(r.created_at)}</td>
+                                <td style={{fontSize:12,whiteSpace:"nowrap"}}>{ch.icon} {ch.label}</td>
+                                <td style={{fontSize:12,color:N.textMid,whiteSpace:"nowrap"}}>{HISTORY_ACTIONS[r.action] || r.action}</td>
+                                <td>
+                                  {r.recipient_name || r.recipient_phone ? (
+                                    <button title="Show only this contact's history"
+                                      onClick={()=>setF({ q: r.recipient_phone || r.recipient_name })}
+                                      style={{background:"none",border:"none",padding:0,cursor:"pointer",textAlign:"left",color:N.text}}>
+                                      <div style={{fontWeight:600,fontSize:13,whiteSpace:"nowrap"}}>{r.recipient_name || "—"}</div>
+                                      {r.recipient_phone && <div style={{fontFamily:"JetBrains Mono, monospace",fontSize:11,color:N.textDim}}>+{r.recipient_phone}</div>}
+                                    </button>
+                                  ) : <span style={{color:N.textDim}}>—</span>}
+                                </td>
+                                <td style={{fontSize:12,color:N.textMid}}>{r.message_title || "—"}</td>
+                                <td>
+                                  <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:5,whiteSpace:"nowrap",
+                                    color:tone[st.tone], background:toneBg[st.tone], border:`1px solid ${alpha(tone[st.tone],"44")}`}}>
+                                    {st.label}
+                                  </span>
+                                </td>
+                                <td style={{fontSize:11,color:N.textDim,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.user_email||""}>{r.user_email || "—"}</td>
+                                <td style={{fontSize:11,color:N.textMid,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.detail||""}>{r.detail || ""}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      {!shown.length && (
+                        <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>
+                          {historyLoading ? "Loading history…"
+                            : historyRows.length ? "No entries match these filters."
+                            : "Nothing recorded yet. Sends, uploads and event changes will appear here."}
+                        </div>
+                      )}
+                    </div>
+                    {historyHasMore && (
+                      <button className="nk-btn nk-btn-ghost nk-btn-full" style={{marginTop:12}} onClick={()=>loadHistory(true)} disabled={historyLoading}>
+                        {historyLoading ? "⏳ Loading…" : "Load older entries"}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+              );
+            })()}
+
 
             {tab === "batch" && (
               <div className="nk-page" style={{padding:"0 0 40px"}}>

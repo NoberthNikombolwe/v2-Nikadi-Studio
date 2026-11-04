@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS event_cards (
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Event history (append-only audit log): one row per card sent, SMS sent, card upload,
+-- late delivery report, bulk-send summary or event change. Signed-in users can add and
+-- read rows but never edit or delete them; user_email is filled in by the database from
+-- the caller's login, so it can't be spoofed from the browser.
+CREATE TABLE IF NOT EXISTS event_logs (
+  id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  event_id        UUID REFERENCES events(id) ON DELETE CASCADE,
+  created_at      TIMESTAMPTZ DEFAULT clock_timestamp(),   -- per row, so a bulk insert keeps its order
+  user_email      TEXT DEFAULT (auth.jwt() ->> 'email'),
+  channel         TEXT,         -- whatsapp | sms | card | event
+  action          TEXT,         -- send | status | upload | bulk | create | update | contacts
+  status          TEXT,         -- sent | delivered | invalid | not_sent | failed | ok
+  recipient_name  TEXT,
+  recipient_phone TEXT,
+  message_title   TEXT,         -- SMS message title or WhatsApp template
+  detail          TEXT
+);
+
 -- Saved templates table (reusable card designs)
 CREATE TABLE IF NOT EXISTS saved_templates (
   id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -57,6 +75,7 @@ CREATE TABLE IF NOT EXISTS saved_templates (
 CREATE INDEX IF NOT EXISTS idx_event_cards_event_id    ON event_cards(event_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at       ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_saved_templates_created ON saved_templates(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_event_logs_event_created ON event_logs(event_id, created_at DESC);
 
 -- =====================================================================
 -- ROW LEVEL SECURITY
@@ -72,6 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_saved_templates_created ON saved_templates(create
 ALTER TABLE events           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_cards      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE saved_templates  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_logs       ENABLE ROW LEVEL SECURITY;
 
 -- Legacy wide-open policies (anyone holding the anon key had full access)
 DROP POLICY IF EXISTS "allow_all_events"            ON events;
@@ -86,6 +106,13 @@ CREATE POLICY "authenticated_all_events"          ON events           FOR ALL TO
 CREATE POLICY "authenticated_all_event_cards"     ON event_cards      FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "authenticated_all_saved_templates" ON saved_templates  FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
+-- event_logs is append-only: read + insert (as yourself) only, no update/delete policies
+DROP POLICY IF EXISTS "authenticated_read_event_logs"   ON event_logs;
+DROP POLICY IF EXISTS "authenticated_insert_event_logs" ON event_logs;
+CREATE POLICY "authenticated_read_event_logs"   ON event_logs FOR SELECT TO authenticated USING (true);
+CREATE POLICY "authenticated_insert_event_logs" ON event_logs FOR INSERT TO authenticated
+  WITH CHECK (user_email IS NOT DISTINCT FROM (auth.jwt() ->> 'email'));
+
 -- =====================================================================
 -- GRANTS  (Supabase requires explicit grants for the Data API on new tables)
 -- The app requires login, so anon gets nothing; signed-in users get CRUD.
@@ -93,15 +120,19 @@ CREATE POLICY "authenticated_all_saved_templates" ON saved_templates  FOR ALL TO
 REVOKE ALL ON public.events          FROM anon;
 REVOKE ALL ON public.event_cards     FROM anon;
 REVOKE ALL ON public.saved_templates FROM anon;
+REVOKE ALL ON public.event_logs      FROM anon;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.events          TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.event_cards     TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.saved_templates TO authenticated;
+REVOKE UPDATE, DELETE ON public.event_logs FROM authenticated;
+GRANT SELECT, INSERT                 ON public.event_logs      TO authenticated;
 
 -- service_role: Edge Functions and other server-side calls
 GRANT ALL ON public.events          TO service_role;
 GRANT ALL ON public.event_cards     TO service_role;
 GRANT ALL ON public.saved_templates TO service_role;
+GRANT ALL ON public.event_logs      TO service_role;
 
 -- =====================================================================
 -- STORAGE BUCKETS
