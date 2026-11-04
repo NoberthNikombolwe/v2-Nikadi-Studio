@@ -4,6 +4,7 @@ import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
+import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
 
 /* ══════════════════════════════════════════════════════════════════════════
    NIKADI STUDIO — event card designer & distribution tool
@@ -51,18 +52,8 @@ const FONT_OPTIONS = [
   { label:"Dancing Script",    value:"Dancing Script" },
 ];
 
-const N = {
-  navy900:"#050d1f", navy800:"#0a1628", navy700:"#0d1f3c", navy600:"#102848",
-  navy500:"#163260", navy400:"#1e4080", navy300:"#2563b0",
-  sky:"#38bdf8", accent:"#3b82f6", accentHover:"#2563eb",
-  gold:"#f59e0b", green:"#22c55e", greenBg:"#052e16",
-  red:"#ef4444", redBg:"#2d0a0a",
-  amber:"#f59e0b", amberBg:"#2d1a00",
-  purple:"#a855f7", purpleBg:"#1a0a2e",
-  teal:"#14b8a6", tealBg:"#042f2e",
-  text:"#e2e8f0", textMid:"#94a3b8", textDim:"#475569",
-  border:"#1e3a5f",
-};
+// Colour tokens are CSS variables with light + dark values — see src/lib/theme.js and src/index.css
+
 
 const CSS = `
   @import url('${FONTS}');
@@ -76,7 +67,7 @@ const CSS = `
     border-bottom: 1px solid ${N.border}; padding: 0 28px; height: 64px;
     display: flex; align-items: center; gap: 16px;
     position: sticky; top: 0; z-index: 100;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    box-shadow: 0 4px 24px var(--nk-shadow);
   }
   .nk-logo { display: flex; align-items: center; gap: 10px; }
   .nk-logo-icon {
@@ -88,7 +79,7 @@ const CSS = `
   }
   .nk-logo-name {
     font-size: 18px; font-weight: 800; letter-spacing: -0.3px;
-    background: linear-gradient(135deg, #fff 30%, ${N.sky});
+    background: linear-gradient(135deg, ${N.text} 30%, ${N.sky});
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   }
   .nk-logo-tag { font-size: 10px; color: ${N.textDim}; font-weight: 500; letter-spacing: 0.5px; margin-top: -2px; }
@@ -212,13 +203,13 @@ const CSS = `
     border: 1.5px solid ${N.border}; margin-bottom: 6px;
     background: ${N.navy900}; transition: all 0.15s; font-size: 12px;
   }
-  .nk-el-pill:hover  { border-color: ${N.accent}44; background: ${N.navy700}; }
+  .nk-el-pill:hover  { border-color: ${alpha(N.accent,"44")}; background: ${N.navy700}; }
   .nk-el-pill.active { border-color: ${N.sky}; background: ${N.navy600}; box-shadow: 0 0 0 3px rgba(56,189,248,0.1); }
   .nk-el-pill.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
   .nk-el-type { font-size: 10px; color: ${N.textDim}; font-family: 'JetBrains Mono', monospace; }
   .nk-michango-badge {
     display: flex; align-items: center; gap: 6px; padding: 7px 10px;
-    background: ${N.purpleBg}; border: 1px solid ${N.purple}44;
+    background: ${N.purpleBg}; border: 1px solid ${alpha(N.purple,"44")};
     border-radius: 8px; font-size: 11px; color: ${N.purple}; margin-bottom: 8px;
     line-height: 1.5;
   }
@@ -236,7 +227,7 @@ const CSS = `
   /* Current event banner in sidebar */
   .nk-event-banner {
     background: linear-gradient(135deg, ${N.navy600}, ${N.navy700});
-    border: 1px solid ${N.accent}44; border-radius: 10px;
+    border: 1px solid ${alpha(N.accent,"44")}; border-radius: 10px;
     padding: 12px 14px; cursor: pointer; transition: all 0.15s;
   }
   .nk-event-banner:hover { border-color: ${N.accent}; }
@@ -261,7 +252,7 @@ const CSS = `
     transition: all 0.15s;
   }
   .nk-rec-pill:hover  { border-color: ${N.accent}; color: ${N.sky}; }
-  .nk-rec-pill.active { background: ${N.accent}22; border-color: ${N.accent}; color: ${N.sky}; }
+  .nk-rec-pill.active { background: ${alpha(N.accent,"22")}; border-color: ${N.accent}; color: ${N.sky}; }
 
   /* Banner */
   .nk-banner {
@@ -291,7 +282,7 @@ const CSS = `
     width: 340px; max-width: calc(100vw - 48px); max-height: 45vh; overflow-y: auto;
     display: flex; flex-direction: column; gap: 10px; animation: slideUp 0.3s ease;
   }
-  .nk-activity .nk-log { margin-bottom: 0; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+  .nk-activity .nk-log { margin-bottom: 0; box-shadow: 0 8px 30px var(--nk-shadow); }
   .nk-activity-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
   .nk-activity-close {
     background: transparent; border: none; color: ${N.textDim}; cursor: pointer;
@@ -309,31 +300,31 @@ const CSS = `
     background: ${N.navy700}; border-bottom: 1px solid ${N.border};
   }
   .nk-table tbody tr { transition: background 0.15s; }
-  .nk-table tbody tr:hover { background: ${N.navy700}44; }
+  .nk-table tbody tr:hover { background: ${alpha(N.navy700,"44")}; }
   .nk-table tbody tr.row-active { background: rgba(59,130,246,0.06); }
-  .nk-table td { padding: 10px 14px; font-size: 13px; border-bottom: 1px solid ${N.border}22; vertical-align: middle; }
+  .nk-table td { padding: 10px 14px; font-size: 13px; border-bottom: 1px solid ${alpha(N.border,"22")}; vertical-align: middle; }
   .nk-table tbody tr:last-child td { border-bottom: none; }
 
   /* Badges */
   .nk-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
   .badge-idle    { background: ${N.navy700}; color: ${N.textDim}; border: 1px solid ${N.border}; }
-  .badge-testing { background: ${N.amberBg}; color: ${N.amber}; border: 1px solid ${N.amber}44; }
-  .badge-yes     { background: ${N.greenBg}; color: ${N.green}; border: 1px solid ${N.green}44; }
-  .badge-no      { background: ${N.redBg};   color: ${N.red};   border: 1px solid ${N.red}44; }
-  .badge-sent    { background: ${N.tealBg};  color: ${N.teal};  border: 1px solid ${N.teal}44; }
-  .badge-purple  { background: ${N.purpleBg}; color: ${N.purple}; border: 1px solid ${N.purple}44; }
+  .badge-testing { background: ${N.amberBg}; color: ${N.amber}; border: 1px solid ${alpha(N.amber,"44")}; }
+  .badge-yes     { background: ${N.greenBg}; color: ${N.green}; border: 1px solid ${alpha(N.green,"44")}; }
+  .badge-no      { background: ${N.redBg};   color: ${N.red};   border: 1px solid ${alpha(N.red,"44")}; }
+  .badge-sent    { background: ${N.tealBg};  color: ${N.teal};  border: 1px solid ${alpha(N.teal,"44")}; }
+  .badge-purple  { background: ${N.purpleBg}; color: ${N.purple}; border: 1px solid ${alpha(N.purple,"44")}; }
 
   /* Toast */
   .nk-toast {
     position: fixed; bottom: 24px; right: 24px; z-index: 9999;
     padding: 12px 20px; border-radius: 12px; font-size: 13px; font-weight: 500;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.5); max-width: 340px; line-height: 1.5;
+    box-shadow: 0 8px 30px var(--nk-shadow); max-width: 340px; line-height: 1.5;
     animation: slideUp 0.3s ease; display: flex; align-items: flex-start; gap: 10px;
   }
   .nk-toast-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
-  .toast-success { background: #052e16; color: ${N.green}; border: 1px solid ${N.green}44; }
-  .toast-warn    { background: ${N.amberBg}; color: ${N.amber}; border: 1px solid ${N.amber}44; }
-  .toast-info    { background: ${N.navy600}; color: ${N.sky}; border: 1px solid ${N.sky}44; }
+  .toast-success { background: ${N.greenBg}; color: ${N.green}; border: 1px solid ${alpha(N.green,"44")}; }
+  .toast-warn    { background: ${N.amberBg}; color: ${N.amber}; border: 1px solid ${alpha(N.amber,"44")}; }
+  .toast-info    { background: ${N.navy600}; color: ${N.sky}; border: 1px solid ${alpha(N.sky,"44")}; }
   @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
   input[type=range] { width: 100%; accent-color: ${N.accent}; margin-bottom: 6px; }
@@ -363,7 +354,7 @@ const CSS = `
     background: ${N.navy800}; border: 1px solid ${N.border};
     border-radius: 18px; width: 100%; max-width: 620px;
     max-height: 90vh; overflow-y: auto;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+    box-shadow: 0 24px 80px var(--nk-shadow);
     animation: modalIn 0.2s ease;
   }
   @keyframes modalIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
@@ -396,16 +387,16 @@ const CSS = `
   /* ── Layout restored chip ── */
   .nk-layout-chip {
     display: inline-flex; align-items: center; gap: 6px;
-    background: ${N.greenBg}; border: 1px solid ${N.green}44;
+    background: ${N.greenBg}; border: 1px solid ${alpha(N.green,"44")};
     border-radius: 20px; padding: 3px 12px; font-size: 11px;
     color: ${N.green}; font-family: 'JetBrains Mono', monospace;
   }
 
   /* ── Delete confirm overlay ── */
   .nk-confirm {
-    background: ${N.navy800}; border: 1px solid ${N.red}44;
+    background: ${N.navy800}; border: 1px solid ${alpha(N.red,"44")};
     border-radius: 14px; padding: 24px; max-width: 400px; width: 100%;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.6); animation: modalIn 0.2s ease;
+    box-shadow: 0 24px 80px var(--nk-shadow); animation: modalIn 0.2s ease;
   }
   .nk-confirm-title { font-size: 16px; font-weight: 700; color: ${N.text}; margin-bottom: 8px; }
   .nk-confirm-body  { font-size: 13px; color: ${N.textMid}; margin-bottom: 20px; line-height: 1.6; }
@@ -415,7 +406,7 @@ const CSS = `
     background: ${N.navy800}; border: 1px solid ${N.border};
     border-radius: 14px; padding: 24px; max-width: 560px; width: 100%;
     max-height: 90vh; overflow-y: auto;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.6); animation: modalIn 0.2s ease;
+    box-shadow: 0 24px 80px var(--nk-shadow); animation: modalIn 0.2s ease;
   }
   .nk-dialog-title   { font-size: 16px; font-weight: 700; color: ${N.text}; margin-bottom: 10px; }
   .nk-dialog-body    { font-size: 13px; color: ${N.textMid}; margin-bottom: 20px; line-height: 1.6; }
@@ -425,7 +416,7 @@ const CSS = `
   }
   .nk-dialog-list .num { font-family: 'JetBrains Mono', monospace; color: ${N.sky}; }
   .nk-dialog-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
-  .nk-btn-warn       { background: ${N.amberBg}; color: ${N.amber}; border: 1.5px solid ${N.amber}66; }
+  .nk-btn-warn       { background: ${N.amberBg}; color: ${N.amber}; border: 1.5px solid ${alpha(N.amber,"66")}; }
   .nk-btn-warn:hover { transform: translateY(-1px); filter: brightness(1.25); }
 
   .nk-page { width: 100%; max-width: 1100px; margin: 0 auto; }
@@ -647,8 +638,8 @@ function WaBadge({ status }) {
     idle:    { cls:"badge-idle",    icon:"○", label:"Not Sent", extra:{} },
     sending: { cls:"badge-testing", icon:"⏳", label:"Sending…", extra:{} },
     sent:    { cls:"badge-sent",    icon:"✓", label:"Sent",     extra:{} },
-    notSent: { cls:"badge-no",      icon:"✗", label:"Not Sent", extra:{background:"#1a0a0a",color:"#f87171",border:"1px solid #f8717144"} },
-    invalid: { cls:"badge-testing", icon:"⚠", label:"Invalid",  extra:{background:"#2d1a00",color:"#f59e0b",border:"1px solid #f59e0b44"} },
+    notSent: { cls:"badge-no",      icon:"✗", label:"Not Sent", extra:{background:N.redBg,color:N.red,border:`1px solid ${alpha(N.red,"44")}`} },
+    invalid: { cls:"badge-testing", icon:"⚠", label:"Invalid",  extra:{background:N.amberBg,color:N.amber,border:`1px solid ${alpha(N.amber,"44")}`} },
   };
   const { cls, icon, label, extra } = styles[status] || styles.idle;
   return <span className={`nk-badge ${cls}`} style={extra}>{icon} {label}</span>;
@@ -658,7 +649,7 @@ function WaBadge({ status }) {
 function Sb({ bg, col, border, children, onClick, title, disabled }) {
   return (
     <button className="nk-btn-sm" onClick={onClick} title={title} disabled={disabled}
-      style={{ background:bg, color:col, borderColor:border||col+"44", opacity:disabled?0.5:1 }}>
+      style={{ background:bg, color:col, borderColor:border||alpha(col,"44"), opacity:disabled?0.5:1 }}>
       {children}
     </button>
   );
@@ -706,11 +697,11 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
             onClick={()=>onUpload(idx)} disabled={rec.uploadStatus==="uploading"}>
             {rec.uploadStatus==="uploading"?"⏳":rec.uploadStatus==="uploaded"?"✓":"☁"} Upload
           </Sb>
-          {rec.phone && <Sb bg="#052e16" col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending}>
+          {rec.phone && <Sb bg={N.greenBg} col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending}>
             {rec.waStatus===WA.sending?"⏳":"📲"} WA
           </Sb>}
-          {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={N.teal+"44"} onClick={()=>onSendSms(idx)}>💬 SMS</Sb>}
-          <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"} onClick={()=>onDownload(idx)}>⬇ PNG</Sb>
+          {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>onSendSms(idx)}>💬 SMS</Sb>}
+          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)}>⬇ PNG</Sb>
         </div>
       </td>
     </tr>
@@ -838,6 +829,9 @@ function LogSection({ title, color, styles, log, onClose }) {
 }
 
 const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
+const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
+const THEME_ICONS  = { system:"🖥", light:"☀️", dark:"🌙" };
+
 // Id of an event's main SMS message (events.sms_message, statuses in event_cards.sms_status).
 // Extra messages (events.sms_messages) use random ids — see src/lib/messages.js.
 const MAIN_MSG = "main";
@@ -871,6 +865,12 @@ export default function App() {
 
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
+
+  /* ── Theme ── */
+  // "system" follows the browser's light/dark setting (CSS media query in index.css);
+  // "light"/"dark" override it and are remembered in localStorage (nikadi_theme)
+  const [themePref, setThemePref] = useState(getThemePref);
+  useEffect(() => { applyTheme(themePref); }, [themePref]);
 
   /* ── WhatsApp ── */
   const [waTemplate,     setWaTemplate]     = useState("Mwaliko");
@@ -2313,8 +2313,8 @@ export default function App() {
      RENDER
   ══════════════════════════════════════════════════════ */
   if (user === undefined) return (
-    <div style={{minHeight:"100vh",background:"#050d1f",display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{width:40,height:40,border:"3px solid #1e3a5f",borderTopColor:"#3b82f6",borderRadius:"50%",animation:"spin 0.8s linear infinite"}} />
+    <div style={{minHeight:"100vh",background:N.navy900,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{width:40,height:40,border:`3px solid ${N.border}`,borderTopColor:N.accent,borderRadius:"50%",animation:"spin 0.8s linear infinite"}} />
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
@@ -2408,6 +2408,13 @@ export default function App() {
             </button>
             <button className="nk-btn nk-btn-primary" onClick={downloadAll}>
               ⬇ Download All ({records.length})
+            </button>
+            {/* Theme: System (follows the browser) → Light → Dark */}
+            <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}}
+              onClick={()=>setThemePref(nextThemePref(themePref))}
+              title={`Theme: ${THEME_LABELS[themePref]} — click to change`}
+              aria-label={`Theme: ${THEME_LABELS[themePref]}. Click to change.`}>
+              {THEME_ICONS[themePref]} {THEME_LABELS[themePref]}
             </button>
             <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
               {user.user_metadata?.avatar_url && (
@@ -2520,7 +2527,7 @@ export default function App() {
                 )}
 
                 {loadingTemplate && (
-                  <div style={{fontSize:11,color:N.amber,background:N.amberBg,border:`1px solid ${N.amber}44`,borderRadius:8,padding:"8px 12px",marginBottom:8,display:"flex",gap:8,alignItems:"center"}}>
+                  <div style={{fontSize:11,color:N.amber,background:N.amberBg,border:`1px solid ${alpha(N.amber,"44")}`,borderRadius:8,padding:"8px 12px",marginBottom:8,display:"flex",gap:8,alignItems:"center"}}>
                     <span>⏳</span> Loading template from database…
                   </div>
                 )}
@@ -2747,17 +2754,17 @@ export default function App() {
                                   title="Load this event and open card designer">
                                   🎨 Create Cards
                                 </Sb>
-                                <Sb bg={N.navy600} col={N.teal} border={N.teal+"44"}
+                                <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "reports"); }}
                                   title="View this event's cards and download the send report">
                                   📋 Report
                                 </Sb>
-                                <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"}
+                                <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setModalEvent({...ev, start_datetime: ev.start_datetime?ev.start_datetime.slice(0,16):"", end_datetime: ev.end_datetime?ev.end_datetime.slice(0,16):""}); }}
                                   title="Edit event details">
                                   ✏ Edit
                                 </Sb>
-                                <Sb bg={N.redBg} col={N.red} border={N.red+"44"}
+                                <Sb bg={N.redBg} col={N.red} border={alpha(N.red,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setDeleteTarget(ev); }}
                                   title="Delete this event">
                                   🗑 Delete
@@ -2893,7 +2900,7 @@ export default function App() {
                         );
                       })}
                       <button onClick={addExtraMessage}
-                        style={{padding:"4px 11px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",background:"transparent",color:N.sky,border:`1px dashed ${N.sky}66`}}>
+                        style={{padding:"4px 11px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",background:"transparent",color:N.sky,border:`1px dashed ${alpha(N.sky,"66")}`}}>
                         ＋ Add message
                       </button>
                     </div>
@@ -3004,7 +3011,7 @@ export default function App() {
                             style={{
                               padding:"3px 10px", borderRadius:5, fontSize:11,
                               fontFamily:"JetBrains Mono, monospace", cursor:"pointer",
-                              background:N.navy700, color:N.sky, border:`1px solid ${N.sky}33`,
+                              background:N.navy700, color:N.sky, border:`1px solid ${alpha(N.sky,"33")}`,
                             }}>
                             {`{${col}}`}
                           </button>
@@ -3051,7 +3058,7 @@ export default function App() {
                         {smsBalanceLoading?"⏳":"↻"} Refresh
                       </button>
                     </div>
-                    <div style={{background:N.tealBg,border:`1.5px solid ${N.teal}55`,borderRadius:10,padding:"18px 20px",marginBottom:14,textAlign:"center"}}>
+                    <div style={{background:N.tealBg,border:`1.5px solid ${alpha(N.teal,"55")}`,borderRadius:10,padding:"18px 20px",marginBottom:14,textAlign:"center"}}>
                       {smsBalanceLoading ? (
                         <div style={{color:N.textDim,fontSize:13,padding:"8px 0"}}>Loading…</div>
                       ) : smsBalance ? (
@@ -3163,7 +3170,7 @@ export default function App() {
                     <div className="nk-sec nk-sec-teal">SMS Preview per Recipient{activeExtra ? ` — ${activeExtra.title}` : ""}</div>
                     {!smsSending && smsReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadSmsReport}
-                        style={{background:N.tealBg,color:N.teal,border:`1px solid ${N.teal}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                        style={{background:N.tealBg,color:N.teal,border:`1px solid ${alpha(N.teal,"33")}`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
                         <span style={{fontSize:16}}>⬇</span> Download SMS Report (.xlsx)
                       </button>
                     )}
@@ -3186,7 +3193,7 @@ export default function App() {
                                   {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
                                 </span>
                               </td>
-                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={N.teal+"44"} onClick={()=>sendSmsToOne(i, activeMsgId)}>💬 Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
+                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>sendSmsToOne(i, activeMsgId)}>💬 Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -3269,7 +3276,7 @@ export default function App() {
                         records, not the log, so it stays after the log clears itself) */}
                     {!bulkSending && waReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadWaReport}
-                        style={{background:N.greenBg,color:N.green,border:`1px solid ${N.green}33`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                        style={{background:N.greenBg,color:N.green,border:`1px solid ${alpha(N.green,"33")}`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
                         <span style={{fontSize:16}}>⬇</span> Download WA Report (.xlsx)
                       </button>
                     )}
@@ -3293,13 +3300,13 @@ export default function App() {
                               <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
                               <td>
                                 <div style={{display:"flex",gap:5}}>
-                                  <Sb bg={N.navy600} col={N.sky} border={N.sky+"44"}
+                                  <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                     onClick={()=>uploadCardSingle(i)}
                                     disabled={rec.uploadStatus==="uploading"}>
                                     {rec.uploadStatus==="uploading"?"⏳":"☁"} Upload
                                   </Sb>
                                   {rec.phone && rec.cardUrl && (
-                                    <Sb bg="#052e16" col={N.green}
+                                    <Sb bg={N.greenBg} col={N.green}
                                       onClick={()=>sendWaSingle(i)}
                                       disabled={rec.waStatus===WA.sending}>
                                       {rec.waStatus===WA.sending?"⏳":"📲"} Send
@@ -3341,7 +3348,7 @@ export default function App() {
                     ["SMS Sent",     records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length,        N.teal],
                     ["SMS Pending",  records.filter(r=>r.smsStatus===SMS.pending).length,                                  N.textDim],
                   ].map(([l,v,c])=>(
-                    <div key={l} className="nk-stat" style={{borderColor:c+"33"}}>
+                    <div key={l} className="nk-stat" style={{borderColor:alpha(c,"33")}}>
                       <div className="nk-stat-num" style={{color:c}}>{v}</div>
                       <div className="nk-stat-label">{l}</div>
                     </div>
@@ -3392,7 +3399,7 @@ export default function App() {
                     ["SMS Sent",   smsSentCount,    N.teal],
                     ["Pending WA", records.filter(r=>r.phone&&r.waStatus===WA.idle).length, N.textDim],
                   ].map(([l,v,c])=>(
-                    <div key={l} className="nk-stat" style={{borderColor:c+"33"}}>
+                    <div key={l} className="nk-stat" style={{borderColor:alpha(c,"33")}}>
                       <div className="nk-stat-num" style={{color:c}}>{v}</div>
                       <div className="nk-stat-label">{l}</div>
                     </div>
@@ -3450,7 +3457,7 @@ export default function App() {
                   <div style={{display:"flex",gap:6,marginBottom:10}}>
                     {["left","center","right"].map(a=>(
                       <button key={a} onClick={()=>updateEl("align",a)}
-                        style={{flex:1,padding:"7px 0",borderRadius:8,border:`1.5px solid ${(selectedEl.align||"left")===a?N.accent:N.border}`,background:(selectedEl.align||"left")===a?N.accent+"22":"transparent",color:(selectedEl.align||"left")===a?N.sky:N.textDim,cursor:"pointer",fontSize:16,fontFamily:"inherit"}}>
+                        style={{flex:1,padding:"7px 0",borderRadius:8,border:`1.5px solid ${(selectedEl.align||"left")===a?N.accent:N.border}`,background:(selectedEl.align||"left")===a?alpha(N.accent,"22"):"transparent",color:(selectedEl.align||"left")===a?N.sky:N.textDim,cursor:"pointer",fontSize:16,fontFamily:"inherit"}}>
                         {a==="left"?"⬅":a==="center"?"⬛":"➡"}
                       </button>
                     ))}

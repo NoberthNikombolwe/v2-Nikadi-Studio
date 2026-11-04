@@ -6,23 +6,23 @@ const FONTS = "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@4
 const CSS = `
   @import url('${FONTS}');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #050d1f; }
+  body { background: var(--nk-navy900); }
 
   .login-root {
     min-height: 100vh;
-    background: linear-gradient(135deg, #050d1f 0%, #0a1628 50%, #0d1f3c 100%);
+    background: linear-gradient(135deg, var(--nk-navy900) 0%, var(--nk-navy800) 50%, var(--nk-navy700) 100%);
     display: flex; align-items: center; justify-content: center;
     font-family: 'Plus Jakarta Sans', sans-serif;
     padding: 24px;
   }
 
   .login-card {
-    background: linear-gradient(160deg, #0d1f3c 0%, #0a1628 100%);
-    border: 1px solid #1e3a5f;
+    background: linear-gradient(160deg, var(--nk-navy700) 0%, var(--nk-navy800) 100%);
+    border: 1px solid var(--nk-border);
     border-radius: 20px;
     padding: 48px 40px;
     width: 100%; max-width: 400px;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(56,189,248,0.06);
+    box-shadow: 0 24px 80px var(--nk-shadow), 0 0 0 1px rgba(56,189,248,0.06);
     display: flex; flex-direction: column; align-items: center; gap: 0;
   }
 
@@ -37,30 +37,30 @@ const CSS = `
 
   .login-app-name {
     font-size: 24px; font-weight: 800; letter-spacing: -0.5px;
-    background: linear-gradient(135deg, #fff 30%, #38bdf8);
+    background: linear-gradient(135deg, var(--nk-text) 30%, var(--nk-sky));
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     margin-bottom: 4px;
   }
 
   .login-tagline {
-    font-size: 13px; color: #475569; font-weight: 500;
+    font-size: 13px; color: var(--nk-textDim); font-weight: 500;
     margin-bottom: 40px;
   }
 
   .login-heading {
-    font-size: 18px; font-weight: 700; color: #e2e8f0;
+    font-size: 18px; font-weight: 700; color: var(--nk-text);
     margin-bottom: 8px; text-align: center;
   }
 
   .login-sub {
-    font-size: 13px; color: #94a3b8; text-align: center;
+    font-size: 13px; color: var(--nk-textMid); text-align: center;
     margin-bottom: 28px; line-height: 1.6;
   }
 
   .login-google-btn {
     width: 100%; padding: 13px 20px;
     background: #fff; color: #1f2937;
-    border: none; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--nk-border); border-radius: 12px; cursor: pointer;
     font-size: 14px; font-weight: 600;
     font-family: 'Plus Jakarta Sans', sans-serif;
     display: flex; align-items: center; justify-content: center; gap: 10px;
@@ -76,18 +76,18 @@ const CSS = `
 
   .login-error {
     margin-top: 16px; padding: 10px 14px;
-    background: #2d0a0a; border: 1px solid #ef4444;
-    border-radius: 8px; color: #f87171;
+    background: var(--nk-redBg); border: 1px solid var(--nk-red);
+    border-radius: 8px; color: var(--nk-red);
     font-size: 13px; width: 100%; text-align: center;
   }
 
   .login-footer {
-    margin-top: 32px; font-size: 11px; color: #334155;
+    margin-top: 32px; font-size: 11px; color: var(--nk-textDim);
     text-align: center; line-height: 1.6;
   }
 
   .login-divider {
-    width: 100%; border: none; border-top: 1px solid #1e3a5f;
+    width: 100%; border: none; border-top: 1px solid var(--nk-border);
     margin: 28px 0;
   }
 `;

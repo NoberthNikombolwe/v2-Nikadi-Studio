@@ -37,6 +37,7 @@ Nikadi Studio lets you:
 - Send personalised SMS messages via the messaging-service.co.tz API
 - Track WhatsApp and SMS delivery statuses per contact
 - Save and reuse card templates
+- Light and dark mode — follows your browser/OS setting by default, or pick one with the header toggle
 - Store all events and contacts in a Supabase database
 
 ---

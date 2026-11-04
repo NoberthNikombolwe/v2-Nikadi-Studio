@@ -1,0 +1,55 @@
+/* Nikadi Studio colour tokens (see src/lib/theme.js).
+   Dark is the default; the browser's light preference switches to the light set unless the
+   user picked a theme in the header, which sets <html data-theme="light|dark">. */
+
+:root {
+  color-scheme: dark;
+  --nk-navy900: #050d1f;  --nk-navy800: #0a1628;  --nk-navy700: #0d1f3c;  --nk-navy600: #102848;
+  --nk-navy500: #163260;  --nk-navy400: #1e4080;  --nk-navy300: #2563b0;
+  --nk-sky: #38bdf8;      --nk-accent: #3b82f6;   --nk-accentHover: #2563eb;
+  --nk-gold: #f59e0b;
+  --nk-green: #22c55e;    --nk-greenBg: #052e16;
+  --nk-red: #ef4444;      --nk-redBg: #2d0a0a;
+  --nk-amber: #f59e0b;    --nk-amberBg: #2d1a00;
+  --nk-purple: #a855f7;   --nk-purpleBg: #1a0a2e;
+  --nk-teal: #14b8a6;     --nk-tealBg: #042f2e;
+  --nk-text: #e2e8f0;     --nk-textMid: #94a3b8;  --nk-textDim: #475569;
+  --nk-border: #1e3a5f;   --nk-cardBg: #0a1628;
+  --nk-shadow: rgba(0, 0, 0, 0.5);
+}
+
+/* Light set — duplicated because one rule can't be both inside and outside the media query */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --nk-navy900: #eef2f7;  --nk-navy800: #ffffff;  --nk-navy700: #f1f5f9;  --nk-navy600: #e2e8f0;
+    --nk-navy500: #cbd5e1;  --nk-navy400: #94a3b8;  --nk-navy300: #2563b0;
+    --nk-sky: #0284c7;      --nk-accent: #2563eb;   --nk-accentHover: #1d4ed8;
+    --nk-gold: #b45309;
+    --nk-green: #15803d;    --nk-greenBg: #dcfce7;
+    --nk-red: #dc2626;      --nk-redBg: #fee2e2;
+    --nk-amber: #b45309;    --nk-amberBg: #fef3c7;
+    --nk-purple: #7c3aed;   --nk-purpleBg: #ede9fe;
+    --nk-teal: #0f766e;     --nk-tealBg: #ccfbf1;
+    --nk-text: #0f172a;     --nk-textMid: #334155;  --nk-textDim: #64748b;
+    --nk-border: #cbd5e1;   --nk-cardBg: #f8fafc;
+    --nk-shadow: rgba(15, 23, 42, 0.12);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --nk-navy900: #eef2f7;  --nk-navy800: #ffffff;  --nk-navy700: #f1f5f9;  --nk-navy600: #e2e8f0;
+  --nk-navy500: #cbd5e1;  --nk-navy400: #94a3b8;  --nk-navy300: #2563b0;
+  --nk-sky: #0284c7;      --nk-accent: #2563eb;   --nk-accentHover: #1d4ed8;
+  --nk-gold: #b45309;
+  --nk-green: #15803d;    --nk-greenBg: #dcfce7;
+  --nk-red: #dc2626;      --nk-redBg: #fee2e2;
+  --nk-amber: #b45309;    --nk-amberBg: #fef3c7;
+  --nk-purple: #7c3aed;   --nk-purpleBg: #ede9fe;
+  --nk-teal: #0f766e;     --nk-tealBg: #ccfbf1;
+  --nk-text: #0f172a;     --nk-textMid: #334155;  --nk-textDim: #64748b;
+  --nk-border: #cbd5e1;   --nk-cardBg: #f8fafc;
+  --nk-shadow: rgba(15, 23, 42, 0.12);
+}
+
+body { background: var(--nk-navy900); color: var(--nk-text); }

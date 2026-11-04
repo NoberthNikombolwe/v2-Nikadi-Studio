@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { normalisePhone, isValidPhone } from "./phone.js";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./recipients.js";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./messages.js";
+import { N, alpha, nextThemePref } from "./theme.js";
 
 test("normalisePhone handles every local/international format", () => {
   for (const raw of ["0712345678", "+255712345678", "255712345678", "00255712345678", "712345678", 712345678, " 0712 345 678 "]) {
@@ -126,4 +127,16 @@ test("sanitiseMessages drops junk and fills defaults", () => {
   assert.deepEqual(sanitiseMessages(null), []);
   const [m] = sanitiseMessages([null, { title: "no id" }, { id: 7, source: "weird", statuses: [] }]);
   assert.deepEqual(m, { id: "7", title: "Message 2", body: "", source: "contacts", fileName: null, columns: [], recipients: [], statuses: {} });
+});
+
+test("theme tokens are CSS variables and alpha() mixes with transparency", () => {
+  assert.equal(N.sky, "var(--nk-sky)");
+  assert.equal(alpha(N.teal, "44"), "color-mix(in srgb, var(--nk-teal) 27%, transparent)");
+  assert.equal(alpha("#ff0000", 0.5), "color-mix(in srgb, #ff0000 50%, transparent)");
+});
+
+test("theme toggle cycles system -> light -> dark -> system", () => {
+  assert.equal(nextThemePref("system"), "light");
+  assert.equal(nextThemePref("light"), "dark");
+  assert.equal(nextThemePref("dark"), "system");
 });
