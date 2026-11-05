@@ -3567,13 +3567,14 @@ function TeamAvatars({ team = [], max = 3 }) {
 }
 
 // The event's team inside the Overview: who's on it, their task, add / remove people
-function TeamPanel({ team = [], canManage, people, onLoadPeople, onAdd, onRemove, cardStyle }) {
+function TeamPanel({ team = [], canManage, people, peopleError, onLoadPeople, onAdd, onRemove, cardStyle }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ email: "", task: "" });
   const [errors, setErrors] = useState({});
   const [busy, setBusy] = useState(false);
   const listId = useId();
-  const open = () => { setAdding(true); setErrors({}); setForm({ email: "", task: "" }); if (!people) onLoadPeople(); };
+  // Always refresh the list when opening, so newly invited people show up
+  const open = () => { setAdding(true); setErrors({}); setForm({ email: "", task: "" }); onLoadPeople(); };
   const choices = assignableFor(people || [], team);
   const submit = async () => {
     const e = validateAssignment(form, team);
@@ -3594,10 +3595,19 @@ function TeamPanel({ team = [], canManage, people, onLoadPeople, onAdd, onRemove
         <div style={{background:N.navy800,border:`1px solid ${N.accent}`,borderRadius:10,padding:10,marginBottom:10}}>
           <label className="nk-label" htmlFor={listId + "p"}>Person</label>
           <select id={listId + "p"} className="nk-select" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}>
-            <option value="">{people ? (choices.length ? "— Choose a person —" : "Everyone is already on the team") : "Loading people…"}</option>
+            <option value="">{!people ? "Loading people…" : peopleError ? "Couldn't load people" : !people.length ? "No active users yet" : choices.length ? "— Choose a person —" : "Everyone is already on the team"}</option>
             {choices.map(u => <option key={u.email} value={u.email}>{u.full_name ? `${u.full_name} — ${u.email}` : u.email} · {ROLE_LABEL[u.role] || u.role}</option>)}
           </select>
           {errors.email && <div style={{fontSize:11,color:N.red,marginTop:-6,marginBottom:8}}>{errors.email}</div>}
+          {peopleError && (
+            <div role="alert" style={{fontSize:12,color:N.amber,background:N.amberBg,borderRadius:8,padding:"8px 10px",marginBottom:10,display:"flex",gap:8,alignItems:"flex-start"}}>
+              <Icon n="alert" /><span style={{flex:1}}>{peopleError}</span>
+              <button type="button" className="nk-link" onClick={onLoadPeople}>Retry</button>
+            </div>
+          )}
+          {people && !peopleError && !people.length && (
+            <div style={{fontSize:12,color:N.textDim,marginBottom:10}}>Invite people first in Settings → Users, then assign them here.</div>
+          )}
           <label className="nk-label" htmlFor={listId + "t"}>Task on this event</label>
           <input id={listId + "t"} className="nk-input" list={listId} maxLength={40} placeholder="e.g. Designer, Door / check-in" value={form.task}
             onChange={e => setForm(f => ({ ...f, task: e.target.value }))} />
@@ -4203,16 +4213,27 @@ export default function App() {
 
   /* ── Event teams (event_assignments) ── */
   const [teamRows, setTeamRows] = useState([]);
-  const [people, setPeople]     = useState(null);   // assignable users (names for avatars + the picker)
+  const [people, setPeople]     = useState(null);   // assignable users (names for avatars + the picker); null = not loaded
+  const [peopleError, setPeopleError] = useState(null);
   const loadTeams = async () => {
     if (!supabase || !userId || access.setupMissing) return;
     const { data, error } = await supabase.from("event_assignments").select("*");
     if (!error) setTeamRows(data || []);
   };
+  // Who can be put on a team. Uses the assignable_users() RPC; if that isn't installed yet,
+  // falls back to reading app_users directly (works for roles that may view Users).
+  // Never leaves the picker stuck on "Loading": failures end in an error + Retry.
   const loadPeople = async () => {
-    if (!supabase || access.setupMissing) return;
-    const { data, error } = await supabase.rpc("assignable_users");
-    if (!error) setPeople(data || []);
+    if (!supabase || access.setupMissing) { setPeople([]); return; }
+    setPeopleError(null);
+    const r = await supabase.rpc("assignable_users");
+    if (!r.error) { setPeople(r.data || []); return; }
+    const t = await supabase.from("app_users").select("email,full_name,role,active").eq("active", true).order("full_name");
+    if (!t.error && t.data?.length) { setPeople(t.data); return; }
+    setPeople([]);
+    setPeopleError(/assignable_users|schema cache|does not exist/i.test(r.error.message)
+      ? "The team feature isn't set up in the database yet — run the latest supabase-schema.sql, then retry."
+      : r.error.message);
   };
   useEffect(() => { loadTeams(); }, [userId, access.setupMissing]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (access.can("events", "edit") || access.can("users")) loadPeople(); }, [access.role, access.setupMissing]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -5635,7 +5656,7 @@ export default function App() {
             onOpen={openEventIn} onEdit={(ev) => { setOverviewId(null); editEvent(ev); }}
             onOpenCustomer={openCustomer} onOpenLead={openLead}
             onOpenFinance={(id) => { setOverviewId(null); setFinanceSel(id); loadSavedEvents(); setTab("finance"); }}
-            team={access.setupMissing ? null : { team: teamsByEvent[overviewId] || [], canManage: canManageTeams, people, onLoadPeople: loadPeople,
+            team={access.setupMissing ? null : { team: teamsByEvent[overviewId] || [], canManage: canManageTeams, people, peopleError, onLoadPeople: loadPeople,
               onAdd: (email, task) => addToTeam(overviewId, email, task), onRemove: (a) => removeFromTeam(overviewId, a) }} />
         )}
 
