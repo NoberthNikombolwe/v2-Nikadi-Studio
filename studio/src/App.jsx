@@ -129,10 +129,82 @@ const CSS = `
   .nk-table th.num, .nk-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .nk-table tbody tr { transition: background 0.15s; }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+  /* ── Navigation groups ── */
+  .nk-tab-group { display: flex; align-items: stretch; flex-shrink: 0; }
+  .nk-tab-group-label {
+    align-self: center; font-size: 9px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase;
+    color: ${N.textDim}; opacity: .7; padding: 0 4px 0 8px;
+  }
+  .nk-count { margin-left: 4px; background: ${N.red}; color: #fff; border-radius: 10px; padding: 0 6px; font-size: 10px; font-weight: 800; line-height: 16px; }
+  .nk-menu-btn {
+    display: none; width: 40px; height: 40px; border-radius: 10px; border: 1.5px solid ${N.border};
+    background: transparent; color: ${N.text}; cursor: pointer; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0;
+  }
+  .nk-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; max-width: 100%; }
+  .nk-drawer-overlay { position: fixed; inset: 0; z-index: 600; background: rgba(0,0,0,.55); animation: fadeIn .15s ease; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .nk-drawer {
+    position: absolute; top: 0; bottom: 0; left: 0; width: min(320px, 86vw); background: ${N.navy800};
+    border-right: 1px solid ${N.border}; display: flex; flex-direction: column; overflow-y: auto;
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px);
+    animation: drawerIn .2s ease; box-shadow: 8px 0 40px var(--nk-shadow);
+  }
+  @keyframes drawerIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+  .nk-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 12px; }
+  .nk-drawer-event { display: flex; align-items: center; gap: 8px; font-size: 12px; color: ${N.textMid}; background: ${N.navy700}; border: 1px solid ${N.border}; border-radius: 10px; padding: 8px 10px; margin: 0 4px 8px; min-width: 0; }
+  .nk-drawer-group { padding: 6px 0; border-bottom: 1px solid ${N.border}; }
+  .nk-drawer-label { font-size: 10px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: ${N.textDim}; padding: 8px 12px 4px; }
+  .nk-drawer-item {
+    width: 100%; display: flex; align-items: center; gap: 12px; padding: 11px 12px; min-height: 44px; border-radius: 10px;
+    border: none; background: transparent; color: ${N.textMid}; font: 600 14px 'Plus Jakarta Sans', sans-serif; cursor: pointer; text-align: left;
+  }
+  .nk-drawer-item:hover { background: ${N.navy700}; color: ${N.text}; }
+  .nk-drawer-item.active { background: ${alpha(N.accent,"1f")}; color: ${N.sky}; }
+  .nk-drawer-foot { margin-top: auto; padding-top: 8px; }
+  .nk-span2 { grid-column: span 2; }
+  .nk-table-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
+
+  /* ── Large tablets / small laptops ── */
+  @media (max-width: 1200px) {
+    .nk-hide-lg { display: none !important; }
+    .nk-tab { padding: 14px 12px; }
+    .nk-tab-group-label { display: none; }
+  }
+  /* ── Tablets: drawer navigation, stacked layouts ── */
+  @media (max-width: 900px) {
+    .nk-hide-md { display: none !important; }
+    .nk-menu-btn { display: inline-flex; }
+    .nk-tabs { display: none; }
+    .nk-header { padding: 0 14px; gap: 10px; height: 58px; }
+    .nk-header-actions { gap: 8px; }
+    .nk-body { flex-direction: column; overflow: visible; }
+    .nk-sidebar, .nk-sidebar-right { width: 100%; min-width: 0; border-right: none; border-left: none; border-bottom: 1px solid ${N.border}; overflow: visible; }
+    .nk-main, .nk-main-wide { padding: 18px 14px; overflow: visible; }
+    .nk-split > * { flex: 1 1 100% !important; max-width: 100% !important; position: static !important; max-height: none !important; min-width: 0; }
+    .nk-banner { margin: 10px 14px 0 !important; }
+    .nk-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    .nk-stat { min-width: 0; padding: 12px; }
+  }
+  /* ── Phones ── */
   @media (max-width: 640px) {
-    .nk-tabs { padding: 0 8px; }
-    .nk-tab { padding: 12px 12px; }
+    .nk-btn-label { display: none; }
+    .nk-header .nk-btn { padding: 0; width: 40px; }
+    .nk-logo-name { font-size: 16px; }
     .nk-btn { min-height: 40px; }
+    .nk-form-grid { grid-template-columns: 1fr; }
+    .nk-span2 { grid-column: auto; }
+    .nk-overlay { padding: 0; align-items: flex-end; }
+    .nk-modal { max-width: 100% !important; max-height: 94vh; border-radius: 18px 18px 0 0; padding-bottom: env(safe-area-inset-bottom, 0px); }
+    .nk-modal-head { padding: 18px 18px 0; margin-bottom: 14px; }
+    .nk-modal-body { padding: 0 18px 18px; }
+    .nk-modal-foot { padding: 0 18px 18px; flex-wrap: wrap; }
+    .nk-modal-foot .nk-btn, .nk-dialog-actions .nk-btn { flex: 1 1 auto; }
+    .nk-stats { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .nk-stat-num { font-size: 18px !important; }
+    .nk-table td, .nk-table thead th { padding: 9px 10px; }
+    .nk-activity { left: 12px; right: 12px; bottom: 12px; width: auto; max-width: none; }
+    .nk-page h2 { font-size: 18px !important; }
+    input, select, textarea { font-size: 16px !important; }   /* stops iOS zooming into fields */
   }
   .nk-tab.active { color: ${N.sky}; border-bottom-color: ${N.accent}; }
 
@@ -892,6 +964,14 @@ function LogSection({ title, color, styles, log, onClose }) {
 }
 
 const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
+// Main navigation, in groups (tab bar on wide screens, drawer on phones / tablets)
+const NAV_GROUPS = [
+  { label:"Sales",   items:[{ id:"events", label:"Events", icon:"folder" }, { id:"leads", label:"Leads", icon:"target" }, { id:"customers", label:"Customers", icon:"users" }] },
+  { label:"Studio",  items:[{ id:"design", label:"Design", icon:"palette" }, { id:"vcard", label:"VCard", icon:"contact" }, { id:"sms", label:"SMS", icon:"sms" },
+                            { id:"whatsapp", label:"WhatsApp", icon:"whatsapp" }, { id:"batch", label:"Batch & Send", icon:"table" }] },
+  { label:"Insight", items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
+  { label:"Money",   items:[{ id:"finance", label:"Finance", icon:"wallet" }] },
+];
 const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
 const THEME_ICONS  = { system:"monitor", light:"sun", dark:"moon" };
 
@@ -968,7 +1048,7 @@ function DueTag({ date, open = true }) {
 // Form field: label, the input, and an error line under it
 function Field({ label, error, span, children }) {
   return (
-    <div style={span ? { gridColumn:"span 2" } : undefined}>
+    <div className={span ? "nk-span2" : undefined}>
       <label className="nk-label">{label}</label>
       {children}
       {error && <div style={{fontSize:11,color:N.red,marginTop:-6,marginBottom:8}}>{error}</div>}
@@ -1342,7 +1422,7 @@ function CrmUnavailable({ error, onRetry }) {
   return (
     <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
       <EmptyState icon="database" tone="warn" title="Leads & customers aren't set up in the database yet"
-        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{error}</span></>}
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor (Dashboard → SQL Editor → New query → paste the whole file → Run), then press Retry. Already ran it? Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>NOTIFY pgrst, 'reload schema';</code> once and retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{error}</span></>}
         action={<button className="nk-btn nk-btn-ghost" onClick={onRetry}><Icon n="refresh" /> Retry</button>} />
     </div>
   );
@@ -1686,7 +1766,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
   if (fin.error) return (
     <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
       <EmptyState icon="wallet" tone="warn" title="Finance isn't set up in the database yet"
-        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{fin.error}</span></>}
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor (Dashboard → SQL Editor → New query → paste the whole file → Run), then press Retry. Already ran it? Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>NOTIFY pgrst, 'reload schema';</code> once and retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{fin.error}</span></>}
         action={<button className="nk-btn nk-btn-ghost" onClick={fin.loadAll}><Icon n="refresh" /> Retry</button>} />
     </div>
   );
@@ -1735,7 +1815,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
         <MoneyTile label="Margin"   value={formatPct(total.marginPct)} tone={MARGIN_TONE[marginTone(total.marginPct)]} sub={`${withTxns} event${withTxns === 1 ? "" : "s"} · ${total.count} transaction${total.count === 1 ? "" : "s"}`} />
       </div>
 
-      <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
+      <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
         <div style={{flex:"2 1 520px",minWidth:0}}>
           <input className="nk-input" style={{maxWidth:320,marginBottom:10}} placeholder="Search event, customer, venue…" value={q} onChange={e => setQ(e.target.value)} />
           <div className="nk-table-wrap" style={{margin:0}}>
@@ -1911,7 +1991,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
         <span style={{fontSize:11,color:N.textDim,marginLeft:"auto"}}>{rows.length} lead{rows.length === 1 ? "" : "s"}</span>
       </div>
 
-      <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
+      <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
         <div className="nk-table-wrap" style={{flex:"2 1 560px",margin:0}}>
           <table className="nk-table">
             <thead><tr>{["Lead","Event","Package","Region","Stage","Next follow-up"].map(h => <th key={h}>{h}</th>)}</tr></thead>
@@ -2052,7 +2132,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
 
       <input className="nk-input" style={{maxWidth:320}} placeholder="Search name, phone, region…" value={q} onChange={e => setQ(e.target.value)} />
 
-      <div style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
+      <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
         <div className="nk-table-wrap" style={{flex:"2 1 480px",margin:0}}>
           <table className="nk-table">
             <thead><tr>{["Customer","Region","Events","Since"].map(h => <th key={h}>{h}</th>)}</tr></thead>
@@ -2355,6 +2435,17 @@ export default function App() {
 
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
+  const [menuOpen, setMenuOpen] = useState(false);   // mobile navigation drawer
+  // Switches tab from the tab bar or drawer (some tabs refresh their event list first)
+  const goTab = (id) => { if (id === "events" || id === "finance") loadSavedEvents(); setTab(id); setMenuOpen(false); };
+  // Esc closes the drawer; the page behind it doesn't scroll while it's open
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
+  }, [menuOpen]);
 
   /* ── Theme ── */
   // "system" follows the browser's light/dark setting (CSS media query in index.css);
@@ -2705,6 +2796,7 @@ export default function App() {
   useEffect(() => { if (userId) crm.loadEventCounts(); }, [savedEvents]); // eslint-disable-line react-hooks/exhaustive-deps
   const customerById = Object.fromEntries(crm.customers.map(c => [c.id, c]));
   const leadSummary  = summariseLeads(crm.leads);
+  const leadsDue     = leadSummary.dueToday + leadSummary.overdue;
   // Cross-links between the Leads / Customers tabs, the overview and the event tabs
   const openLead     = (id) => { setOverviewId(null); setLeadSel(id); setTab("leads"); };
   const openCustomer = (id) => { setOverviewId(null); setCustomerSel(id); setTab("customers"); };
@@ -4069,37 +4161,42 @@ export default function App() {
 
         {/* Header */}
         <header className="nk-header">
+          <button className="nk-menu-btn" onClick={() => setMenuOpen(true)} aria-label="Open menu" aria-expanded={menuOpen}>
+            <Icon n="menu" />
+          </button>
           <div className="nk-logo">
             <div className="nk-logo-icon">N</div>
             <div>
               <div className="nk-logo-name">Nikadi Studio</div>
-              <div className="nk-logo-tag">Card Design & Dispatch</div>
+              <div className="nk-logo-tag nk-hide-md">Card Design & Dispatch</div>
             </div>
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:16}}>
+          <div className="nk-hide-md" style={{display:"flex",alignItems:"center",gap:6,marginLeft:16}}>
             <div className={`nk-db-dot ${dbDot}`} title={dbStatus} />
             <span style={{fontSize:11,color:N.textDim}}>{dbStatus === "connected" ? <>Supabase <Icon n="check" /></> : dbStatus === "unconfigured" ? "No DB" : "DB Error"}</span>
           </div>
           <div className="nk-header-actions">
             {savedEventId && (
-              <span style={{fontSize:11,color:N.green,fontFamily:"JetBrains Mono, monospace"}}>
+              <span className="nk-hide-lg nk-ellipsis" style={{fontSize:11,color:N.green,fontFamily:"JetBrains Mono, monospace",maxWidth:220}}>
                 <Icon n="dot" /> {eventData.username||"Event"}{eventData.event_type ? ` · ${eventData.event_type}` : ""}
               </span>
             )}
-            <button className="nk-btn nk-btn-success" onClick={sendWaAll} disabled={bulkSending}>
-              {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`WA Send All (${records.filter(r=>r.phone).length})`}</>}
+            <button className="nk-btn nk-btn-success" onClick={sendWaAll} disabled={bulkSending}
+              title="Send every card on WhatsApp" aria-label={`WhatsApp send all (${records.filter(r=>r.phone).length})`}>
+              {bulkSending ? <Icon n="loader" /> : <Icon n="whatsapp" />}
+              <span className="nk-btn-label">{bulkSending ? "Sending…" : `WA Send All (${records.filter(r=>r.phone).length})`}</span>
             </button>
-            <button className="nk-btn nk-btn-primary" onClick={downloadAll}>
-              <Icon n="download" /> Download All ({records.length})
+            <button className="nk-btn nk-btn-primary" onClick={downloadAll} title="Download every card" aria-label={`Download all ${records.length} cards`}>
+              <Icon n="download" /> <span className="nk-btn-label">Download All ({records.length})</span>
             </button>
             {/* Theme: System (follows the browser) → Light → Dark */}
-            <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}}
+            <button className="nk-btn nk-btn-ghost nk-hide-md" style={{padding:"6px 10px",fontSize:12}}
               onClick={()=>setThemePref(nextThemePref(themePref))}
               title={`Theme: ${THEME_LABELS[themePref]} — click to change`}
               aria-label={`Theme: ${THEME_LABELS[themePref]}. Click to change.`}>
               <Icon n={THEME_ICONS[themePref]} /> {THEME_LABELS[themePref]}
             </button>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
+            <div className="nk-hide-md" style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
               {user.user_metadata?.avatar_url && (
                 <img src={user.user_metadata.avatar_url} alt="" style={{width:28,height:28,borderRadius:"50%",objectFit:"cover"}} />
               )}
@@ -4117,31 +4214,67 @@ export default function App() {
           </div>
         </header>
 
-        {/* Tabs */}
-        <nav className="nk-tabs">
-          <button className={`nk-tab${tab==="events"?" active":""}`}    onClick={()=>{ loadSavedEvents(); setTab("events"); }}><Icon n="folder" /> Events</button>
-          <button className={`nk-tab${tab==="leads"?" active":""}`}     onClick={()=>setTab("leads")}>
-            <Icon n="target" /> Leads
-            {leadSummary.dueToday + leadSummary.overdue > 0 && (
-              <span title="Follow-ups due today or overdue"
-                style={{marginLeft:6,background:N.red,color:"#fff",borderRadius:10,padding:"0 6px",fontSize:10,fontWeight:800}}>
-                {leadSummary.dueToday + leadSummary.overdue}
-              </span>
-            )}
-          </button>
-          <button className={`nk-tab${tab==="customers"?" active":""}`} onClick={()=>setTab("customers")}><Icon n="users" /> Customers</button>
-          <span className="nk-tab-sep" aria-hidden="true" />
-          <button className={`nk-tab${tab==="design"?" active":""}`}    onClick={()=>setTab("design")}><Icon n="palette" /> Design</button>
-          <button className={`nk-tab${tab==="vcard"?" active":""}`}     onClick={()=>setTab("vcard")}><Icon n="contact" /> VCard</button>
-          <button className={`nk-tab${tab==="sms"?" active":""}`}       onClick={()=>setTab("sms")}><Icon n="sms" /> SMS</button>
-          <button className={`nk-tab${tab==="whatsapp"?" active":""}`}  onClick={()=>setTab("whatsapp")}><Icon n="whatsapp" /> WhatsApp</button>
-          <button className={`nk-tab${tab==="batch"?" active":""}`}     onClick={()=>setTab("batch")}><Icon n="table" /> Batch & Send</button>
-          <span className="nk-tab-sep" aria-hidden="true" />
-          <button className={`nk-tab${tab==="reports"?" active":""}`}   onClick={()=>setTab("reports")}><Icon n="report" /> Reports</button>
-          <button className={`nk-tab${tab==="history"?" active":""}`}   onClick={()=>setTab("history")}><Icon n="history" /> History</button>
-          <span className="nk-tab-sep" aria-hidden="true" />
-          <button className={`nk-tab${tab==="finance"?" active":""}`}   onClick={()=>{ loadSavedEvents(); setTab("finance"); }}><Icon n="wallet" /> Finance</button>
+        {/* Tabs — wide screens: grouped tab bar; small screens: the drawer below */}
+        <nav className="nk-tabs" aria-label="Main">
+          {NAV_GROUPS.map((g, gi) => (
+            <div key={g.label} className="nk-tab-group">
+              {gi > 0 && <span className="nk-tab-sep" aria-hidden="true" />}
+              <span className="nk-tab-group-label">{g.label}</span>
+              {g.items.map(it => (
+                <button key={it.id} className={`nk-tab${tab===it.id?" active":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
+                  <Icon n={it.icon} /> {it.label}
+                  {it.id === "leads" && leadsDue > 0 && <span className="nk-count" title="Follow-ups due today or overdue">{leadsDue}</span>}
+                </button>
+              ))}
+            </div>
+          ))}
         </nav>
+
+        {/* Mobile drawer */}
+        {menuOpen && (
+          <div className="nk-drawer-overlay" onClick={e => e.target === e.currentTarget && setMenuOpen(false)}>
+            <aside className="nk-drawer" role="dialog" aria-modal="true" aria-label="Menu">
+              <div className="nk-drawer-head">
+                <div className="nk-logo">
+                  <div className="nk-logo-icon">N</div>
+                  <div className="nk-logo-name">Nikadi Studio</div>
+                </div>
+                <button className="nk-modal-close" onClick={() => setMenuOpen(false)} aria-label="Close menu"><Icon n="x" /></button>
+              </div>
+              {savedEventId && (
+                <div className="nk-drawer-event"><Icon n="dot" style={{color:N.green}} /> <span className="nk-ellipsis">{eventData.username||"Event"}{eventData.event_type ? ` · ${eventData.event_type}` : ""}</span></div>
+              )}
+              <nav aria-label="Main">
+                {NAV_GROUPS.map(g => (
+                  <div key={g.label} className="nk-drawer-group">
+                    <div className="nk-drawer-label">{g.label}</div>
+                    {g.items.map(it => (
+                      <button key={it.id} className={`nk-drawer-item${tab===it.id?" active":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
+                        <Icon n={it.icon} /> <span style={{flex:1}}>{it.label}</span>
+                        {it.id === "leads" && leadsDue > 0 && <span className="nk-count">{leadsDue}</span>}
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </nav>
+              <div className="nk-drawer-foot">
+                <button className="nk-drawer-item" onClick={() => setThemePref(nextThemePref(themePref))}>
+                  <Icon n={THEME_ICONS[themePref]} /> <span style={{flex:1}}>Theme</span><span style={{fontSize:12,color:N.textDim}}>{THEME_LABELS[themePref]}</span>
+                </button>
+                <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px"}}>
+                  {user.user_metadata?.avatar_url
+                    ? <img src={user.user_metadata.avatar_url} alt="" style={{width:32,height:32,borderRadius:"50%",objectFit:"cover"}} />
+                    : <Icon n="user" size="1.4em" />}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div className="nk-ellipsis" style={{fontSize:13,color:N.text,fontWeight:600}}>{user.user_metadata?.full_name || user.email}</div>
+                    <div style={{fontSize:11,color:N.textDim,display:"flex",alignItems:"center",gap:5}}><span className={`nk-db-dot ${dbDot}`} /> {dbStatus === "connected" ? "Connected" : dbStatus === "unconfigured" ? "No database" : "Database error"}</div>
+                  </div>
+                  <button className="nk-btn nk-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={() => supabase?.auth.signOut()}>Sign out</button>
+                </div>
+              </div>
+            </aside>
+          </div>
+        )}
 
         {/* Info banners */}
         {tab==="batch" && (

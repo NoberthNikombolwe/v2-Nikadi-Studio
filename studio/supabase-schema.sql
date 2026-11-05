@@ -295,3 +295,6 @@ CREATE POLICY "authenticated_insert_wa_cards"
 -- If the wa-cards bucket was created by hand in the dashboard earlier, also open
 -- Storage > Policies and delete any leftover policy that grants INSERT/SELECT to
 -- `anon` or `public` on it — this script can't know their names.
+
+-- Tell the Data API (PostgREST) to reload its schema cache so new tables are usable at once
+NOTIFY pgrst, 'reload schema';
