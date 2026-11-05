@@ -1329,6 +1329,27 @@ function useCrm({ enabled, showToast, askDialog, logHistory, reloadEvents }) {
     finally { setBusy(false); }
   };
 
+  // Edits a follow-up. When it's the lead's newest one, its next date also becomes the
+  // lead's next follow-up date (that's what drives the due list). Resolves true when saved.
+  const updateFollowup = async (lead, f, { method, note, next }) => {
+    setBusy(true);
+    try {
+      const { data: row, error: e1 } = await supabase.from("lead_followups")
+        .update({ method, note, next_followup_date: next || null }).eq("id", f.id).select().single();
+      if (e1) throw e1;
+      const list = (followups[lead.id] || []).map(x => x.id === row.id ? row : x);
+      setFollowups(m => ({ ...m, [lead.id]: list }));
+      if (list[0]?.id === row.id && (lead.next_followup_date || null) !== (row.next_followup_date || null)) {
+        const { data: l, error: e2 } = await supabase.from("leads").update({ next_followup_date: row.next_followup_date }).eq("id", lead.id).select().single();
+        if (e2) throw e2;
+        putLead(l);
+      }
+      showToast("Follow-up updated", "success");
+      return true;
+    } catch (e) { fail("Could not update follow-up", e); return false; }
+    finally { setBusy(false); }
+  };
+
   // Moves a lead to another stage ("lost" asks first; reopening goes back to "contacted")
   const setLeadStatus = async (lead, status) => {
     if (status === "lost") {
@@ -1441,7 +1462,7 @@ function useCrm({ enabled, showToast, askDialog, logHistory, reloadEvents }) {
 
   return {
     leads, customers, eventCounts, followups, loading, busy, error,
-    loadAll, loadEventCounts, loadFollowups, saveLead, deleteLead, addFollowup, setLeadStatus, qualifyLead,
+    loadAll, loadEventCounts, loadFollowups, saveLead, deleteLead, addFollowup, updateFollowup, setLeadStatus, qualifyLead,
     saveCustomer, deleteCustomer, customerEvents,
   };
 }
@@ -1497,24 +1518,73 @@ function FollowupComposer({ onAdd, busy }) {
 }
 
 // Follow-ups, newest first
-function FollowupList({ items }) {
+// Follow-ups, newest first. With `onEdit(f, changes)` each entry gets an Edit button that
+// opens it inline (method, note, next follow-up date); onEdit resolves true when saved.
+function FollowupList({ items, onEdit, busy }) {
+  const [editId, setEditId] = useState(null);
   if (!items) return <EmptyState loading compact title="Loading follow-ups…" />;
   if (!items.length) return <EmptyState icon="phone" compact text="No follow-ups yet — log the first call or message above." />;
   return (
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       {items.map(f => {
+        if (f.id === editId) return (
+          <FollowupEditor key={f.id} initial={f} busy={busy} onCancel={() => setEditId(null)}
+            onSave={async (changes) => { if (await onEdit(f, changes)) setEditId(null); }} />
+        );
         const m = FOLLOWUP_METHODS[f.method] || FOLLOWUP_METHODS.other;
         return (
-          <div key={f.id} style={{borderLeft:`3px solid ${alpha(N.teal,"66")}`,padding:"4px 0 4px 10px"}}>
-            <div style={{fontSize:13,color:N.text,whiteSpace:"pre-wrap",lineHeight:1.5}}><Icon n={m.icon} /> {f.note}</div>
-            <div style={{fontSize:11,color:N.textDim,marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
-              <span>{fmtWhen(f.created_at)}</span>
-              {f.created_by && <span>{f.created_by}</span>}
-              {f.next_followup_date && <span style={{color:N.sky}}>Next: {fmtDay(f.next_followup_date)}</span>}
+          <div key={f.id} style={{borderLeft:`3px solid ${alpha(N.teal,"66")}`,padding:"4px 0 4px 10px",display:"flex",gap:8,alignItems:"flex-start"}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13,color:N.text,whiteSpace:"pre-wrap",lineHeight:1.5}}><Icon n={m.icon} /> {f.note}</div>
+              <div style={{fontSize:11,color:N.textDim,marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
+                <span>{fmtWhen(f.created_at)}</span>
+                {f.created_by && <span>{f.created_by}</span>}
+                {f.next_followup_date && <span style={{color:N.sky}}>Next: {fmtDay(f.next_followup_date)}</span>}
+              </div>
             </div>
+            {onEdit && (
+              <Sb bg="transparent" col={N.textDim} border={N.border} label="Edit follow-up" onClick={() => setEditId(f.id)} disabled={busy}>
+                <Icon n="edit" />
+              </Sb>
+            )}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Inline editor for one follow-up: how they were contacted, what was said, next date
+function FollowupEditor({ initial, onSave, onCancel, busy }) {
+  const [method, setMethod] = useState(initial.method || "other");
+  const [note,   setNote]   = useState(initial.note || "");
+  const [next,   setNext]   = useState(initial.next_followup_date || "");
+  const save = () => { if (note.trim()) onSave({ method, note: note.trim(), next }); };
+  return (
+    <div style={{background:N.navy700,border:`1px solid ${N.accent}`,borderRadius:10,padding:12}}
+      onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); onCancel(); } }}>
+      <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
+        {Object.entries(FOLLOWUP_METHODS).map(([k, m]) => (
+          <button key={k} type="button" onClick={() => setMethod(k)} aria-pressed={method === k}
+            style={{padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5,
+              background: method === k ? N.tealBg : "transparent", color: method === k ? N.teal : N.textMid,
+              border:`1px solid ${method === k ? N.teal : N.border}`}}>
+            <Icon n={m.icon} /> {m.label}
+          </button>
+        ))}
+      </div>
+      <textarea className="nk-input nk-textarea" rows={3} autoFocus value={note} onChange={e => setNote(e.target.value)} aria-label="Follow-up note" />
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <label style={{fontSize:11,color:N.textDim}}>Next follow-up</label>
+        <input type="date" className="nk-input" style={{width:"auto",marginBottom:0}} value={next} onChange={e => setNext(e.target.value)} aria-label="Next follow-up date" />
+        {next && <button type="button" className="nk-link" style={{fontSize:11}} onClick={() => setNext("")}>No date</button>}
+        <div style={{marginLeft:"auto",display:"flex",gap:6}}>
+          <button className="nk-btn nk-btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={onCancel}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" style={{padding:"6px 12px",fontSize:12}} onClick={save} disabled={busy || !note.trim()}>
+            {busy ? <Icon n="loader" /> : <Icon n="save" />} Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2109,7 +2179,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
             {open && lead.next_followup_date && (
               <div style={{fontSize:12,color:N.textMid,marginBottom:10}}>Next follow-up: <DueTag date={lead.next_followup_date} /></div>
             )}
-            <FollowupList items={crm.followups[lead.id]} />
+            <FollowupList items={crm.followups[lead.id]} busy={crm.busy} onEdit={(f, changes) => crm.updateFollowup(lead, f, changes)} />
           </div>
         ) : (
           <div style={{...panelStyle,textAlign:"center",color:N.textDim,fontSize:13,padding:40,position:"static"}}>
