@@ -6,7 +6,7 @@ import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, s
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
 import ScanPanel from "./ScanPanel";
-import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, canSeeTab, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE } from "./lib/permissions";
+import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE } from "./lib/permissions";
 import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, validateSenderId } from "./lib/settings";
 import { peopleForCardType, peopleLabel, scanTotals, validateCardRule } from "./lib/cardRules";
 import { buildQrPayload, matchByName, SCAN_REASON, newScanCode } from "./lib/scan";
