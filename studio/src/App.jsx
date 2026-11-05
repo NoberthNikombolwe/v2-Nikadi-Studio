@@ -186,6 +186,41 @@ const CSS = `
   .nk-drawer-item.active { background: ${alpha(N.accent,"1f")}; color: ${N.sky}; }
   .nk-drawer-foot { margin-top: auto; padding-top: 8px; }
   .nk-span2 { grid-column: span 2; }
+  /* ── No-access screen ── */
+  .nk-noaccess {
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+    padding: calc(env(safe-area-inset-top, 0px) + 24px) 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
+    background: radial-gradient(ellipse at top, ${alpha(N.accent,"22")}, transparent 60%), ${N.navy900};
+  }
+  .nk-noaccess-card {
+    width: 100%; max-width: 480px; background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 20px;
+    padding: 28px; box-shadow: 0 24px 64px var(--nk-shadow); text-align: center; animation: modalIn .25s ease;
+  }
+  .nk-noaccess-brand { display: flex; align-items: center; justify-content: center; gap: 10px; text-align: left; margin-bottom: 24px; }
+  .nk-noaccess-lock {
+    width: 72px; height: 72px; margin: 0 auto 14px; border-radius: 50%; display: grid; place-items: center; font-size: 32px;
+    color: ${N.amber}; background: ${alpha(N.amber,"1a")}; box-shadow: 0 0 0 8px ${alpha(N.amber,"0d")};
+  }
+  .nk-noaccess-title { font-size: 22px; font-weight: 800; color: ${N.text}; margin-bottom: 8px; }
+  .nk-noaccess-lead { font-size: 14px; color: ${N.textMid}; line-height: 1.55; max-width: 380px; margin: 0 auto 20px; }
+  .nk-noaccess-account {
+    display: flex; align-items: center; gap: 12px; text-align: left; padding: 12px; margin-bottom: 20px;
+    background: ${N.navy700}; border: 1px solid ${N.border}; border-radius: 14px;
+  }
+  .nk-noaccess-avatar { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+  .nk-noaccess-avatar-empty { display: grid; place-items: center; background: ${N.navy600}; color: ${N.textMid}; font-size: 18px; }
+  .nk-noaccess-steps { list-style: none; text-align: left; display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }
+  .nk-noaccess-steps li { display: flex; gap: 12px; align-items: flex-start; }
+  .nk-noaccess-step-no {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center;
+    font-size: 12px; font-weight: 800; color: ${N.sky}; background: ${alpha(N.sky,"1a")}; border: 1px solid ${alpha(N.sky,"44")};
+  }
+  .nk-noaccess-step-title { font-weight: 700; font-size: 13px; color: ${N.text}; display: flex; align-items: center; gap: 6px; }
+  .nk-noaccess-step-text { font-size: 12px; color: ${N.textDim}; margin-top: 2px; line-height: 1.45; }
+  .nk-noaccess-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .nk-noaccess-actions .nk-btn { flex: 1 1 180px; min-height: 44px; }
+  .nk-noaccess-foot { font-size: 12px; color: ${N.textDim}; text-align: center; max-width: 420px; }
+  @media (max-width: 480px) { .nk-noaccess-card { padding: 22px 18px; border-radius: 16px; } .nk-noaccess-title { font-size: 19px; } }
   /* ── Guide ── */
   .nk-guide-progress { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; padding: 16px 18px; margin-bottom: 18px; display: flex; flex-direction: column; gap: 10px; }
   .nk-guide-bar { height: 8px; border-radius: 4px; background: ${N.navy700}; overflow: hidden; }
@@ -2444,15 +2479,69 @@ function useAccess({ userId, email, showToast }) {
 }
 
 // Shown when the signed-in account isn't an active user of the system
-function NoAccess({ email, onSignOut, onRetry }) {
+function NoAccess({ email, name, avatar, onSignOut, onRetry }) {
+  const [checking, setChecking] = useState(false);
+  const [copied, setCopied]     = useState(false);
+  const retry = async () => { setChecking(true); try { await onRetry(); } finally { setChecking(false); } };
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(email); setCopied(true); setTimeout(() => setCopied(false), 2500); }
+    catch { /* clipboard blocked: the email is shown on screen to copy by hand */ }
+  };
+  const steps = [
+    ["users", "Ask an administrator", "A Superuser or Admin of Nikadi Studio can give you access."],
+    ["settings", "They invite this email", "In Settings → Users → Invite user, with the role you need."],
+    ["refresh", "Come back and check again", "Your workspace opens straight away — no need to sign in again."],
+  ];
   return (
-    <div style={{minHeight:"100vh",background:N.navy900,display:"grid",placeItems:"center",padding:16}}>
-      <div style={{maxWidth:440,width:"100%",background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16}}>
-        <EmptyState icon="lock" tone="warn" title="You don't have access yet"
-          text={<>The account <strong style={{color:N.text}}>{email}</strong> hasn't been given a role in Nikadi Studio, or it was deactivated. Ask an administrator to invite you in Settings → Users.</>}
-          action={<><button className="nk-btn nk-btn-ghost" onClick={onRetry}><Icon n="refresh" /> Check again</button>
-                    <button className="nk-btn nk-btn-primary" onClick={onSignOut}>Sign out</button></>} />
+    <div className="nk-noaccess">
+      <style>{CSS}</style>
+      <div className="nk-noaccess-card" role="main" aria-labelledby="nk-noaccess-title">
+        <div className="nk-noaccess-brand">
+          <div className="nk-logo-icon">N</div>
+          <div>
+            <div className="nk-logo-name">Nikadi Studio</div>
+            <div className="nk-logo-tag">Card Design &amp; Dispatch</div>
+          </div>
+        </div>
+
+        <div className="nk-noaccess-lock" aria-hidden="true"><Icon n="lock" /></div>
+        <h1 id="nk-noaccess-title" className="nk-noaccess-title">You don't have access yet</h1>
+        <p className="nk-noaccess-lead">
+          You're signed in, but this account hasn't been given a role in Nikadi Studio — or its access was turned off.
+        </p>
+
+        <div className="nk-noaccess-account">
+          {avatar ? <img src={avatar} alt="" className="nk-noaccess-avatar" /> : <span className="nk-noaccess-avatar nk-noaccess-avatar-empty"><Icon n="user" /></span>}
+          <div style={{flex:1,minWidth:0}}>
+            {name && <div className="nk-ellipsis" style={{fontWeight:700,color:N.text,fontSize:14}}>{name}</div>}
+            <div className="nk-ellipsis" style={{fontSize:13,color:N.textMid,fontFamily:"JetBrains Mono, monospace"}}>{email}</div>
+          </div>
+          <button type="button" className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={copy}
+            aria-label="Copy your email to send to an administrator" title="Copy email">
+            <Icon n={copied ? "check" : "copy"} /> {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+
+        <ol className="nk-noaccess-steps">
+          {steps.map(([ic, t, d], i) => (
+            <li key={t}>
+              <span className="nk-noaccess-step-no">{i + 1}</span>
+              <div>
+                <div className="nk-noaccess-step-title"><Icon n={ic} /> {t}</div>
+                <div className="nk-noaccess-step-text">{d}</div>
+              </div>
+            </li>
+          ))}
+        </ol>
+
+        <div className="nk-noaccess-actions">
+          <button className="nk-btn nk-btn-primary" onClick={retry} disabled={checking}>
+            <Icon n={checking ? "loader" : "refresh"} /> {checking ? "Checking…" : "Check again"}
+          </button>
+          <button className="nk-btn nk-btn-ghost" onClick={onSignOut}>Use a different account</button>
+        </div>
       </div>
+      <p className="nk-noaccess-foot">Signed in with the wrong Google account? Choose <strong>Use a different account</strong> to sign out.</p>
     </div>
   );
 }
@@ -5367,10 +5456,11 @@ export default function App() {
   if (!user) return <LoginPage />;
   if (access.loading) return (
     <div style={{minHeight:"100vh",background:N.navy900,display:"grid",placeItems:"center"}}>
+      <style>{CSS}</style>
       <EmptyState loading title="Checking your access…" />
     </div>
   );
-  if (!access.setupMissing && !access.role) return <NoAccess email={user.email} onRetry={access.loadAll} onSignOut={() => supabase?.auth.signOut()} />;
+  if (!access.setupMissing && !access.role) return <NoAccess email={user.email} name={user.user_metadata?.full_name} avatar={user.user_metadata?.avatar_url} onRetry={access.loadAll} onSignOut={() => supabase?.auth.signOut()} />;
   const tabModule = TAB_MODULE[tab];
   const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && !access.can(tabModule, "edit");
 
