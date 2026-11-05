@@ -411,6 +411,8 @@ BEGIN
    WHERE email = lower(NEW.email);
   RETURN NEW;
 END $$;
+-- The older scanner-branch SQL used an allowed_users list; app_users replaces it
+DROP TRIGGER IF EXISTS trg_enforce_allowed_signup ON auth.users;
 DROP TRIGGER IF EXISTS trg_enforce_invited_signup ON auth.users;
 CREATE TRIGGER trg_enforce_invited_signup BEFORE INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.enforce_invited_signup();
@@ -561,7 +563,11 @@ ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS call_by         TEXT;
 DO $$ BEGIN
   ALTER TABLE event_cards ADD CONSTRAINT event_cards_scan_count_valid CHECK (scan_count >= 0 AND scan_count <= max_scans);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
+-- The older scanner-branch SQL stored P / B; convert to the new values first
+UPDATE event_cards SET call_status = CASE lower(call_status) WHEN 'p' THEN 'picked' WHEN 'b' THEN 'busy'
+  WHEN 'yes' THEN 'yes' WHEN 'no' THEN 'no' ELSE NULL END
+ WHERE call_status IS NOT NULL AND call_status NOT IN ('picked','busy','yes','no');
+DO $ BEGIN
   ALTER TABLE event_cards ADD CONSTRAINT event_cards_call_status_valid CHECK (call_status IS NULL OR call_status IN ('picked','busy','yes','no'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -588,6 +594,7 @@ BEGIN
   RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS trg_event_cards_max_scans ON event_cards;
+DROP FUNCTION IF EXISTS public.sync_event_card_max_scans();
 CREATE TRIGGER trg_event_cards_max_scans BEFORE INSERT OR UPDATE OF card_type ON event_cards
   FOR EACH ROW EXECUTE FUNCTION public.sync_card_max_scans();
 
@@ -622,6 +629,11 @@ CREATE TABLE IF NOT EXISTS scan_logs (
   scanned_by    TEXT,
   scanned_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Upgrade a scan_logs table created by the older scanner-branch SQL
+ALTER TABLE scan_logs ADD COLUMN IF NOT EXISTS people     INT NOT NULL DEFAULT 1;
+ALTER TABLE scan_logs ADD COLUMN IF NOT EXISTS event_id   UUID REFERENCES events(id) ON DELETE CASCADE;
+ALTER TABLE scan_logs ADD COLUMN IF NOT EXISTS reason     TEXT;
+ALTER TABLE scan_logs ADD COLUMN IF NOT EXISTS scanned_by TEXT;
 CREATE INDEX IF NOT EXISTS idx_scan_logs_event ON scan_logs(event_id, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_event_cards_event ON event_cards(event_id);
 
