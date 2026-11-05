@@ -871,7 +871,7 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
     onSave({ ...form, package_price: price });
   };
   return (
-    <div className="nk-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
+    <div className="nk-overlay">
       <div className="nk-modal">
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Event" : "New Event"}</div>
@@ -1149,7 +1149,7 @@ function LeadModal({ initial, onSave, onClose, saving }) {
     if (!Object.keys(errs).length) onSave(form);
   };
   return (
-    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay">
       <div className="nk-modal">
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Lead" : "New Lead"}</div>
@@ -1208,7 +1208,7 @@ function CustomerModal({ initial, onSave, onClose, saving }) {
     if (!Object.keys(errs).length) onSave(form);
   };
   return (
-    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay">
       <div className="nk-modal" style={{maxWidth:520}}>
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Customer" : "New Customer"}</div>
@@ -1605,24 +1605,10 @@ const Info = ({ label, children }) => (
 );
 
 // Pop-up used to view one record's details (lead, customer, finance event) over its list.
-// Click outside, the ✕ or Esc closes it — Esc only when it's the top-most pop-up, so a form
-// opened from inside it (edit, add transaction) closes first.
+// It closes only through its ✕ button — never by clicking outside or pressing Esc.
 function DetailModal({ label, onClose, children, width = 640 }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key !== "Escape") return;
-      // top-most = highest z-index, then latest in the page
-      const all = [...document.querySelectorAll(".nk-overlay")];
-      const z = (el) => Number(getComputedStyle(el).zIndex) || 0;
-      const top = all.reduce((a, b) => (z(b) >= z(a) ? b : a), all[0]);
-      if (top === ref.current) onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
   return (
-    <div className="nk-overlay" ref={ref} onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay">
       <div className="nk-modal nk-detail" style={{maxWidth:width}} role="dialog" aria-modal="true" aria-label={label}>
         <button className="nk-modal-close nk-detail-close" onClick={onClose} aria-label={`Close ${label}`} title="Close"><Icon n="x" /></button>
         <div className="nk-detail-body">{children}</div>
@@ -1753,7 +1739,7 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
   const amount = parsePrice(form.amount);
   const isIncome = form.kind === "income";
   return (
-    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay">
       <div className="nk-modal" style={{maxWidth:560}}>
         <div className="nk-modal-head">
           <div>
@@ -1828,7 +1814,7 @@ function AccountsModal({ fin, onClose }) {
     if (await fin.saveAccount(form, editId)) { setForm(BLANK_ACCOUNT); setEditId(null); }
   };
   return (
-    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay">
       <div className="nk-modal" style={{maxWidth:680}}>
         <div className="nk-modal-head">
           <div className="nk-modal-title">Money accounts</div>
@@ -2380,7 +2366,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
   const count = (fn) => (d?.cards || []).filter(fn).length;
   const card = { background:N.navy700, border:`1px solid ${N.border}`, borderRadius:12, padding:14, marginBottom:12 };
   return (
-    <div className="nk-overlay nk-raise" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay nk-raise">
       <div className="nk-modal" style={{maxWidth:920}}>
         <div className="nk-modal-head">
           <div>
@@ -2690,13 +2676,6 @@ export default function App() {
     setDialog(null);
     resolve?.(value);
   };
-  // Esc cancels the open dialog
-  useEffect(() => {
-    if (!dialog) return;
-    const onKey = (e) => { if (e.key === "Escape") closeDialog(null); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [dialog]);
 
   /* ── Auth ── */
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
@@ -4259,7 +4238,7 @@ export default function App() {
 
         {/* Choice dialog (bulk-send / re-send confirmations) */}
         {dialog && (
-          <div className="nk-overlay nk-top" onClick={e => e.target===e.currentTarget && closeDialog(null)}>
+          <div className="nk-overlay nk-top">
             <div className="nk-dialog" role="dialog" aria-modal="true" aria-labelledby="nk-dialog-title">
               <div className="nk-dialog-title" id="nk-dialog-title">{dialog.title}</div>
               <div className="nk-dialog-body">{dialog.body}</div>
