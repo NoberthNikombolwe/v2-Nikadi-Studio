@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useId } from "react";
+import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
@@ -406,6 +406,21 @@ const CSS = `
   .nk-table tbody tr:hover { background: ${alpha(N.navy700,"44")}; }
   .nk-table tbody tr.row-active { background: rgba(59,130,246,0.06); }
   .nk-table td { padding: 10px 14px; font-size: 13px; border-bottom: 1px solid ${alpha(N.border,"22")}; vertical-align: middle; }
+  /* One line per cell: long text is cut with "…" (full text on hover), never wrapped */
+  .nk-table th, .nk-table td { white-space: nowrap; }
+  .nk-table td { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+  .nk-table td > div, .nk-table td > span:not(.nk-badge) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .nk-table td > div[style*="flex"] { overflow: visible; }
+  .nk-table td:has(.nk-btn-sm), .nk-table td:has(input), .nk-table td:has(select) { max-width: none; overflow: visible; }
+  .nk-table thead th { position: sticky; top: 0; z-index: 1; }
+  .nk-table tbody tr:nth-child(even) { background: ${alpha(N.navy700,"22")}; }
+  /* Row actions: icons only inside tables (name in tooltip + aria-label) */
+  .nk-table .nk-btn-sm.has-icon .nk-sb-label { display: none; }
+  .nk-table .nk-btn-sm { height: 30px; border-radius: 8px; }
+  .nk-table .nk-btn-sm.has-icon, .nk-table .nk-btn-sm.icon-only { width: 30px; padding: 0; justify-content: center; font-size: 14px; }
+  .nk-table .nk-btn-sm:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.15); }
+  .nk-row-actions { display: flex; gap: 6px; flex-wrap: nowrap; align-items: center; }
+
   .nk-table tbody tr:last-child td { border-bottom: none; }
 
   /* Badges */
@@ -753,11 +768,25 @@ function WaBadge({ status }) {
 }
 
 // Compact icon-style action button used inside table rows (WA/SMS/download/edit actions)
-function Sb({ bg, col, border, children, onClick, title, disabled }) {
+// Its text is wrapped in .nk-sb-label, which tables hide (icon-only buttons there), and
+// the text + `title` become the tooltip and accessible name so the action is always described.
+function Sb({ bg, col, border, children, onClick, title, disabled, label }) {
+  const icons = [], text = [];
+  const walk = (node) => Children.toArray(node).forEach(c => {
+    if (isValidElement(c) && c.type === Fragment) walk(c.props.children);
+    else if (isValidElement(c) && c.type === Icon) icons.push(c);
+    else text.push(c);
+  });
+  walk(children);
+  const plain = (n) => Children.toArray(n).map(c => typeof c === "string" || typeof c === "number" ? c : isValidElement(c) ? plain(c.props.children) : "").join("");
+  const name = (label || plain(text)).trim();
+  const tip  = name && title && title !== name ? `${name} — ${title}` : (name || title);
+  const hasText = text.some(c => typeof c !== "string" || c.trim());
   return (
-    <button className="nk-btn-sm" onClick={onClick} title={title} disabled={disabled}
+    <button type="button" className={`nk-btn-sm${icons.length ? (hasText ? " has-icon" : " icon-only") : ""}`} onClick={onClick} title={tip} aria-label={tip} disabled={disabled}
       style={{ background:bg, color:col, borderColor:border||alpha(col,"44"), opacity:disabled?0.5:1 }}>
-      {children}
+      {icons}
+      {hasText && <span className="nk-sb-label">{text}</span>}
     </button>
   );
 }
@@ -780,13 +809,13 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
         {editing ? (
           <span style={{display:"flex",gap:4,alignItems:"center"}}>
             <input value={phone} onChange={e=>setPhone(e.target.value)} onKeyDown={e=>e.key==="Enter"&&save()} autoFocus className="nk-phone-edit" />
-            <Sb bg={N.greenBg} col={N.green} onClick={save}><Icon n="check" /></Sb>
-            <Sb bg={N.redBg} col={N.red} onClick={()=>setEditing(false)}><Icon n="x" /></Sb>
+            <Sb bg={N.greenBg} col={N.green} onClick={save} label="Save phone number"><Icon n="check" /></Sb>
+            <Sb bg={N.redBg} col={N.red} onClick={()=>setEditing(false)} label="Cancel editing"><Icon n="x" /></Sb>
           </span>
         ) : (
           <span className="nk-phone-val">
             {rec.phone||<span style={{color:N.textDim}}>—</span>}
-            <Sb bg="transparent" col={N.textDim} border={N.border} onClick={startEdit} title="Edit"><Icon n="edit" /></Sb>
+            <Sb bg="transparent" col={N.textDim} border={N.border} onClick={startEdit} label="Edit phone number"><Icon n="edit" /></Sb>
           </span>
         )}
       </td>
@@ -797,18 +826,18 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
         </span>
       </td>
       <td>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-          {!rec.phone && <Sb bg={N.redBg} col={N.red} onClick={startEdit}>+ Add №</Sb>}
+        <div className="nk-row-actions">
+          {!rec.phone && <Sb bg={N.redBg} col={N.red} onClick={startEdit} label="Add phone number"><Icon n="plus" /> Add number</Sb>}
           <Sb bg={rec.uploadStatus==="uploaded"?N.greenBg:N.navy600} col={rec.uploadStatus==="uploaded"?N.green:N.sky}
             title={rec.uploadStatus==="uploaded"?"Card uploaded — click to re-upload":"Upload card to Supabase Storage"}
-            onClick={()=>onUpload(idx)} disabled={rec.uploadStatus==="uploading"}>
+            onClick={()=>onUpload(idx)} disabled={rec.uploadStatus==="uploading"} label={rec.uploadStatus==="uploaded" ? "Re-upload card" : "Upload card"}>
             {rec.uploadStatus==="uploading"?<><Icon n="loader" /></>:rec.uploadStatus==="uploaded"?<><Icon n="check" /></>:<><Icon n="cloud" /></>} Upload
           </Sb>
-          {rec.phone && <Sb bg={N.greenBg} col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending}>
+          {rec.phone && <Sb bg={N.greenBg} col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending} label="Send card on WhatsApp">
             {rec.waStatus===WA.sending?<><Icon n="loader" /></>:<><Icon n="whatsapp" /></>} WA
           </Sb>}
-          {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>onSendSms(idx)}><Icon n="sms" /> SMS</Sb>}
-          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)}><Icon n="download" /> PNG</Sb>
+          {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>onSendSms(idx)} label="Send SMS"><Icon n="sms" /> SMS</Sb>}
+          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)} label="Download card as PNG"><Icon n="download" /> PNG</Sb>
         </div>
       </td>
     </tr>
@@ -839,7 +868,7 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
       <div className="nk-modal">
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Event" : "New Event"}</div>
-          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -1117,7 +1146,7 @@ function LeadModal({ initial, onSave, onClose, saving }) {
       <div className="nk-modal">
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Lead" : "New Lead"}</div>
-          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -1176,7 +1205,7 @@ function CustomerModal({ initial, onSave, onClose, saving }) {
       <div className="nk-modal" style={{maxWidth:520}}>
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Customer" : "New Customer"}</div>
-          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -1739,8 +1768,13 @@ function AccountsModal({ fin, onClose }) {
                       <td className="num" style={{color:N.red}}>{formatTsh(t.expense)}</td>
                       <td className="num" style={{fontWeight:700,color:t.net < 0 ? N.red : N.text}}>{formatTsh(t.net)}</td>
                       <td style={{whiteSpace:"nowrap",textAlign:"right"}}>
-                        <button className="nk-btn nk-btn-ghost" style={{padding:"5px 10px",fontSize:11}} onClick={() => { setEditId(a.id); setForm({ name:a.name, type:a.type, number:a.number || "" }); }}><Icon n="edit" /> Edit</button>{" "}
-                        <button className="nk-btn nk-btn-ghost" style={{padding:"5px 10px",fontSize:11}} onClick={() => fin.toggleAccount(a)}>{a.active ? "Deactivate" : "Activate"}</button>
+                        <div className="nk-row-actions" style={{justifyContent:"flex-end"}}>
+                          <Sb bg="transparent" col={N.sky} border={N.border} label={`Edit ${a.name}`} onClick={() => { setEditId(a.id); setForm({ name:a.name, type:a.type, number:a.number || "" }); }}><Icon n="edit" /> Edit</Sb>
+                          <Sb bg="transparent" col={a.active ? N.amber : N.green} border={N.border} label={`${a.active ? "Deactivate" : "Activate"} ${a.name}`}
+                            title={a.active ? "Hide from new transactions; history is kept" : "Allow new transactions again"} onClick={() => fin.toggleAccount(a)}>
+                            <Icon n={a.active ? "ban" : "check"} /> {a.active ? "Deactivate" : "Activate"}
+                          </Sb>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -2067,7 +2101,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
               {open && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "lost")}><Icon n="xCircle" /> Lost</button>}
               {lead.status === "lost" && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "contacted")}><Icon n="undo" /> Reopen</button>}
               <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12,color:N.red}}
-                onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}><Icon n="trash" /></button>
+                aria-label="Delete lead" title="Delete lead" onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}><Icon n="trash" /></button>
             </div>
 
             <div className="nk-sec nk-sec-teal" style={{marginBottom:8}}>Follow-ups</div>
@@ -2168,7 +2202,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
               <div style={{display:"flex",gap:6}}>
                 <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => setEditing(customer)}><Icon n="edit" /> Edit</button>
                 <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12,color:N.red}}
-                  onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}><Icon n="trash" /></button>
+                  aria-label="Delete customer" title="Delete customer" onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}><Icon n="trash" /></button>
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
@@ -2268,7 +2302,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
               </div>
             )}
           </div>
-          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           {!d ? <EmptyState loading title="Loading event…" />
@@ -2436,6 +2470,16 @@ export default function App() {
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
   const [menuOpen, setMenuOpen] = useState(false);   // mobile navigation drawer
+  // Table cells are one line with "…"; hovering a cut-off cell shows its full text as a tooltip
+  useEffect(() => {
+    const onOver = (e) => {
+      const el = e.target.closest?.(".nk-table td, .nk-table td > div, .nk-table td > span");
+      if (!el || el.hasAttribute("title")) return;
+      if (el.scrollWidth > el.clientWidth + 1) el.setAttribute("title", el.textContent.trim());
+    };
+    document.addEventListener("mouseover", onOver);
+    return () => document.removeEventListener("mouseover", onOver);
+  }, []);
   // Switches tab from the tab bar or drawer (some tabs refresh their event list first)
   const goTab = (id) => { if (id === "events" || id === "finance") loadSavedEvents(); setTab(id); setMenuOpen(false); };
   // Esc closes the drawer; the page behind it doesn't scroll while it's open
@@ -4308,7 +4352,7 @@ export default function App() {
                         setEventData(BLANK_EVENT);
                         setEventSearch("");
                       }}
-                      style={{background:"none",border:"none",color:N.red,cursor:"pointer",fontSize:16}}
+                      aria-label="Clear selected event" title="Clear" style={{background:"none",border:"none",color:N.red,cursor:"pointer",fontSize:16}}
                     ><Icon n="x" /></button>
                   </div>
                 ) : (
@@ -4417,7 +4461,7 @@ export default function App() {
                         autoFocus
                       />
                       <button className="nk-btn nk-btn-primary" style={{fontSize:11,padding:"4px 10px"}} onClick={saveCurrentTemplate}>Save</button>
-                      <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setShowSaveTemplate(false)}><Icon n="x" /></button>
+                      <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setShowSaveTemplate(false)} aria-label="Cancel saving template" title="Cancel"><Icon n="x" /></button>
                     </div>
                   ) : (
                     <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:6}} onClick={()=>{ setShowSaveTemplate(true); setTemplateSaveName(""); }}>
@@ -4443,7 +4487,7 @@ export default function App() {
                         <button
                           className="nk-btn nk-btn-ghost"
                           style={{fontSize:10,padding:"3px 7px",color:N.red||"#f87171",flexShrink:0}}
-                          title="Delete template"
+                          title="Delete template" aria-label="Delete template"
                           onClick={()=>deleteSavedTemplate(tpl)}
                         ><Icon n="x" /></button>
                       </div>
@@ -4583,7 +4627,7 @@ export default function App() {
                               </span>
                             </td>
                             <td>
-                              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                              <div className="nk-row-actions">
                                 <Sb bg={N.navy600} col={N.green} border={alpha(N.green,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setOverviewId(ev.id); }}
                                   title="Customer, lead, follow-ups, sending and history for this event">
@@ -4617,7 +4661,7 @@ export default function App() {
                                 {ev.cover_image_url && (
                                   <Sb bg={N.navy700} col={N.textMid} border={N.border}
                                     onClick={(e)=>{ e.stopPropagation(); window.open(ev.cover_image_url,"_blank"); }}
-                                    title="View template">
+                                    label="View card template" title="Opens the template image in a new tab">
                                     <Icon n="image" />
                                   </Sb>
                                 )}
@@ -4770,7 +4814,7 @@ export default function App() {
                           <input className="nk-input" style={{flex:1}} value={activeExtra.title} maxLength={60}
                             onChange={e=>updateExtraMessage(activeExtra.id, { title: e.target.value })} />
                           <button className="nk-btn nk-btn-ghost" style={{padding:"4px 10px",fontSize:11,color:N.red}}
-                            onClick={()=>deleteExtraMessage(activeExtra)} title="Delete this message"><Icon n="trash" /></button>
+                            onClick={()=>deleteExtraMessage(activeExtra)} title="Delete this message" aria-label="Delete this message"><Icon n="trash" /></button>
                         </div>
                         <label className="nk-label">Send to</label>
                         <div style={{display:"flex",gap:5,marginBottom:8}}>
@@ -5050,7 +5094,7 @@ export default function App() {
                                   {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
                                 </span>
                               </td>
-                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>sendSmsToOne(i, activeMsgId)}><Icon n="sms" /> Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
+                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>sendSmsToOne(i, activeMsgId)} label="Send this SMS to the contact"><Icon n="sms" /> Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -5156,16 +5200,16 @@ export default function App() {
                               </td>
                               <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
                               <td>
-                                <div style={{display:"flex",gap:5}}>
+                                <div className="nk-row-actions">
                                   <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                     onClick={()=>uploadCardSingle(i)}
-                                    disabled={rec.uploadStatus==="uploading"}>
+                                    disabled={rec.uploadStatus==="uploading"} label="Upload card">
                                     {rec.uploadStatus==="uploading"?<><Icon n="loader" /></>:<><Icon n="cloud" /></>} Upload
                                   </Sb>
                                   {rec.phone && rec.cardUrl && (
                                     <Sb bg={N.greenBg} col={N.green}
                                       onClick={()=>sendWaSingle(i)}
-                                      disabled={rec.waStatus===WA.sending}>
+                                      disabled={rec.waStatus===WA.sending} label="Send card on WhatsApp">
                                       {rec.waStatus===WA.sending?<><Icon n="loader" /></>:<><Icon n="whatsapp" /></>} Send
                                     </Sb>
                                   )}
