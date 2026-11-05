@@ -1047,13 +1047,14 @@ function LogSection({ title, color, styles, log, onClose }) {
 }
 
 const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
+// Main navigation, in groups. eventOnly groups work on one event, so they only appear once an event is open.
 // Main navigation, in groups (tab bar on wide screens, drawer on phones / tablets)
 const NAV_GROUPS = [
   { label:"Sales",   items:[{ id:"events", label:"Events", icon:"folder" }, { id:"leads", label:"Leads", icon:"target" }, { id:"customers", label:"Customers", icon:"users" }] },
-  { label:"Studio",  items:[{ id:"design", label:"Design", icon:"palette" }, { id:"vcard", label:"VCard", icon:"contact" }, { id:"sms", label:"SMS", icon:"sms" },
+  { label:"Studio",  eventOnly:true, items:[{ id:"design", label:"Design", icon:"palette" }, { id:"vcard", label:"VCard", icon:"contact" }, { id:"sms", label:"SMS", icon:"sms" },
                             { id:"whatsapp", label:"WhatsApp", icon:"whatsapp" }, { id:"batch", label:"Batch & Send", icon:"table" }] },
-  { label:"Insight", items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
-  { label:"Guests",  items:[{ id:"calls", label:"Calls", icon:"phone" }, { id:"scanner", label:"Scanner", icon:"scan" }] },
+  { label:"Insight", eventOnly:true, items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
+  { label:"Guests",  eventOnly:true, items:[{ id:"calls", label:"Calls", icon:"phone" }, { id:"scanner", label:"Scanner", icon:"scan" }] },
   { label:"Money",   items:[{ id:"finance", label:"Finance", icon:"wallet" }] },
   { label:"Admin",   items:[{ id:"settings", label:"Settings", icon:"settings" }] },
   { label:"Help",    items:[{ id:"guide", label:"Guide", icon:"map" }] },
@@ -3947,12 +3948,13 @@ export default function App() {
   /* ── CRM: leads → follow-ups → customers → events ── */
   /* ── Access: my role, permissions and Settings data ── */
   const access = useAccess({ userId, email: user?.email, showToast });
-  const navGroups = access.setupMissing ? NAV_GROUPS : visibleNav(NAV_GROUPS, access.matrix, access.role);
-  // Leave a tab the role can't see (e.g. after a role change)
+  const navGroups = (access.setupMissing ? NAV_GROUPS : visibleNav(NAV_GROUPS, access.matrix, access.role))
+    .filter(g => !g.eventOnly || savedEventId);
+  // Leave a tab that is no longer in the menu (role change, or the event was closed)
   useEffect(() => {
-    if (access.loading || access.setupMissing || !access.role) return;
-    if (!canSeeTab(access.matrix, access.role, tab)) setTab(navGroups[0]?.items[0]?.id || "guide");
-  }, [access.loading, access.role, access.matrix, tab]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (access.loading || (!access.setupMissing && !access.role)) return;
+    if (!navGroups.some(g => g.items.some(it => it.id === tab))) setTab(navGroups[0]?.items[0]?.id || "guide");
+  }, [access.loading, access.role, access.matrix, tab, savedEventId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const crm = useCrm({ enabled: !!userId, showToast, askDialog, logHistory, reloadEvents: loadSavedEvents });
   const [leadSel,     setLeadSel]     = useState(null);   // lead open in the Leads tab
