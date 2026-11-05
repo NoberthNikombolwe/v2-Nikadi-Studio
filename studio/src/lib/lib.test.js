@@ -335,3 +335,22 @@ test("validateAccount requires a name", () => {
   assert.ok(validateAccount({}).name);
   assert.deepEqual(validateAccount({ name: "CRDB", type: "bank" }), {});
 });
+
+// ── guide ──
+import { GUIDE_STEPS, GUIDE_STAGES, guideProgress, stepsOfStage } from "./guide.js";
+
+test("every guide step belongs to a stage and has content", () => {
+  const stages = new Set(GUIDE_STAGES.map(s => s.id));
+  for (const s of GUIDE_STEPS) { assert.ok(stages.has(s.stage), s.id); assert.ok(s.title && s.what && s.why && s.tab && s.icon, s.id); }
+  assert.equal(GUIDE_STAGES.reduce((n, st) => n + stepsOfStage(st.id).length, 0), GUIDE_STEPS.length);
+});
+
+test("guideProgress counts completed steps and finds the next one", () => {
+  const empty = guideProgress();
+  assert.equal(empty.count, 0); assert.equal(empty.next, "lead");
+  const p = guideProgress({ hasLead: true, hasCustomer: true, hasEvent: true, hasDesign: true, guests: 5 });
+  assert.equal(p.next, "upload");
+  assert.equal(p.done.contacts, true);
+  const all = guideProgress({ hasLead: true, hasCustomer: true, hasEvent: true, hasDesign: true, guests: 1, uploaded: 1, waSent: 1, smsSent: 1, txns: 1 });
+  assert.equal(all.pct, 100); assert.equal(all.next, null);
+});

@@ -5,6 +5,7 @@ import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipie
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
+import { GUIDE_STAGES, GUIDE_STEPS, GUIDE_LINKS, stepsOfStage, guideProgress } from "./lib/guide";
 import { ACCOUNT_TYPES, TXN_KINDS, TXN_CATEGORIES, validateTransaction, txnToRow, validateAccount, summariseTransactions, marginTone, formatPct,
          summariseByAccount, summariseByCategory, groupByEvent, filterTransactions, sortTransactions, transactionExportRows } from "./lib/finance";
 import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
@@ -162,6 +163,46 @@ const CSS = `
   .nk-drawer-item.active { background: ${alpha(N.accent,"1f")}; color: ${N.sky}; }
   .nk-drawer-foot { margin-top: auto; padding-top: 8px; }
   .nk-span2 { grid-column: span 2; }
+  /* ── Guide ── */
+  .nk-guide-progress { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; padding: 16px 18px; margin-bottom: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .nk-guide-bar { height: 8px; border-radius: 4px; background: ${N.navy700}; overflow: hidden; }
+  .nk-guide-bar > div { height: 100%; border-radius: 4px; background: linear-gradient(90deg, ${N.accent}, ${N.green}); transition: width .6s ease; }
+  .nk-guide-map { display: flex; align-items: stretch; gap: 0; margin-bottom: 18px; }
+  .nk-guide-stage-wrap { display: flex; align-items: stretch; flex: 1 1 0; min-width: 0; }
+  .nk-guide-stage { flex: 1; min-width: 0; background: ${N.navy800}; border: 1px solid ${N.border}; border-top: 3px solid var(--c); border-radius: 14px; padding: 14px; }
+  .nk-guide-stage-head { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; min-height: 52px; }
+  .nk-guide-stage-no { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center; font-weight: 800; font-size: 12px; color: #fff; background: var(--c); }
+  .nk-guide-stage-title { font-weight: 800; font-size: 14px; color: ${N.text}; }
+  .nk-guide-stage-blurb { font-size: 11px; color: ${N.textDim}; line-height: 1.4; margin-top: 2px; }
+  .nk-guide-arrow { display: grid; place-items: center; padding: 0 6px; color: ${N.textDim}; font-size: 18px; flex-shrink: 0; }
+  .nk-guide-step {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer; font-family: inherit;
+    background: ${N.navy700}; border: 1px solid ${N.border}; border-radius: 10px; padding: 10px; color: ${N.text};
+    transition: transform .15s, border-color .15s, box-shadow .15s;
+  }
+  .nk-guide-step:hover { transform: translateY(-2px); border-color: var(--c); box-shadow: 0 6px 18px var(--nk-shadow); }
+  .nk-guide-step.is-next { border-color: var(--c); box-shadow: 0 0 0 3px ${alpha(N.accent,"22")}; }
+  .nk-guide-num { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center; font-size: 11px; font-weight: 800; border: 1.5px solid ${N.border}; color: ${N.textMid}; }
+  .nk-guide-ico { color: var(--c); font-size: 16px; display: grid; place-items: center; flex-shrink: 0; }
+  .nk-guide-title { display: block; font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nk-guide-where { display: block; font-size: 11px; color: ${N.textDim}; }
+  .nk-guide-links { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; padding: 16px 18px; }
+  .nk-guide-links-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+  .nk-guide-link { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .nk-guide-node { padding: 5px 10px; border-radius: 8px; background: ${N.navy700}; border: 1px solid ${N.border}; font-size: 12px; font-weight: 700; color: ${N.text}; white-space: nowrap; }
+  .nk-guide-edge { flex: 1; display: flex; align-items: center; gap: 4px; color: ${N.textDim}; font-size: 11px; min-width: 0; }
+  .nk-guide-edge > span { flex: 1; text-align: center; border-bottom: 1px dashed ${N.border}; padding-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nk-guide-block { background: ${N.navy700}; border: 1px solid ${N.border}; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; font-size: 13px; color: ${N.textMid}; line-height: 1.55; }
+  .nk-guide-block-label { font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: ${N.textDim}; margin-bottom: 4px; }
+  .nk-guide-welcome { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .nk-guide-welcome-item { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border-radius: 12px; background: ${N.navy700}; border: 1px solid ${N.border}; border-left: 3px solid var(--c); }
+  @media (max-width: 1100px) {
+    .nk-guide-map { flex-direction: column; }
+    .nk-guide-stage-wrap { flex-direction: column; }
+    .nk-guide-arrow { padding: 6px 0; transform: rotate(90deg); }
+    .nk-guide-stage-head { min-height: 0; }
+  }
+  @media (max-width: 640px) { .nk-guide-welcome { grid-template-columns: 1fr; } .nk-guide-links-grid { grid-template-columns: 1fr; } }
   .nk-overlay.nk-raise { z-index: 550; }
   .nk-overlay.nk-top { z-index: 700; }
   .nk-detail { position: relative; }
@@ -1007,6 +1048,7 @@ const NAV_GROUPS = [
                             { id:"whatsapp", label:"WhatsApp", icon:"whatsapp" }, { id:"batch", label:"Batch & Send", icon:"table" }] },
   { label:"Insight", items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
   { label:"Money",   items:[{ id:"finance", label:"Finance", icon:"wallet" }] },
+  { label:"Help",    items:[{ id:"guide", label:"Guide", icon:"map" }] },
 ];
 const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
 const THEME_ICONS  = { system:"monitor", light:"sun", dark:"moon" };
@@ -2050,6 +2092,194 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
   );
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   GUIDE — <GuideTab> (flow map, live progress for the open event, how records
+   connect) and <WelcomeModal> (first sign-in). Content lives in src/lib/guide.js.
+══════════════════════════════════════════════════════════════════════════ */
+const TAB_LABEL = { events:"Events", leads:"Leads", customers:"Customers", design:"Design", vcard:"VCard", sms:"SMS",
+  whatsapp:"WhatsApp", batch:"Batch & Send", reports:"Reports", history:"History", finance:"Finance", guide:"Guide" };
+const stepNo = Object.fromEntries(GUIDE_STEPS.map((st, i) => [st.id, i + 1]));
+
+// One step of the flow map: number (or tick when the open event has done it), icon, title
+function GuideStep({ step, done, isNext, onOpen }) {
+  const stage = GUIDE_STAGES.find(g => g.id === step.stage);
+  const col = TONE[stage.tone];
+  return (
+    <button type="button" className={`nk-guide-step${isNext ? " is-next" : ""}`} onClick={() => onOpen(step)}
+      aria-label={`Step ${stepNo[step.id]}: ${step.title}${done ? " (done)" : ""}${isNext ? " (next)" : ""}. Show details`}
+      style={{"--c": col}}>
+      <span className="nk-guide-num" style={done ? { background: N.green, borderColor: N.green, color: "#fff" } : undefined}>
+        {done ? <Icon n="check" /> : stepNo[step.id]}
+      </span>
+      <span className="nk-guide-ico"><Icon n={step.icon} /></span>
+      <span style={{flex:1,minWidth:0}}>
+        <span className="nk-guide-title">{step.title}</span>
+        <span className="nk-guide-where">{TAB_LABEL[step.tab]}{isNext ? " · next" : ""}</span>
+      </span>
+      <Icon n="arrowRight" style={{color:N.textDim}} />
+    </button>
+  );
+}
+
+// Guide tab: the whole workflow as a map, the open event's progress, and how records connect
+function GuideTab({ progress, eventName, onGo }) {
+  const [open, setOpen] = useState(null);   // step shown in the detail pop-up
+  const idx = open ? GUIDE_STEPS.findIndex(s => s.id === open.id) : -1;
+  const prev = idx > 0 ? GUIDE_STEPS[idx - 1] : null;
+  const next = idx >= 0 && idx < GUIDE_STEPS.length - 1 ? GUIDE_STEPS[idx + 1] : null;
+  const nextStep = GUIDE_STEPS.find(s => s.id === progress.next);
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px"}}>
+      <div style={{marginBottom:18}}>
+        <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>How Nikadi Studio works</h2>
+        <p style={{fontSize:12,color:N.textDim,marginTop:2}}>From the first enquiry to the last shilling — click any step to see what it does and where it leads.</p>
+      </div>
+
+      <div className="nk-guide-progress">
+        {eventName ? (
+          <>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:11,color:N.textDim,textTransform:"uppercase",letterSpacing:.8,fontWeight:700}}>Open event</div>
+                <div className="nk-ellipsis" style={{fontSize:16,fontWeight:800,color:N.text}}>{eventName}</div>
+              </div>
+              <div style={{fontSize:22,fontWeight:800,color:progress.pct === 100 ? N.green : N.sky}}>{progress.pct}%</div>
+            </div>
+            <div className="nk-guide-bar" role="progressbar" aria-valuenow={progress.pct} aria-valuemin={0} aria-valuemax={100} aria-label="Event progress">
+              <div style={{width:`${progress.pct}%`}} />
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",fontSize:12,color:N.textMid}}>
+              <span>{progress.count} of {progress.total} steps done</span>
+              {nextStep
+                ? <button className="nk-btn nk-btn-primary" style={{fontSize:12,padding:"7px 14px"}} onClick={() => onGo(nextStep.tab)}>
+                    Next: {nextStep.title} <Icon n="arrowRight" />
+                  </button>
+                : <span style={{color:N.green,fontWeight:700}}><Icon n="check" /> Every step done — great work!</span>}
+            </div>
+          </>
+        ) : (
+          <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+            <span className="nk-empty-icon" style={{width:44,height:44,fontSize:20,marginBottom:0,color:N.sky,background:alpha(N.sky,"1a")}}><Icon n="folder" /></span>
+            <div style={{flex:"1 1 220px"}}>
+              <div style={{fontWeight:700,color:N.text}}>Open an event to track its progress</div>
+              <div style={{fontSize:12,color:N.textDim}}>The map below ticks off each step as the event moves along.</div>
+            </div>
+            <button className="nk-btn nk-btn-primary" style={{fontSize:12}} onClick={() => onGo("events")}><Icon n="folder" /> Go to Events</button>
+          </div>
+        )}
+      </div>
+
+      <div className="nk-guide-map">
+        {GUIDE_STAGES.map((stage, si) => (
+          <div key={stage.id} className="nk-guide-stage-wrap">
+            <section className="nk-guide-stage" style={{"--c": TONE[stage.tone]}} aria-label={stage.label}>
+              <div className="nk-guide-stage-head">
+                <span className="nk-guide-stage-no">{si + 1}</span>
+                <div>
+                  <div className="nk-guide-stage-title">{stage.label}</div>
+                  <div className="nk-guide-stage-blurb">{stage.blurb}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {stepsOfStage(stage.id).map(step => (
+                  <GuideStep key={step.id} step={step} done={eventName && progress.done[step.id]} isNext={eventName && progress.next === step.id} onOpen={setOpen} />
+                ))}
+              </div>
+            </section>
+            {si < GUIDE_STAGES.length - 1 && <div className="nk-guide-arrow" aria-hidden="true"><Icon n="arrowRight" /></div>}
+          </div>
+        ))}
+      </div>
+
+      <div className="nk-guide-links">
+        <div className="nk-sec" style={{marginBottom:12}}><Icon n="link" /> How things connect</div>
+        <div className="nk-guide-links-grid">
+          {GUIDE_LINKS.map((l, i) => (
+            <div key={i} className="nk-guide-link">
+              <span className="nk-guide-node">{l.from}</span>
+              <span className="nk-guide-edge"><span>{l.label}</span><Icon n="arrowRight" /></span>
+              <span className="nk-guide-node">{l.to}</span>
+            </div>
+          ))}
+        </div>
+        <p style={{fontSize:12,color:N.textDim,marginTop:12,lineHeight:1.6}}>
+          The <strong style={{color:N.text}}>event</strong> is the centre of everything: open one, and the Design, SMS, WhatsApp, Reports and History tabs all work on it.
+          The <strong style={{color:N.text}}>Overview</strong> (eye icon in Events) shows one event's customer, lead, sending and profit together.
+        </p>
+      </div>
+
+      {open && (
+        <DetailModal label={open.title} onClose={() => setOpen(null)} width={560}>
+          <div style={{display:"flex",gap:14,alignItems:"center",marginBottom:16}}>
+            <span className="nk-empty-icon" style={{width:52,height:52,fontSize:24,marginBottom:0,
+              color:TONE[GUIDE_STAGES.find(g => g.id === open.stage).tone],background:alpha(TONE[GUIDE_STAGES.find(g => g.id === open.stage).tone],"1a")}}>
+              <Icon n={open.icon} />
+            </span>
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:11,color:N.textDim,fontWeight:700,textTransform:"uppercase",letterSpacing:.8}}>
+                Step {stepNo[open.id]} · {GUIDE_STAGES.find(g => g.id === open.stage).label}
+              </div>
+              <div style={{fontSize:18,fontWeight:800,color:N.text}}>{open.title}</div>
+            </div>
+          </div>
+          <div className="nk-guide-block"><div className="nk-guide-block-label">What you do</div>{open.what}</div>
+          <div className="nk-guide-block"><div className="nk-guide-block-label">Why it matters</div>{open.why}</div>
+          {open.tips.length > 0 && (
+            <div className="nk-guide-block">
+              <div className="nk-guide-block-label">Tips</div>
+              <ul style={{paddingLeft:18,display:"flex",flexDirection:"column",gap:4}}>{open.tips.map(t => <li key={t}>{t}</li>)}</ul>
+            </div>
+          )}
+          <div className="nk-guide-block">
+            <div className="nk-guide-block-label">Connected steps</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {prev && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setOpen(prev)}>Before: {prev.title}</button>}
+              {next && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setOpen(next)}>After: {next.title} <Icon n="arrowRight" /></button>}
+            </div>
+          </div>
+          <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16}}>
+            <button className="nk-btn nk-btn-ghost" onClick={() => setOpen(null)}>Close</button>
+            <button className="nk-btn nk-btn-primary" onClick={() => { setOpen(null); onGo(open.tab); }}>Go to {TAB_LABEL[open.tab]} <Icon n="arrowRight" /></button>
+          </div>
+        </DetailModal>
+      )}
+    </div>
+  );
+}
+
+// Shown once after the first sign-in: the four stages in one glance
+function WelcomeModal({ name, onClose, onGuide }) {
+  return (
+    <div className="nk-overlay nk-top">
+      <div className="nk-modal" style={{maxWidth:640}} role="dialog" aria-modal="true" aria-labelledby="nk-welcome-title">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title" id="nk-welcome-title">Welcome{name ? `, ${name.split(" ")[0]}` : ""}!</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close welcome" title="Close"><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body">
+          <p style={{fontSize:13,color:N.textMid,marginBottom:16,lineHeight:1.6}}>Nikadi Studio takes an event from the first enquiry to delivered cards and a clear profit — in four stages:</p>
+          <div className="nk-guide-welcome">
+            {GUIDE_STAGES.map((st, i) => (
+              <div key={st.id} className="nk-guide-welcome-item" style={{"--c": TONE[st.tone]}}>
+                <span className="nk-guide-stage-no">{i + 1}</span>
+                <div>
+                  <div style={{fontWeight:800,color:N.text,fontSize:13}}>{st.label}</div>
+                  <div style={{fontSize:12,color:N.textDim}}>{st.blurb}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p style={{fontSize:12,color:N.textDim,marginTop:14}}>You can reopen the guide any time from the <Icon n="help" /> Help button at the top.</p>
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Skip for now</button>
+          <button className="nk-btn nk-btn-primary" onClick={onGuide}><Icon n="map" /> Show me how it works</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Leads tab: pipeline numbers, filterable list (open leads with due follow-ups first) and
 // the selected lead's details, follow-ups and actions (qualify → customer, lost, reopen)
 function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
@@ -2926,6 +3156,26 @@ export default function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Transactions");
     XLSX.writeFile(wb, `Nikadi_Finance_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+  /* ── Guide: live progress of the open event + first-run welcome ── */
+  const openEventRow = savedEvents.find(e => e.id === savedEventId);   // DB row (has customer_id / lead_id)
+  const guide = guideProgress({
+    hasEvent:    !!savedEventId,
+    hasCustomer: !!openEventRow?.customer_id,
+    hasLead:     !!openEventRow?.lead_id || crm.leads.some(l => l.event_id && l.event_id === savedEventId),
+    hasDesign:   !!(coverUrl || bgImage),
+    guests:      records.filter(r => !r.sample).length,
+    uploaded:    records.filter(r => r.uploadStatus === "uploaded").length,
+    waSent:      records.filter(r => r.waStatus === WA.sent).length,
+    smsSent:     records.filter(r => r.smsStatus === SMS.sent || r.smsStatus === SMS.delivered).length,
+    txns:        savedEventId ? fin.txns.filter(t => t.event_id === savedEventId).length : 0,
+  });
+  useEffect(() => { if (tab === "guide" && !fin.loaded) fin.loadAll(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [welcome, setWelcome] = useState(() => { try { return !localStorage.getItem("nikadi_guide_seen"); } catch { return false; } });
+  const closeWelcome = (toGuide) => {
+    try { localStorage.setItem("nikadi_guide_seen", "1"); } catch { /* private mode: show again next time */ }
+    setWelcome(false);
+    if (toGuide) setTab("guide");
   };
   const newEventForCustomer = (c) => setModalEvent({ ...BLANK_EVENT, username: c.name, phone: c.phone || "", region: c.region || "", customer_id: c.id });
 
@@ -4301,6 +4551,10 @@ export default function App() {
             <button className="nk-btn nk-btn-primary" onClick={downloadAll} title="Download every card" aria-label={`Download all ${records.length} cards`}>
               <Icon n="download" /> <span className="nk-btn-label">Download All ({records.length})</span>
             </button>
+            <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => goTab("guide")}
+              title="How Nikadi Studio works" aria-label="Help: how Nikadi Studio works">
+              <Icon n="help" /> <span className="nk-btn-label">Help</span>
+            </button>
             {/* Theme: System (follows the browser) → Light → Dark */}
             <button className="nk-btn nk-btn-ghost nk-hide-md" style={{padding:"6px 10px",fontSize:12}}
               onClick={()=>setThemePref(nextThemePref(themePref))}
@@ -4341,6 +4595,8 @@ export default function App() {
             </div>
           ))}
         </nav>
+
+        {welcome && <WelcomeModal name={user.user_metadata?.full_name} onClose={() => closeWelcome(false)} onGuide={() => closeWelcome(true)} />}
 
         {/* Mobile drawer */}
         {menuOpen && (
@@ -4752,6 +5008,11 @@ export default function App() {
             {tab === "customers" && (
               <CustomersTab crm={crm} selectedId={customerSel} onSelect={setCustomerSel} eventsVersion={savedEvents}
                 onOpenEvent={setOverviewId} onOpenLead={openLead} onNewEvent={newEventForCustomer} />
+            )}
+
+            {/* ─── GUIDE ─── */}
+            {tab === "guide" && (
+              <GuideTab progress={guide} eventName={savedEventId ? (eventData.username || "Event") : null} onGo={goTab} />
             )}
 
             {/* ─── FINANCE ─── */}
