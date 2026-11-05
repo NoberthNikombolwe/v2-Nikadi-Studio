@@ -16,7 +16,7 @@ export const HISTORY_CHANNELS = {
 export const HISTORY_ACTIONS = {
   send: "Sent", status: "Delivery report", upload: "Card upload", bulk: "Bulk send",
   create: "Event created", update: "Event updated", contacts: "Contacts changed",
-  call: "Guest call", income: "Income recorded", txn_edit: "Transaction edited", expense: "Expense recorded", remove: "Transaction removed",
+  call: "Guest call", team: "Team changed", income: "Income recorded", txn_edit: "Transaction edited", expense: "Expense recorded", remove: "Transaction removed",
 };
 
 // Display order + tone (UI maps tone → colour) for each status

@@ -6,6 +6,7 @@ import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, s
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
 import ScanPanel from "./ScanPanel";
+import { TASK_SUGGESTIONS, groupAssignments, initials, eventsAssignedTo, assignableFor, validateAssignment } from "./lib/assignments";
 import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE } from "./lib/permissions";
 import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, validateSenderId } from "./lib/settings";
 import { peopleForCardType, peopleLabel, scanTotals, validateCardRule } from "./lib/cardRules";
@@ -186,6 +187,14 @@ const CSS = `
   .nk-drawer-item.active { background: ${alpha(N.accent,"1f")}; color: ${N.sky}; }
   .nk-drawer-foot { margin-top: auto; padding-top: 8px; }
   .nk-span2 { grid-column: span 2; }
+  .nk-avatars { display: inline-flex; align-items: center; }
+  .nk-avatar {
+    width: 28px; height: 28px; border-radius: 50%; display: inline-grid; place-items: center; flex-shrink: 0;
+    font-size: 10px; font-weight: 800; color: ${N.sky}; background: ${alpha(N.sky,"1f")};
+    border: 2px solid ${N.navy800}; margin-left: -6px; letter-spacing: .3px;
+  }
+  .nk-avatars .nk-avatar:first-child { margin-left: 0; }
+  .nk-avatar-more { color: ${N.textMid}; background: ${N.navy700}; }
   /* ── No-access screen ── */
   .nk-noaccess {
     min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
@@ -2406,14 +2415,15 @@ function useAccess({ userId, email, showToast }) {
       setSt(s => ({ ...s, loading: false, setupMissing: true, me: { email, role: "superuser", active: true } }));
       return;
     }
-    const [perms, sets, tpl, snd, rules] = await Promise.all([
+    const [perms, sets, tpl, snd, rules, roleRows] = await Promise.all([
       supabase.from("role_permissions").select("*"),
       supabase.from("app_settings").select("*"),
       supabase.from("wa_templates").select("*").order("sort").order("name"),
       supabase.from("sender_ids").select("*").order("sender_id"),
       supabase.from("card_type_rules").select("*").order("sort").order("name"),
+      supabase.from("app_roles").select("*").order("sort"),
     ]);
-    setSt({ loading: false, setupMissing: false, me: me.data || null,
+    setSt({ loading: false, setupMissing: false, me: me.data || null, roleRows: roleRows.data || [],
       matrix: perms.error ? null : matrixFromRows(perms.data),
       settings: settingsFromRows(sets.data || []), waTemplates: tpl.data || [], senderIds: snd.data || [], cardRules: rules.data || [] });
     if (me.data?.active) supabase.rpc("touch_last_seen").then(() => {}, () => {});
@@ -2475,7 +2485,17 @@ function useAccess({ userId, email, showToast }) {
     return true;
   };
 
-  return { ...st, role, can: allow, users, busy, loadAll, loadUsers, save, remove, makeDefault, savePermissions, saveSetting };
+  // Superuser always sees every event; other roles when their "sees all events" flag is on
+  const seesAllEvents = st.setupMissing || role === "superuser" || !!(st.roleRows || []).find(r => r.key === role)?.sees_all_events;
+  const setSeesAll = async (roleKey, value) => {
+    const { error } = await supabase.from("app_roles").update({ sees_all_events: value }).eq("key", roleKey);
+    if (error) return fail("Could not change event visibility", error);
+    showToast(`${ROLE_LABEL[roleKey]} now ${value ? "sees every event" : "sees only assigned events"}`, "success");
+    await loadAll();
+    return true;
+  };
+
+  return { ...st, role, can: allow, seesAllEvents, setSeesAll, users, busy, loadAll, loadUsers, save, remove, makeDefault, savePermissions, saveSetting };
 }
 
 // Shown when the signed-in account isn't an active user of the system
@@ -2717,6 +2737,10 @@ function PermissionsSettings({ access }) {
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
         {editable.map(r => <button key={r.key} style={segStyle(roleKey === r.key)} onClick={() => setRoleKey(r.key)}>{r.label}</button>)}
         <span style={{...segStyle(false),opacity:.7,cursor:"default",display:"inline-flex",alignItems:"center",gap:6}} title="Superusers always have every permission"><Icon n="lock" /> Superuser: everything</span>
+      </div>
+      <div style={{background:N.navy700,border:`1px solid ${N.border}`,borderRadius:10,padding:"10px 12px",marginBottom:12}}>
+        <Toggle checked={!!(access.roleRows || []).find(r => r.key === roleKey)?.sees_all_events} disabled={!canEdit}
+          onChange={v => access.setSeesAll(roleKey, v)} label={<><strong style={{color:N.text}}>Sees all events</strong> — otherwise only events they're assigned to or created</>} />
       </div>
       <p style={{fontSize:12,color:N.textDim,marginBottom:12}}>{ROLES.find(r => r.key === roleKey)?.description}. <strong style={{color:N.textMid}}>View</strong> shows the module; <strong style={{color:N.textMid}}>Edit</strong> also allows changes. The database enforces this too.</p>
       <div className="nk-table-wrap">
@@ -3530,7 +3554,77 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
 // Everything about one event in a single view: details, customer (and their other events),
 // the lead it came from with its follow-ups, card/send counts and the latest history.
 // Loads its own data; `onOpen(ev, tab)` jumps into the designer / report / history.
-function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCustomer, onOpenLead, onOpenFinance }) {
+// Overlapping initials for an event's team (first 3, then "+N"); full names in the tooltip
+function TeamAvatars({ team = [], max = 3 }) {
+  if (!team.length) return <span style={{fontSize:11,color:N.textDim}}>Not assigned</span>;
+  const names = team.map(a => `${a.full_name || a.email}${a.task ? ` (${a.task})` : ""}`).join(", ");
+  return (
+    <span className="nk-avatars" title={names} aria-label={`Team: ${names}`}>
+      {team.slice(0, max).map(a => <span key={a.email} className="nk-avatar">{initials(a.full_name, a.email)}</span>)}
+      {team.length > max && <span className="nk-avatar nk-avatar-more">+{team.length - max}</span>}
+    </span>
+  );
+}
+
+// The event's team inside the Overview: who's on it, their task, add / remove people
+function TeamPanel({ team = [], canManage, people, onLoadPeople, onAdd, onRemove, cardStyle }) {
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ email: "", task: "" });
+  const [errors, setErrors] = useState({});
+  const [busy, setBusy] = useState(false);
+  const listId = useId();
+  const open = () => { setAdding(true); setErrors({}); setForm({ email: "", task: "" }); if (!people) onLoadPeople(); };
+  const choices = assignableFor(people || [], team);
+  const submit = async () => {
+    const e = validateAssignment(form, team);
+    setErrors(e);
+    if (Object.keys(e).length) return;
+    setBusy(true);
+    const ok = await onAdd(form.email, form.task.trim() || null);
+    setBusy(false);
+    if (ok) setAdding(false);
+  };
+  return (
+    <div style={cardStyle}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div className="nk-sec" style={{margin:0}}><Icon n="users" /> Team</div>
+        {canManage && !adding && <Sb bg="transparent" col={N.sky} border={alpha(N.sky,"44")} label="Assign a person to this event" onClick={open}><Icon n="plus" /> Assign</Sb>}
+      </div>
+      {adding && (
+        <div style={{background:N.navy800,border:`1px solid ${N.accent}`,borderRadius:10,padding:10,marginBottom:10}}>
+          <label className="nk-label" htmlFor={listId + "p"}>Person</label>
+          <select id={listId + "p"} className="nk-select" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))}>
+            <option value="">{people ? (choices.length ? "— Choose a person —" : "Everyone is already on the team") : "Loading people…"}</option>
+            {choices.map(u => <option key={u.email} value={u.email}>{u.full_name ? `${u.full_name} — ${u.email}` : u.email} · {ROLE_LABEL[u.role] || u.role}</option>)}
+          </select>
+          {errors.email && <div style={{fontSize:11,color:N.red,marginTop:-6,marginBottom:8}}>{errors.email}</div>}
+          <label className="nk-label" htmlFor={listId + "t"}>Task on this event</label>
+          <input id={listId + "t"} className="nk-input" list={listId} maxLength={40} placeholder="e.g. Designer, Door / check-in" value={form.task}
+            onChange={e => setForm(f => ({ ...f, task: e.target.value }))} />
+          <datalist id={listId}>{TASK_SUGGESTIONS.map(t => <option key={t} value={t} />)}</datalist>
+          <div style={{display:"flex",justifyContent:"flex-end",gap:6}}>
+            <button className="nk-btn nk-btn-ghost" style={{padding:"6px 12px",fontSize:12}} onClick={() => setAdding(false)}>Cancel</button>
+            <button className="nk-btn nk-btn-primary" style={{padding:"6px 12px",fontSize:12}} onClick={submit} disabled={busy || !form.email}>
+              <Icon n={busy ? "loader" : "check"} /> Assign
+            </button>
+          </div>
+        </div>
+      )}
+      {team.length ? team.map(a => (
+        <div key={a.email} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:`1px solid ${N.border}`}}>
+          <span className="nk-avatar" style={{marginLeft:0}}>{initials(a.full_name, a.email)}</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div className="nk-ellipsis" style={{fontSize:13,fontWeight:700,color:N.text}}>{a.full_name || a.email}</div>
+            <div className="nk-ellipsis" style={{fontSize:11,color:N.textDim}}>{[a.task, a.full_name && a.email].filter(Boolean).join(" · ") || "No task set"}</div>
+          </div>
+          {canManage && <Sb bg="transparent" col={N.red} border={N.border} label={`Remove ${a.full_name || a.email} from this event`} onClick={() => onRemove(a)}><Icon n="x" /></Sb>}
+        </div>
+      )) : <EmptyState icon="users" compact text={canManage ? "Nobody is assigned yet. Assign the people working on this event — only they (and admins) will see it." : "Nobody is assigned yet."} />}
+    </div>
+  );
+}
+
+function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCustomer, onOpenLead, onOpenFinance, team }) {
   const [d, setD] = useState(null);   // fresh per event: the parent renders <EventOverview key={eventId}>
   useEffect(() => {
     let live = true;
@@ -3637,6 +3731,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
                   </div>
 
                   <div style={{flex:"1 1 320px",minWidth:0}}>
+                    {team && <TeamPanel {...team} cardStyle={card} />}
                     {d.money && (
                       <div style={card}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -3780,7 +3875,8 @@ export default function App() {
   const [eventSearch, setEventSearch] = useState("");
   const [eventDropdownOpen, setEventDropdownOpen] = useState(false);
   const [savedEvents,  setSavedEvents]  = useState([]);
-  const [eventsLoaded, setEventsLoaded] = useState(false);   // first events fetch finished (drives the loading state)
+  const [eventsLoaded, setEventsLoaded] = useState(false);
+  const loadTeamsRef = useRef(null);   // set once the teams loader exists (it's defined further down)   // first events fetch finished (drives the loading state)
   const [coverUrl,          setCoverUrl]          = useState(null);
   const [isSaving,          setIsSaving]          = useState(false);
   const [loadingTemplate,   setLoadingTemplate]   = useState(false);
@@ -3957,6 +4053,7 @@ export default function App() {
   // Fetches the 50 most-recent events from Supabase for the Events tab / search dropdown
   const loadSavedEvents = async () => {
     if (!supabase) return [];
+    loadTeamsRef.current?.();
     const { data, error } = await supabase.from("events").select("*").order("created_at", { ascending:false }).limit(50);
     setEventsLoaded(true);
     if (!error && data) { setSavedEvents(data); return data; }
@@ -4103,6 +4200,46 @@ export default function App() {
     if (access.loading || (!access.setupMissing && !access.role)) return;
     if (!navGroups.some(g => g.items.some(it => it.id === tab))) setTab(navGroups[0]?.items[0]?.id || "guide");
   }, [access.loading, access.role, access.matrix, tab, savedEventId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ── Event teams (event_assignments) ── */
+  const [teamRows, setTeamRows] = useState([]);
+  const [people, setPeople]     = useState(null);   // assignable users (names for avatars + the picker)
+  const loadTeams = async () => {
+    if (!supabase || !userId || access.setupMissing) return;
+    const { data, error } = await supabase.from("event_assignments").select("*");
+    if (!error) setTeamRows(data || []);
+  };
+  const loadPeople = async () => {
+    if (!supabase || access.setupMissing) return;
+    const { data, error } = await supabase.rpc("assignable_users");
+    if (!error) setPeople(data || []);
+  };
+  useEffect(() => { loadTeams(); }, [userId, access.setupMissing]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (access.can("events", "edit") || access.can("users")) loadPeople(); }, [access.role, access.setupMissing]); // eslint-disable-line react-hooks/exhaustive-deps
+  const nameOf = Object.fromEntries((people || []).map(u => [u.email, u.full_name]));
+  const teamsByEvent = groupAssignments(teamRows.map(r => ({ ...r, full_name: nameOf[r.email] || null })));
+  const canManageTeams = !access.setupMissing && (access.can("events", "edit") || access.can("users", "edit"));
+  const addToTeam = async (eventId, email, task) => {
+    const { data, error } = await supabase.from("event_assignments").insert([{ event_id: eventId, email, task }]).select().single();
+    if (error) { showToast(`Could not assign: ${error.message}`, "warn"); return false; }
+    setTeamRows(rs => [...rs, data]);
+    logHistory({ channel:"event", action:"team", name: nameOf[email] || email, detail: `Assigned${task ? ` as ${task}` : ""}` }, eventId);
+    showToast(`${nameOf[email] || email} assigned`, "success");
+    return true;
+  };
+  const removeFromTeam = async (eventId, a) => {
+    const ok = await askDialog({ title: `Remove ${a.full_name || a.email}?`,
+      body: "They're taken off this event's team. Unless their role sees all events, they won't see this event any more.",
+      actions: [{ value: "yes", label: "Remove", kind: "danger" }] });
+    if (ok !== "yes") return;
+    const { error } = await supabase.from("event_assignments").delete().eq("event_id", eventId).eq("email", a.email);
+    if (error) { showToast(`Could not remove: ${error.message}`, "warn"); return; }
+    setTeamRows(rs => rs.filter(r => !(r.event_id === eventId && r.email === a.email)));
+    logHistory({ channel:"event", action:"team", name: a.full_name || a.email, detail: "Removed from the team" }, eventId);
+  };
+  loadTeamsRef.current = loadTeams;
+  const [eventsScope, setEventsScope] = useState("all");   // Events tab: "all" | "mine" (for roles that see every event)
+  const myEmail = (user?.email || "").toLowerCase();
 
   const crm = useCrm({ enabled: !!userId, showToast, askDialog, logHistory, reloadEvents: loadSavedEvents });
   const [leadSel,     setLeadSel]     = useState(null);   // lead open in the Leads tab
@@ -5497,7 +5634,9 @@ export default function App() {
           <EventOverview key={overviewId} eventId={overviewId} onClose={() => setOverviewId(null)} onSwitch={setOverviewId}
             onOpen={openEventIn} onEdit={(ev) => { setOverviewId(null); editEvent(ev); }}
             onOpenCustomer={openCustomer} onOpenLead={openLead}
-            onOpenFinance={(id) => { setOverviewId(null); setFinanceSel(id); loadSavedEvents(); setTab("finance"); }} />
+            onOpenFinance={(id) => { setOverviewId(null); setFinanceSel(id); loadSavedEvents(); setTab("finance"); }}
+            team={access.setupMissing ? null : { team: teamsByEvent[overviewId] || [], canManage: canManageTeams, people, onLoadPeople: loadPeople,
+              onAdd: (email, task) => addToTeam(overviewId, email, task), onRemove: (a) => removeFromTeam(overviewId, a) }} />
         )}
 
         {/* Choice dialog (bulk-send / re-send confirmations) */}
@@ -5961,16 +6100,26 @@ export default function App() {
                   </div>
                 )}
 
+                {supabase && savedEvents.length > 0 && !access.setupMissing && (
+                  <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+                    {access.seesAllEvents && [["all","All events"],["mine","Assigned to me"]].map(([k,l]) => (
+                      <button key={k} style={segStyle(eventsScope === k)} onClick={() => setEventsScope(k)}>{l}</button>
+                    ))}
+                    <span style={{fontSize:11,color:N.textDim}}>
+                      {access.seesAllEvents ? "Your role sees every event." : "You see the events you're assigned to or created."}
+                    </span>
+                  </div>
+                )}
                 {supabase && savedEvents.length > 0 && (
                   <div className="nk-table-wrap">
                     <table className="nk-table">
                       <thead>
                         <tr>
-                          {["#","Username","Type","Venue","Date","Status","Actions"].map(h=><th key={h}>{h}</th>)}
+                          {["#","Username","Type","Venue","Date","Status",...(access.setupMissing ? [] : ["Team"]),"Actions"].map(h=><th key={h}>{h}</th>)}
                         </tr>
                       </thead>
                       <tbody>
-                        {savedEvents.map((ev, i) => (
+                        {(eventsScope === "mine" && access.seesAllEvents ? eventsAssignedTo(savedEvents, teamsByEvent, myEmail) : savedEvents).map((ev, i) => (
                           <tr key={ev.id} className={savedEventId===ev.id?"row-active":""}
                             onClick={()=>selectEvent(ev)}
                             style={{cursor:"pointer"}}
@@ -6000,6 +6149,7 @@ export default function App() {
                                 {ev.status}
                               </span>
                             </td>
+                            {!access.setupMissing && <td><TeamAvatars team={teamsByEvent[ev.id]} /></td>}
                             <td>
                               <div className="nk-row-actions">
                                 <Sb bg={N.navy600} col={N.green} border={alpha(N.green,"44")}

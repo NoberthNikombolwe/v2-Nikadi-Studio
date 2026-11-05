@@ -399,6 +399,29 @@ SELECT lower(u.email), u.id, u.raw_user_meta_data ->> 'full_name', 'admin', 'exi
 FROM auth.users u WHERE u.email IS NOT NULL
 ON CONFLICT (email) DO UPDATE SET user_id = COALESCE(app_users.user_id, EXCLUDED.user_id);
 
+-- Which roles see every event. Everyone else sees only events they're assigned to or created.
+-- Set once when the column is first added; change it later in Settings → Roles & permissions.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'app_roles' AND column_name = 'sees_all_events') THEN
+    ALTER TABLE app_roles ADD COLUMN sees_all_events BOOLEAN NOT NULL DEFAULT FALSE;
+    UPDATE app_roles SET sees_all_events = TRUE WHERE key IN ('superuser','admin','finance_officer');
+  END IF;
+END $$;
+
+-- Who created each event (they always keep access to it)
+ALTER TABLE events ADD COLUMN IF NOT EXISTS created_by TEXT DEFAULT (auth.jwt() ->> 'email');
+
+-- Event team: users assigned to an event, with what they do there
+CREATE TABLE IF NOT EXISTS event_assignments (
+  event_id    UUID REFERENCES events(id) ON DELETE CASCADE,
+  email       TEXT REFERENCES app_users(email) ON DELETE CASCADE ON UPDATE CASCADE,
+  task        TEXT,                      -- e.g. Designer, Door / check-in
+  assigned_by TEXT DEFAULT (auth.jwt() ->> 'email'),
+  assigned_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (event_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_event_assignments_email ON event_assignments(email);
+
 -- Invitation gate: runs for every way an auth user is created (Google, email, API)
 CREATE OR REPLACE FUNCTION public.enforce_invited_signup() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -445,6 +468,51 @@ CREATE OR REPLACE FUNCTION public.has_any_perm(p_modules TEXT[], p_edit BOOLEAN 
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS (SELECT 1 FROM unnest(p_modules) m WHERE public.has_perm(m, p_edit))
 $$;
+
+-- Does my role see every event?
+CREATE OR REPLACE FUNCTION public.sees_all_events() RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT public.my_role() = 'superuser'
+      OR COALESCE((SELECT r.sees_all_events FROM app_roles r WHERE r.key = public.my_role()), FALSE)
+$$;
+
+-- May I see this event? (sees-all role, assigned to it, or created it)
+CREATE OR REPLACE FUNCTION public.can_see_event(p_event UUID) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT public.is_active_user() AND (
+    public.sees_all_events()
+    OR EXISTS (SELECT 1 FROM event_assignments a WHERE a.event_id = p_event AND a.email = lower(auth.jwt() ->> 'email'))
+    OR EXISTS (SELECT 1 FROM events e WHERE e.id = p_event AND lower(e.created_by) = lower(auth.jwt() ->> 'email'))
+  )
+$$;
+
+REVOKE ALL ON FUNCTION public.sees_all_events(), public.can_see_event(UUID) FROM anon, public;
+GRANT EXECUTE ON FUNCTION public.sees_all_events(), public.can_see_event(UUID) TO authenticated, service_role;
+
+-- The person who creates an event joins its team as Owner
+CREATE OR REPLACE FUNCTION public.assign_event_creator() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE me TEXT := lower(auth.jwt() ->> 'email');
+BEGIN
+  IF me IS NOT NULL AND EXISTS (SELECT 1 FROM app_users WHERE email = me) THEN
+    INSERT INTO event_assignments (event_id, email, task, assigned_by) VALUES (NEW.id, me, 'Owner', me)
+    ON CONFLICT DO NOTHING;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_assign_event_creator ON events;
+CREATE TRIGGER trg_assign_event_creator AFTER INSERT ON events
+  FOR EACH ROW EXECUTE FUNCTION public.assign_event_creator();
+
+-- People who may be put on an event team (for the picker; the users list itself is admin-only)
+CREATE OR REPLACE FUNCTION public.assignable_users() RETURNS TABLE (email TEXT, full_name TEXT, role TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT u.email, u.full_name, u.role FROM app_users u
+   WHERE u.active AND public.has_any_perm(ARRAY['events','users'], TRUE)
+   ORDER BY COALESCE(u.full_name, u.email)
+$$;
+REVOKE ALL ON FUNCTION public.assignable_users() FROM anon, public;
+GRANT EXECUTE ON FUNCTION public.assignable_users() TO authenticated;
 
 REVOKE ALL ON FUNCTION public.my_role(), public.is_active_user(), public.has_perm(TEXT, BOOLEAN), public.has_any_perm(TEXT[], BOOLEAN) FROM anon, public;
 GRANT EXECUTE ON FUNCTION public.my_role(), public.is_active_user(), public.has_perm(TEXT, BOOLEAN), public.has_any_perm(TEXT[], BOOLEAN) TO authenticated, service_role;
@@ -657,6 +725,7 @@ BEGIN
   SELECT c.event_id INTO v_event FROM event_cards c WHERE c.id = p_card_id;
   IF auth.role() = 'authenticated' THEN
     IF NOT public.has_perm('scanner', TRUE) THEN RAISE EXCEPTION 'Your role cannot check guests in'; END IF;
+    IF v_event IS NOT NULL AND NOT public.can_see_event(v_event) THEN RAISE EXCEPTION 'You are not assigned to this event'; END IF;
   ELSIF v_event IS NULL OR p_code IS NULL
         OR NOT EXISTS (SELECT 1 FROM events e WHERE e.id = v_event AND e.scan_code IS NOT NULL AND e.scan_code = p_code) THEN
     RETURN QUERY SELECT p_card_id, NULL::TEXT, NULL::TEXT, NULL::INT, NULL::INT, FALSE, 'bad_code'::TEXT;
@@ -690,30 +759,34 @@ ALTER TABLE wa_templates     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sender_ids       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE card_type_rules  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE scan_logs        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_assignments ENABLE ROW LEVEL SECURITY;
 
 -- Drop the old open policies (and this script's own, so re-runs are clean)
 DO $$ DECLARE r RECORD; BEGIN
   FOR r IN SELECT policyname, tablename FROM pg_policies WHERE schemaname = 'public' AND tablename IN
     ('events','event_cards','saved_templates','customers','leads','lead_followups','finance_accounts','event_transactions',
      'event_logs','app_roles','app_modules','role_permissions','app_users','app_settings','wa_templates','sender_ids',
-     'card_type_rules','scan_logs','allowed_users')
+     'card_type_rules','scan_logs','allowed_users','event_assignments')
   LOOP EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', r.policyname, r.tablename); END LOOP;
 END $$;
 
 -- Events: every active user can see events; changes depend on the module doing them
-CREATE POLICY p_events_select ON events FOR SELECT TO authenticated USING (public.is_active_user());
+CREATE POLICY p_events_select ON events FOR SELECT TO authenticated
+  USING (public.can_see_event(id) OR lower(created_by) = lower(auth.jwt() ->> 'email'));
 CREATE POLICY p_events_insert ON events FOR INSERT TO authenticated WITH CHECK (public.has_any_perm(ARRAY['events','leads'], TRUE));
 CREATE POLICY p_events_update ON events FOR UPDATE TO authenticated
-  USING (public.has_any_perm(ARRAY['events','design','sms','whatsapp','scanner'], TRUE))
+  USING (public.has_any_perm(ARRAY['events','design','sms','whatsapp','scanner'], TRUE) AND public.can_see_event(id))
   WITH CHECK (public.has_any_perm(ARRAY['events','design','sms','whatsapp','scanner'], TRUE));
-CREATE POLICY p_events_delete ON events FOR DELETE TO authenticated USING (public.has_perm('events', TRUE));
+CREATE POLICY p_events_delete ON events FOR DELETE TO authenticated USING (public.has_perm('events', TRUE) AND public.can_see_event(id));
 
-CREATE POLICY p_cards_select ON event_cards FOR SELECT TO authenticated USING (public.is_active_user());
-CREATE POLICY p_cards_insert ON event_cards FOR INSERT TO authenticated WITH CHECK (public.has_any_perm(ARRAY['design','batch','vcard','sms','whatsapp','calls'], TRUE));
+CREATE POLICY p_cards_select ON event_cards FOR SELECT TO authenticated USING (public.can_see_event(event_id));
+CREATE POLICY p_cards_insert ON event_cards FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_perm(ARRAY['design','batch','vcard','sms','whatsapp','calls'], TRUE) AND public.can_see_event(event_id));
 CREATE POLICY p_cards_update ON event_cards FOR UPDATE TO authenticated
-  USING (public.has_any_perm(ARRAY['design','batch','sms','whatsapp','calls','scanner'], TRUE))
-  WITH CHECK (public.has_any_perm(ARRAY['design','batch','sms','whatsapp','calls','scanner'], TRUE));
-CREATE POLICY p_cards_delete ON event_cards FOR DELETE TO authenticated USING (public.has_any_perm(ARRAY['design','batch'], TRUE));
+  USING (public.has_any_perm(ARRAY['design','batch','sms','whatsapp','calls','scanner'], TRUE) AND public.can_see_event(event_id))
+  WITH CHECK (public.has_any_perm(ARRAY['design','batch','sms','whatsapp','calls','scanner'], TRUE) AND public.can_see_event(event_id));
+CREATE POLICY p_cards_delete ON event_cards FOR DELETE TO authenticated
+  USING (public.has_any_perm(ARRAY['design','batch'], TRUE) AND public.can_see_event(event_id));
 
 CREATE POLICY p_templates_select ON saved_templates FOR SELECT TO authenticated USING (public.is_active_user());
 CREATE POLICY p_templates_write  ON saved_templates FOR ALL    TO authenticated
@@ -729,16 +802,19 @@ CREATE POLICY p_customers_write  ON customers FOR ALL    TO authenticated
 
 CREATE POLICY p_fin_accounts ON finance_accounts FOR SELECT TO authenticated USING (public.has_perm('finance'));
 CREATE POLICY p_fin_accounts_write ON finance_accounts FOR ALL TO authenticated USING (public.has_perm('finance', TRUE)) WITH CHECK (public.has_perm('finance', TRUE));
-CREATE POLICY p_fin_txns ON event_transactions FOR SELECT TO authenticated USING (public.has_perm('finance'));
-CREATE POLICY p_fin_txns_write ON event_transactions FOR ALL TO authenticated USING (public.has_perm('finance', TRUE)) WITH CHECK (public.has_perm('finance', TRUE));
+CREATE POLICY p_fin_txns ON event_transactions FOR SELECT TO authenticated USING (public.has_perm('finance') AND public.can_see_event(event_id));
+CREATE POLICY p_fin_txns_write ON event_transactions FOR ALL TO authenticated
+  USING (public.has_perm('finance', TRUE) AND public.can_see_event(event_id)) WITH CHECK (public.has_perm('finance', TRUE) AND public.can_see_event(event_id));
 
 -- History stays append-only: read with History/Events, anyone active may add their own rows
-CREATE POLICY p_logs_select ON event_logs FOR SELECT TO authenticated USING (public.has_any_perm(ARRAY['history','events']));
+CREATE POLICY p_logs_select ON event_logs FOR SELECT TO authenticated USING (public.has_any_perm(ARRAY['history','events']) AND public.can_see_event(event_id));
 CREATE POLICY p_logs_insert ON event_logs FOR INSERT TO authenticated
   WITH CHECK (public.is_active_user() AND user_email IS NOT DISTINCT FROM (auth.jwt() ->> 'email'));
 
 -- Settings data: readable by every active user (the app needs it), changed with Settings (edit)
 CREATE POLICY p_roles_select   ON app_roles   FOR SELECT TO authenticated USING (public.is_active_user());
+CREATE POLICY p_roles_update   ON app_roles   FOR UPDATE TO authenticated
+  USING (public.has_perm('users', TRUE) AND key <> 'superuser') WITH CHECK (public.has_perm('users', TRUE) AND key <> 'superuser');
 CREATE POLICY p_modules_select ON app_modules FOR SELECT TO authenticated USING (public.is_active_user());
 CREATE POLICY p_perms_select   ON role_permissions FOR SELECT TO authenticated USING (public.is_active_user());
 CREATE POLICY p_perms_write    ON role_permissions FOR ALL TO authenticated
@@ -755,7 +831,14 @@ DO $$ DECLARE t TEXT; BEGIN
 END $$;
 
 -- Scan log: Scanner (view). Writes only through scan_card().
-CREATE POLICY p_scan_logs_select ON scan_logs FOR SELECT TO authenticated USING (public.has_perm('scanner'));
+CREATE POLICY p_scan_logs_select ON scan_logs FOR SELECT TO authenticated USING (public.has_perm('scanner') AND public.can_see_event(event_id));
+
+-- Event teams: visible to anyone who can see the event (and your own rows); managed with Events or Users (edit)
+CREATE POLICY p_assign_select ON event_assignments FOR SELECT TO authenticated
+  USING (public.can_see_event(event_id) OR email = lower(auth.jwt() ->> 'email'));
+CREATE POLICY p_assign_write ON event_assignments FOR ALL TO authenticated
+  USING (public.has_any_perm(ARRAY['events','users'], TRUE) AND public.can_see_event(event_id))
+  WITH CHECK (public.has_any_perm(ARRAY['events','users'], TRUE) AND public.can_see_event(event_id));
 
 -- Storage: uploads need the module that makes them
 DROP POLICY IF EXISTS "authenticated_insert_templates" ON storage.objects;
@@ -770,7 +853,7 @@ CREATE POLICY "authenticated_insert_wa_cards" ON storage.objects FOR INSERT TO a
 
 -- Grants for the new tables (anon gets nothing)
 DO $$ DECLARE t TEXT; BEGIN
-  FOREACH t IN ARRAY ARRAY['app_roles','app_modules','role_permissions','app_users','app_settings','wa_templates','sender_ids','card_type_rules','scan_logs'] LOOP
+  FOREACH t IN ARRAY ARRAY['app_roles','app_modules','role_permissions','app_users','app_settings','wa_templates','sender_ids','card_type_rules','scan_logs','event_assignments'] LOOP
     EXECUTE format('REVOKE ALL ON public.%I FROM anon', t);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO authenticated', t);
     EXECUTE format('GRANT ALL ON public.%I TO service_role', t);

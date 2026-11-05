@@ -437,3 +437,21 @@ test("settings helpers", () => {
   assert.ok(validateSenderId({ sender_id: "TOOLONGSENDER1" }).sender_id);
   assert.deepEqual(validateSenderId({ sender_id: "NIKADI 2" }), {});
 });
+
+// ── event assignments ──
+import { groupAssignments, initials, eventsAssignedTo, assignableFor, validateAssignment } from "./assignments.js";
+
+test("event team helpers", () => {
+  const rows = [{ event_id: "e1", email: "zed@x.co" }, { event_id: "e1", email: "amy@x.co", full_name: "Amy Lee" }, { event_id: "e2", email: "zed@x.co" }];
+  const by = groupAssignments(rows);
+  assert.deepEqual(by.e1.map(a => a.email), ["amy@x.co", "zed@x.co"]);
+  assert.equal(initials("Amina Said"), "AS");
+  assert.equal(initials("", "juma.k@x.co"), "JK");
+  assert.equal(initials("Madonna"), "MA");
+  assert.equal(initials("", ""), "?");
+  assert.deepEqual(eventsAssignedTo([{ id: "e1" }, { id: "e2" }, { id: "e3" }], by, "ZED@x.co").map(e => e.id), ["e1", "e2"]);
+  assert.deepEqual(assignableFor([{ email: "amy@x.co" }, { email: "bo@x.co" }, { email: "off@x.co", active: false }], by.e1).map(u => u.email), ["bo@x.co"]);
+  assert.ok(validateAssignment({ email: "amy@x.co" }, by.e1).email);
+  assert.ok(validateAssignment({}).email);
+  assert.deepEqual(validateAssignment({ email: "bo@x.co", task: "Door" }, by.e1), {});
+});
