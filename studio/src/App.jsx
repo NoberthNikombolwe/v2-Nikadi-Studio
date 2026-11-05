@@ -162,6 +162,13 @@ const CSS = `
   .nk-drawer-item.active { background: ${alpha(N.accent,"1f")}; color: ${N.sky}; }
   .nk-drawer-foot { margin-top: auto; padding-top: 8px; }
   .nk-span2 { grid-column: span 2; }
+  .nk-overlay.nk-raise { z-index: 550; }
+  .nk-overlay.nk-top { z-index: 700; }
+  .nk-detail { position: relative; }
+  .nk-detail-close { position: absolute; top: 16px; right: 16px; z-index: 2; background: ${N.navy800}; }
+  .nk-detail-body { padding: 24px 28px 28px; }
+  .nk-detail-body > div:first-child { padding-right: 44px; }
+  @media (max-width: 640px) { .nk-detail-body { padding: 18px 16px 22px; } .nk-detail-close { top: 12px; right: 12px; } }
   .nk-table-wrap { overflow-x: auto !important; -webkit-overflow-scrolling: touch; }
 
   /* ── Large tablets / small laptops ── */
@@ -180,7 +187,7 @@ const CSS = `
     .nk-body { flex-direction: column; overflow: visible; }
     .nk-sidebar, .nk-sidebar-right { width: 100%; min-width: 0; border-right: none; border-left: none; border-bottom: 1px solid ${N.border}; overflow: visible; }
     .nk-main, .nk-main-wide { padding: 18px 14px; overflow: visible; }
-    .nk-split > * { flex: 1 1 100% !important; max-width: 100% !important; position: static !important; max-height: none !important; min-width: 0; }
+    .nk-split > *:not(.nk-overlay) { flex: 1 1 100% !important; max-width: 100% !important; position: static !important; max-height: none !important; min-width: 0; }
     .nk-banner { margin: 10px 14px 0 !important; }
     .nk-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
     .nk-stat { min-width: 0; padding: 12px; }
@@ -1597,8 +1604,33 @@ const Info = ({ label, children }) => (
   </div>
 );
 
-const panelStyle = { flex:"1 1 380px", maxWidth:520, background:N.navy800, border:`1px solid ${N.border}`, borderRadius:14,
-                     padding:20, position:"sticky", top:80, maxHeight:"calc(100vh - 100px)", overflowY:"auto" };
+// Pop-up used to view one record's details (lead, customer, finance event) over its list.
+// Click outside, the ✕ or Esc closes it — Esc only when it's the top-most pop-up, so a form
+// opened from inside it (edit, add transaction) closes first.
+function DetailModal({ label, onClose, children, width = 640 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      // top-most = highest z-index, then latest in the page
+      const all = [...document.querySelectorAll(".nk-overlay")];
+      const z = (el) => Number(getComputedStyle(el).zIndex) || 0;
+      const top = all.reduce((a, b) => (z(b) >= z(a) ? b : a), all[0]);
+      if (top === ref.current) onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="nk-overlay" ref={ref} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="nk-modal nk-detail" style={{maxWidth:width}} role="dialog" aria-modal="true" aria-label={label}>
+        <button className="nk-modal-close nk-detail-close" onClick={onClose} aria-label={`Close ${label}`} title="Close"><Icon n="x" /></button>
+        <div className="nk-detail-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 const segStyle = (on) => ({ padding:"6px 12px", borderRadius:7, fontSize:12, fontWeight:600, cursor:"pointer",
   background: on ? N.navy600 : "transparent", color: on ? N.text : N.textMid, border:`1px solid ${on ? N.sky : N.border}` });
 
@@ -1947,14 +1979,13 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
           </div>
         </div>
 
-        {ev ? (
-          <div style={panelStyle}>
+        {ev && (
+          <DetailModal label={`${ev.username} finance`} onClose={() => onSelect(null)} width={680}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:12}}>
               <div style={{minWidth:0}}>
                 <div style={{fontSize:16,fontWeight:800,color:N.text}}>{ev.username}</div>
                 <div style={{fontSize:12,color:N.textDim}}>{[ev.event_type, custName[ev.customer_id], ev.package_price && `${formatTsh(ev.package_price)} / card`].filter(Boolean).join(" · ")}</div>
               </div>
-              <button className="nk-modal-close" aria-label="Close event finance" onClick={() => onSelect(null)}><Icon n="x" /></button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
               <MoneyTile label="Income"   value={formatTsh(evSum.income)}  tone="good" />
@@ -2018,11 +2049,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                   text={txFilter === "expense" ? "Record printing, credit, transport and other costs with + Expense." : "Record the customer's payment with + Income."} />
               )}
             </div>
-          </div>
-        ) : (
-          <div style={panelStyle}>
-            <EmptyState icon="book" title="Pick an event" text="Select an event to see its transactions and record income or expenses." />
-          </div>
+          </DetailModal>
         )}
       </div>
 
@@ -2127,8 +2154,8 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
           )}
         </div>
 
-        {lead ? (
-          <div style={panelStyle}>
+        {lead && (
+          <DetailModal label={`Lead ${lead.name}`} onClose={() => onSelect(null)}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:14}}>
               <div>
                 <div style={{fontSize:18,fontWeight:800,color:N.text}}>{lead.name}</div>
@@ -2180,11 +2207,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
               <div style={{fontSize:12,color:N.textMid,marginBottom:10}}>Next follow-up: <DueTag date={lead.next_followup_date} /></div>
             )}
             <FollowupList items={crm.followups[lead.id]} busy={crm.busy} onEdit={(f, changes) => crm.updateFollowup(lead, f, changes)} />
-          </div>
-        ) : (
-          <div style={{...panelStyle,textAlign:"center",color:N.textDim,fontSize:13,padding:40,position:"static"}}>
-            Select a lead to see its details and follow-ups.
-          </div>
+          </DetailModal>
         )}
       </div>
 
@@ -2262,8 +2285,8 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
           )}
         </div>
 
-        {customer ? (
-          <div style={panelStyle}>
+        {customer && (
+          <DetailModal label={`Customer ${customer.name}`} onClose={() => onSelect(null)}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:14}}>
               <div>
                 <div style={{fontSize:18,fontWeight:800,color:N.text}}>{customer.name}</div>
@@ -2315,11 +2338,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
                 ))}
               </div>
             )}
-          </div>
-        ) : (
-          <div style={{...panelStyle,textAlign:"center",color:N.textDim,fontSize:13,padding:40,position:"static"}}>
-            Select a customer to see their events and history.
-          </div>
+          </DetailModal>
         )}
       </div>
 
@@ -2361,7 +2380,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
   const count = (fn) => (d?.cards || []).filter(fn).length;
   const card = { background:N.navy700, border:`1px solid ${N.border}`, borderRadius:12, padding:14, marginBottom:12 };
   return (
-    <div className="nk-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+    <div className="nk-overlay nk-raise" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="nk-modal" style={{maxWidth:920}}>
         <div className="nk-modal-head">
           <div>
@@ -4240,7 +4259,7 @@ export default function App() {
 
         {/* Choice dialog (bulk-send / re-send confirmations) */}
         {dialog && (
-          <div className="nk-overlay" onClick={e => e.target===e.currentTarget && closeDialog(null)}>
+          <div className="nk-overlay nk-top" onClick={e => e.target===e.currentTarget && closeDialog(null)}>
             <div className="nk-dialog" role="dialog" aria-modal="true" aria-labelledby="nk-dialog-title">
               <div className="nk-dialog-title" id="nk-dialog-title">{dialog.title}</div>
               <div className="nk-dialog-body">{dialog.body}</div>
@@ -4259,7 +4278,7 @@ export default function App() {
 
         {/* Delete confirm */}
         {deleteTarget && (
-          <div className="nk-overlay">
+          <div className="nk-overlay nk-top">
             <div className="nk-confirm">
               <div className="nk-confirm-title">Delete Event?</div>
               <div className="nk-confirm-body">
