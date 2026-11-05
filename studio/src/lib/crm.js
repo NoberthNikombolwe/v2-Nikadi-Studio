@@ -26,11 +26,11 @@ export const LEAD_STATUSES = {
 export const OPEN_STATUSES = ["new", "contacted"];
 
 export const FOLLOWUP_METHODS = {
-  call:     { label: "Call",     icon: "📞" },
-  whatsapp: { label: "WhatsApp", icon: "📲" },
-  sms:      { label: "SMS",      icon: "💬" },
-  meeting:  { label: "Meeting",  icon: "🤝" },
-  other:    { label: "Note",     icon: "📝" },
+  call:     { label: "Call",     icon: "phone" },
+  whatsapp: { label: "WhatsApp", icon: "whatsapp" },
+  sms:      { label: "SMS",      icon: "sms" },
+  meeting:  { label: "Meeting",  icon: "handshake" },
+  other:    { label: "Note",     icon: "note" },
 };
 
 // Reads a price the way people type it: "1k", "1.2k", "1,500", "TSh 2,000", 1200 → number.

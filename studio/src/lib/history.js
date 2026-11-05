@@ -5,11 +5,11 @@ import { normalisePhone } from "./phone.js";
 // bulk-send summaries and changes to the event or its contact list.
 
 export const HISTORY_CHANNELS = {
-  whatsapp: { label: "WhatsApp", icon: "📲" },
-  sms:      { label: "SMS",      icon: "💬" },
-  card:     { label: "Card",     icon: "🖼" },
-  event:    { label: "Event",    icon: "🗂" },
-  finance:  { label: "Finance",  icon: "💰" },
+  whatsapp: { label: "WhatsApp", icon: "whatsapp" },
+  sms:      { label: "SMS",      icon: "sms" },
+  card:     { label: "Card",     icon: "image" },
+  event:    { label: "Event",    icon: "folder" },
+  finance:  { label: "Finance",  icon: "wallet" },
 };
 
 export const HISTORY_ACTIONS = {

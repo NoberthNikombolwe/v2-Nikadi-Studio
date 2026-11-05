@@ -4,10 +4,10 @@ import { parsePrice } from "./crm.js";
 // transactions (event_transactions) — see supabase-schema.sql. Pure helpers only.
 
 export const ACCOUNT_TYPES = {
-  bank:   { label: "Bank",         icon: "🏦" },
-  mobile: { label: "Mobile money", icon: "📱" },
-  cash:   { label: "Cash",         icon: "💵" },
-  other:  { label: "Other",        icon: "💼" },
+  bank:   { label: "Bank",         icon: "bank" },
+  mobile: { label: "Mobile money", icon: "smartphone" },
+  cash:   { label: "Cash",         icon: "cash" },
+  other:  { label: "Other",        icon: "briefcase" },
 };
 
 export const TXN_KINDS = {

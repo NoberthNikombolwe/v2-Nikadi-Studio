@@ -4,6 +4,7 @@ import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
+import Icon from "./Icon";
 import { ACCOUNT_TYPES, TXN_KINDS, TXN_CATEGORIES, validateTransaction, txnToRow, validateAccount, summariseTransactions, marginTone, formatPct,
          summariseByAccount, summariseByCategory, groupByEvent, filterTransactions, sortTransactions, transactionExportRows } from "./lib/finance";
 import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
@@ -111,6 +112,13 @@ const CSS = `
     white-space: nowrap; flex-shrink: 0;
   }
   .nk-tab:hover { color: ${N.text}; background: ${alpha(N.accent,"0d")}; }
+  .nk-spin { animation: nkSpin 0.9s linear infinite; }
+  @keyframes nkSpin { to { transform: rotate(360deg); } }
+  .nk-btn .nk-icon, .nk-btn-sm .nk-icon, .nk-tab .nk-icon { width: 1.15em; height: 1.15em; }
+  .nk-empty { text-align: center; padding: 48px 20px; color: ${N.textDim}; }
+  .nk-empty-icon { width: 64px; height: 64px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 28px; margin-bottom: 14px; }
+  .nk-empty-title { font-weight: 700; font-size: 14px; color: ${N.text}; margin-bottom: 4px; }
+  .nk-empty-text { font-size: 12px; max-width: 380px; margin: 0 auto; line-height: 1.5; }
   .nk-tab-sep { width: 1px; align-self: center; height: 20px; background: ${N.border}; margin: 0 6px; flex-shrink: 0; }
   /* Keyboard users always see where focus is */
   .nk-tab:focus-visible, .nk-btn:focus-visible, .nk-stat:focus-visible, .nk-modal-close:focus-visible,
@@ -662,14 +670,14 @@ async function exportCard(bgImage, bgSize, elements, record) {
 // Colored status pill for a record's WhatsApp send status (idle/sending/sent/notSent/invalid)
 function WaBadge({ status }) {
   const styles = {
-    idle:    { cls:"badge-idle",    icon:"○", label:"Not Sent", extra:{} },
-    sending: { cls:"badge-testing", icon:"⏳", label:"Sending…", extra:{} },
-    sent:    { cls:"badge-sent",    icon:"✓", label:"Sent",     extra:{} },
-    notSent: { cls:"badge-no",      icon:"✗", label:"Not Sent", extra:{background:N.redBg,color:N.red,border:`1px solid ${alpha(N.red,"44")}`} },
-    invalid: { cls:"badge-testing", icon:"⚠", label:"Invalid",  extra:{background:N.amberBg,color:N.amber,border:`1px solid ${alpha(N.amber,"44")}`} },
+    idle:    { cls:"badge-idle",    icon:"circle", label:"Not Sent", extra:{} },
+    sending: { cls:"badge-testing", icon:"loader", label:"Sending…", extra:{} },
+    sent:    { cls:"badge-sent",    icon:"check", label:"Sent",     extra:{} },
+    notSent: { cls:"badge-no",      icon:"xCircle", label:"Not Sent", extra:{background:N.redBg,color:N.red,border:`1px solid ${alpha(N.red,"44")}`} },
+    invalid: { cls:"badge-testing", icon:"alert", label:"Invalid",  extra:{background:N.amberBg,color:N.amber,border:`1px solid ${alpha(N.amber,"44")}`} },
   };
   const { cls, icon, label, extra } = styles[status] || styles.idle;
-  return <span className={`nk-badge ${cls}`} style={extra}>{icon} {label}</span>;
+  return <span className={`nk-badge ${cls}`} style={extra}><Icon n={icon} /> {label}</span>;
 }
 
 // Compact icon-style action button used inside table rows (WA/SMS/download/edit actions)
@@ -700,20 +708,20 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
         {editing ? (
           <span style={{display:"flex",gap:4,alignItems:"center"}}>
             <input value={phone} onChange={e=>setPhone(e.target.value)} onKeyDown={e=>e.key==="Enter"&&save()} autoFocus className="nk-phone-edit" />
-            <Sb bg={N.greenBg} col={N.green} onClick={save}>✓</Sb>
-            <Sb bg={N.redBg} col={N.red} onClick={()=>setEditing(false)}>✕</Sb>
+            <Sb bg={N.greenBg} col={N.green} onClick={save}><Icon n="check" /></Sb>
+            <Sb bg={N.redBg} col={N.red} onClick={()=>setEditing(false)}><Icon n="x" /></Sb>
           </span>
         ) : (
           <span className="nk-phone-val">
             {rec.phone||<span style={{color:N.textDim}}>—</span>}
-            <Sb bg="transparent" col={N.textDim} border={N.border} onClick={startEdit} title="Edit">✎</Sb>
+            <Sb bg="transparent" col={N.textDim} border={N.border} onClick={startEdit} title="Edit"><Icon n="edit" /></Sb>
           </span>
         )}
       </td>
       <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
       <td>
         <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
-          {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
+          {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
         </span>
       </td>
       <td>
@@ -722,13 +730,13 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
           <Sb bg={rec.uploadStatus==="uploaded"?N.greenBg:N.navy600} col={rec.uploadStatus==="uploaded"?N.green:N.sky}
             title={rec.uploadStatus==="uploaded"?"Card uploaded — click to re-upload":"Upload card to Supabase Storage"}
             onClick={()=>onUpload(idx)} disabled={rec.uploadStatus==="uploading"}>
-            {rec.uploadStatus==="uploading"?"⏳":rec.uploadStatus==="uploaded"?"✓":"☁"} Upload
+            {rec.uploadStatus==="uploading"?<><Icon n="loader" /></>:rec.uploadStatus==="uploaded"?<><Icon n="check" /></>:<><Icon n="cloud" /></>} Upload
           </Sb>
           {rec.phone && <Sb bg={N.greenBg} col={N.green} onClick={()=>onSendWa(idx)} disabled={rec.waStatus===WA.sending}>
-            {rec.waStatus===WA.sending?"⏳":"📲"} WA
+            {rec.waStatus===WA.sending?<><Icon n="loader" /></>:<><Icon n="whatsapp" /></>} WA
           </Sb>}
-          {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>onSendSms(idx)}>💬 SMS</Sb>}
-          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)}>⬇ PNG</Sb>
+          {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>onSendSms(idx)}><Icon n="sms" /> SMS</Sb>}
+          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)}><Icon n="download" /> PNG</Sb>
         </div>
       </td>
     </tr>
@@ -759,7 +767,7 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
       <div className="nk-modal">
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Event" : "New Event"}</div>
-          <button className="nk-modal-close" onClick={onClose}>✕</button>
+          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -830,7 +838,7 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving||!form.username}>
-            {saving ? "⏳ Saving…" : "💾 Save Event"}
+            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> Save Event</>}
           </button>
         </div>
       </div>
@@ -853,11 +861,11 @@ function useAutoClearLog(log, setLog) {
   }, [log, setLog]);
 }
 
-// status → [icon, colour] for each log's rows; anything not listed is still in progress (⏳)
+// status → [icon name, colour] for each log's rows; anything not listed is still in progress (spinner)
 const LOG_STYLES = {
-  upload: { uploaded:["✓",N.green], failed:["✗",N.red] },
-  wa:     { sent:["✓",N.green], invalid:["⚠",N.amber], "not sent":["✗",N.red] },
-  sms:    { delivered:["✓✓",N.green], sent:["↑",N.teal], failed:["✗",N.red] },
+  upload: { uploaded:["check",N.green], failed:["xCircle",N.red] },
+  wa:     { sent:["check",N.green], invalid:["alert",N.amber], "not sent":["xCircle",N.red] },
+  sms:    { delivered:["checks",N.green], sent:["arrowUp",N.teal], failed:["xCircle",N.red] },
 };
 
 // One titled list of activity-log rows inside the floating panel; renders nothing when empty
@@ -867,13 +875,13 @@ function LogSection({ title, color, styles, log, onClose }) {
     <div className="nk-log">
       <div className="nk-activity-head">
         <span className="nk-sec" style={{color,margin:0}}>{title}</span>
-        <button className="nk-activity-close" onClick={onClose} title="Dismiss" aria-label={`Dismiss ${title}`}>✕</button>
+        <button className="nk-activity-close" onClick={onClose} title="Dismiss" aria-label={`Dismiss ${title}`}><Icon n="x" /></button>
       </div>
       {log.map((x,i) => {
-        const [icon, col] = styles[x.status] || ["⏳", N.textMid];
+        const [icon, col] = styles[x.status] || ["loader", N.textMid];
         return (
           <div key={i} className="nk-log-row" style={{color:col}}>
-            <span>{icon}</span>
+            <span><Icon n={icon} /></span>
             <span>{x.name}</span>
             <span style={{fontSize:11,color:N.textDim,textTransform:"capitalize"}}>{x.status}</span>
           </div>
@@ -885,7 +893,7 @@ function LogSection({ title, color, styles, log, onClose }) {
 
 const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
 const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
-const THEME_ICONS  = { system:"🖥", light:"☀️", dark:"🌙" };
+const THEME_ICONS  = { system:"monitor", light:"sun", dark:"moon" };
 
 // Id of an event's main SMS message (events.sms_message, statuses in event_cards.sms_status).
 // Extra messages (events.sms_messages) use random ids — see src/lib/messages.js.
@@ -915,6 +923,23 @@ const fmtWhen    = (d) => d ? new Date(d).toLocaleString("en-GB", { day:"2-digit
 const phoneLabel = (p) => p ? `+${normalisePhone(p)}` : "—";
 const addDays    = (n) => localDate(new Date(Date.now() + n * 86400000));
 const errMsg     = (e) => e?.message || String(e);
+
+// The one empty / loading / error placeholder used across tabs: an icon in a soft circle,
+// a title, a line of help and (optionally) the next action. `loading` shows a spinner;
+// `compact` fits inside a card or panel.
+function EmptyState({ icon = "inbox", title, text, action, loading, tone = "info", compact }) {
+  const col = loading ? N.sky : TONE[tone];
+  return (
+    <div className="nk-empty" style={compact ? { padding:"18px 8px" } : undefined} role={loading ? "status" : undefined}>
+      <div className="nk-empty-icon" style={{color:col,background:alpha(col,"1a"),...(compact ? { width:44, height:44, fontSize:20 } : {})}}>
+        <Icon n={loading ? "loader" : icon} />
+      </div>
+      {title && <div className="nk-empty-title">{title}</div>}
+      {text && <div className="nk-empty-text">{text}</div>}
+      {action && <div style={{marginTop:14,display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>{action}</div>}
+    </div>
+  );
+}
 
 // Small coloured status label
 function Pill({ tone = "info", children }) {
@@ -985,7 +1010,7 @@ function PackagePicker({ value, onChange }) {
         })}
         <button type="button" style={chip(custom)}
           onClick={() => { setCustom(true); if (PACKAGE_OPTIONS.includes(current)) onChange(""); }}>
-          ＋ Other price
+          <Icon n="plus" /> Other price
         </button>
       </div>
       {custom && (
@@ -1012,7 +1037,7 @@ function LeadModal({ initial, onSave, onClose, saving }) {
       <div className="nk-modal">
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Lead" : "New Lead"}</div>
-          <button className="nk-modal-close" onClick={onClose}>✕</button>
+          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -1048,7 +1073,7 @@ function LeadModal({ initial, onSave, onClose, saving }) {
         </div>
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving}>{saving ? "⏳ Saving…" : "💾 Save Lead"}</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving}>{saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> Save Lead</>}</button>
         </div>
       </div>
     </div>
@@ -1071,7 +1096,7 @@ function CustomerModal({ initial, onSave, onClose, saving }) {
       <div className="nk-modal" style={{maxWidth:520}}>
         <div className="nk-modal-head">
           <div className="nk-modal-title">{initial?.id ? "Edit Customer" : "New Customer"}</div>
-          <button className="nk-modal-close" onClick={onClose}>✕</button>
+          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -1091,7 +1116,7 @@ function CustomerModal({ initial, onSave, onClose, saving }) {
         </div>
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving}>{saving ? "⏳ Saving…" : "💾 Save Customer"}</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving}>{saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> Save Customer</>}</button>
         </div>
       </div>
     </div>
@@ -1315,12 +1340,10 @@ function useCrm({ enabled, showToast, askDialog, logHistory, reloadEvents }) {
 // Shown in place of a CRM tab when the tables are missing or can't be read
 function CrmUnavailable({ error, onRetry }) {
   return (
-    <div style={{textAlign:"center",padding:60,color:N.textDim,background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
-      <div style={{fontSize:44,marginBottom:12}}>🗃️</div>
-      <p style={{fontWeight:700,marginBottom:6,color:N.text}}>Leads &amp; customers aren't set up in the database yet</p>
-      <p style={{fontSize:12,marginBottom:6}}>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.</p>
-      <p style={{fontSize:11,marginBottom:18,fontFamily:"JetBrains Mono, monospace"}}>{error}</p>
-      <button className="nk-btn nk-btn-ghost" onClick={onRetry}>↻ Retry</button>
+    <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+      <EmptyState icon="database" tone="warn" title="Leads & customers aren't set up in the database yet"
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{error}</span></>}
+        action={<button className="nk-btn nk-btn-ghost" onClick={onRetry}><Icon n="refresh" /> Retry</button>} />
     </div>
   );
 }
@@ -1343,7 +1366,7 @@ function FollowupComposer({ onAdd, busy }) {
             style={{padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",
               background: method === k ? N.tealBg : "transparent", color: method === k ? N.teal : N.textMid,
               border:`1px solid ${method === k ? N.teal : N.border}`}}>
-            {m.icon} {m.label}
+            <Icon n={m.icon} /> {m.label}
           </button>
         ))}
       </div>
@@ -1357,7 +1380,7 @@ function FollowupComposer({ onAdd, busy }) {
             style={{background:"transparent",color:N.sky,borderColor:alpha(N.sky,"44")}}>{label}</button>
         ))}
         <button className="nk-btn nk-btn-teal" style={{marginLeft:"auto",padding:"6px 14px",fontSize:12}} onClick={submit} disabled={busy || !note.trim()}>
-          {busy ? "⏳" : "＋"} Add follow-up
+          {busy ? <><Icon n="loader" /></> : <><Icon n="plus" /></>} Add follow-up
         </button>
       </div>
     </div>
@@ -1366,15 +1389,15 @@ function FollowupComposer({ onAdd, busy }) {
 
 // Follow-ups, newest first
 function FollowupList({ items }) {
-  if (!items) return <div style={{fontSize:12,color:N.textDim,padding:"8px 0"}}>Loading follow-ups…</div>;
-  if (!items.length) return <div style={{fontSize:12,color:N.textDim,padding:"8px 0"}}>No follow-ups yet.</div>;
+  if (!items) return <EmptyState loading compact title="Loading follow-ups…" />;
+  if (!items.length) return <EmptyState icon="phone" compact text="No follow-ups yet — log the first call or message above." />;
   return (
     <div style={{display:"flex",flexDirection:"column",gap:8}}>
       {items.map(f => {
         const m = FOLLOWUP_METHODS[f.method] || FOLLOWUP_METHODS.other;
         return (
           <div key={f.id} style={{borderLeft:`3px solid ${alpha(N.teal,"66")}`,padding:"4px 0 4px 10px"}}>
-            <div style={{fontSize:13,color:N.text,whiteSpace:"pre-wrap",lineHeight:1.5}}>{m.icon} {f.note}</div>
+            <div style={{fontSize:13,color:N.text,whiteSpace:"pre-wrap",lineHeight:1.5}}><Icon n={m.icon} /> {f.note}</div>
             <div style={{fontSize:11,color:N.textDim,marginTop:3,display:"flex",gap:10,flexWrap:"wrap"}}>
               <span>{fmtWhen(f.created_at)}</span>
               {f.created_by && <span>{f.created_by}</span>}
@@ -1526,7 +1549,7 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
             <div className="nk-modal-title">{isIncome ? "Record income" : "Record expense"}</div>
             <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{event?.username}{event?.event_type ? ` · ${event.event_type}` : ""}</div>
           </div>
-          <button className="nk-modal-close" aria-label="Close" onClick={onClose}>✕</button>
+          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div style={{display:"flex",gap:6,marginBottom:16}} role="tablist">
@@ -1535,13 +1558,13 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
                 style={{...segStyle(form.kind === k), flex:1, padding:"10px 12px", fontSize:13,
                   ...(form.kind === k ? { color: k === "income" ? N.green : N.red, borderColor: k === "income" ? N.green : N.red,
                     background: k === "income" ? N.greenBg : N.redBg } : {})}}>
-                {k === "income" ? "↓ Money in" : "↑ Money out"}
+                {k === "income" ? <><Icon n="arrowDown" /> Money in</> : <><Icon n="arrowUp" /> Money out</>}
               </button>
             ))}
           </div>
           {!active.length && (
             <div style={{padding:12,borderRadius:10,background:N.amberBg,color:N.amber,fontSize:12,marginBottom:14}}>
-              ⚠ No accounts yet. <button type="button" className="nk-link" onClick={onManageAccounts}>Add your bank / mobile-money accounts</button> first.
+              <Icon n="alert" /> No accounts yet. <button type="button" className="nk-link" onClick={onManageAccounts}>Add your bank / mobile-money accounts</button> first.
             </div>
           )}
           <div className="nk-form-grid">
@@ -1558,7 +1581,7 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
             <Field label={isIncome ? "Into account *" : "From account *"} error={errors.account_id}>
               <select className="nk-select" value={form.account_id} onChange={set("account_id")}>
                 <option value="">— Select account —</option>
-                {active.map(a => <option key={a.id} value={a.id}>{ACCOUNT_TYPES[a.type]?.icon} {a.name}{a.number ? ` (${a.number})` : ""}</option>)}
+                {active.map(a => <option key={a.id} value={a.id}>{a.name}{a.number ? ` (${a.number})` : ""}</option>)}
               </select>
             </Field>
             <Field label="Category">
@@ -1577,7 +1600,7 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
           <button className={`nk-btn ${isIncome ? "nk-btn-success" : "nk-btn-primary"}`} onClick={save} disabled={saving}>
-            {saving ? "⏳ Saving…" : `💾 Save ${isIncome ? "income" : "expense"}`}
+            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> {`Save ${isIncome ? "income" : "expense"}`}</>}
           </button>
         </div>
       </div>
@@ -1598,7 +1621,7 @@ function AccountsModal({ fin, onClose }) {
       <div className="nk-modal" style={{maxWidth:680}}>
         <div className="nk-modal-head">
           <div className="nk-modal-title">Money accounts</div>
-          <button className="nk-modal-close" aria-label="Close" onClick={onClose}>✕</button>
+          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <p style={{fontSize:12,color:N.textDim,marginBottom:12}}>The accounts money is received into and paid from — every transaction names one.</p>
@@ -1610,14 +1633,14 @@ function AccountsModal({ fin, onClose }) {
             <div style={{flex:"1 1 120px"}}>
               <label className="nk-label">Type</label>
               <select className="nk-select" style={{marginBottom:0}} value={form.type} onChange={e => setForm(f => ({ ...f, type:e.target.value }))}>
-                {Object.entries(ACCOUNT_TYPES).map(([k, t]) => <option key={k} value={k}>{t.icon} {t.label}</option>)}
+                {Object.entries(ACCOUNT_TYPES).map(([k, t]) => <option key={k} value={k}>{t.label}</option>)}
               </select>
             </div>
             <div style={{flex:"1 1 140px"}}>
               <label className="nk-label">Number</label>
               <input className="nk-input" style={{marginBottom:0}} placeholder="Account / till no." value={form.number} onChange={e => setForm(f => ({ ...f, number:e.target.value }))} />
             </div>
-            <button className="nk-btn nk-btn-primary" onClick={submit} disabled={fin.busy}>{editId ? "💾 Update" : "+ Add"}</button>
+            <button className="nk-btn nk-btn-primary" onClick={submit} disabled={fin.busy}>{editId ? <><Icon n="save" /> Update</> : "+ Add"}</button>
             {editId && <button className="nk-btn nk-btn-ghost" onClick={() => { setEditId(null); setForm(BLANK_ACCOUNT); }}>Cancel</button>}
           </div>
           <div className="nk-table-wrap" style={{margin:0}}>
@@ -1629,14 +1652,14 @@ function AccountsModal({ fin, onClose }) {
                   return (
                     <tr key={a.id} style={a.active ? undefined : { opacity:0.55 }}>
                       <td>
-                        <div style={{fontWeight:700,color:N.text}}>{ACCOUNT_TYPES[a.type]?.icon} {a.name}{!a.active && <span style={{fontSize:11,color:N.textDim}}> · inactive</span>}</div>
+                        <div style={{fontWeight:700,color:N.text}}><Icon n={ACCOUNT_TYPES[a.type]?.icon} style={{color:N.sky}} /> {a.name}{!a.active && <span style={{fontSize:11,color:N.textDim}}> · inactive</span>}</div>
                         <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>{a.number || ACCOUNT_TYPES[a.type]?.label}</div>
                       </td>
                       <td className="num" style={{color:N.green}}>{formatTsh(t.income)}</td>
                       <td className="num" style={{color:N.red}}>{formatTsh(t.expense)}</td>
                       <td className="num" style={{fontWeight:700,color:t.net < 0 ? N.red : N.text}}>{formatTsh(t.net)}</td>
                       <td style={{whiteSpace:"nowrap",textAlign:"right"}}>
-                        <button className="nk-btn nk-btn-ghost" style={{padding:"5px 10px",fontSize:11}} onClick={() => { setEditId(a.id); setForm({ name:a.name, type:a.type, number:a.number || "" }); }}>✎ Edit</button>{" "}
+                        <button className="nk-btn nk-btn-ghost" style={{padding:"5px 10px",fontSize:11}} onClick={() => { setEditId(a.id); setForm({ name:a.name, type:a.type, number:a.number || "" }); }}><Icon n="edit" /> Edit</button>{" "}
                         <button className="nk-btn nk-btn-ghost" style={{padding:"5px 10px",fontSize:11}} onClick={() => fin.toggleAccount(a)}>{a.active ? "Deactivate" : "Activate"}</button>
                       </td>
                     </tr>
@@ -1644,7 +1667,7 @@ function AccountsModal({ fin, onClose }) {
                 })}
               </tbody>
             </table>
-            {!fin.accounts.length && <div style={{textAlign:"center",padding:28,color:N.textDim,fontSize:13}}>No accounts yet — add the first one above.</div>}
+            {!fin.accounts.length && <EmptyState icon="bank" compact title="No accounts yet" text="Add the bank, mobile-money and cash accounts money moves through." />}
           </div>
         </div>
       </div>
@@ -1654,19 +1677,17 @@ function AccountsModal({ fin, onClose }) {
 
 // Finance tab: business-wide totals, each event's income / expense / profit / margin,
 // and the selected event's transactions with who paid (or was paid) via which account
-function FinanceTab({ fin, events, customers, selectedId, onSelect, onExport }) {
+function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, onSelect, onExport }) {
   const [q,       setQ]       = useState("");
   const [range,   setRange]   = useState({ from:"", to:"" });
   const [txFilter, setTxFilter] = useState("all");
   const [adding,  setAdding]  = useState(null);   // null | "income" | "expense"
   const [accountsOpen, setAccountsOpen] = useState(false);
   if (fin.error) return (
-    <div style={{textAlign:"center",padding:60,color:N.textDim,background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
-      <div style={{fontSize:44,marginBottom:12}}>💰</div>
-      <p style={{fontWeight:700,marginBottom:6,color:N.text}}>Finance isn't set up in the database yet</p>
-      <p style={{fontSize:12,marginBottom:6}}>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.</p>
-      <p style={{fontSize:11,marginBottom:18,fontFamily:"JetBrains Mono, monospace"}}>{fin.error}</p>
-      <button className="nk-btn nk-btn-ghost" onClick={fin.loadAll}>↻ Retry</button>
+    <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+      <EmptyState icon="wallet" tone="warn" title="Finance isn't set up in the database yet"
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-schema.sql</code> in the Supabase SQL editor, then retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{fin.error}</span></>}
+        action={<button className="nk-btn nk-btn-ghost" onClick={fin.loadAll}><Icon n="refresh" /> Retry</button>} />
     </div>
   );
 
@@ -1695,9 +1716,9 @@ function FinanceTab({ fin, events, customers, selectedId, onSelect, onExport }) 
           <p style={{fontSize:12,color:N.textDim,marginTop:2}}>Every shilling in and out, per event — and what each event really earned</p>
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={fin.loadAll} disabled={fin.loading} aria-label="Refresh">{fin.loading ? "⏳" : "↺"} Refresh</button>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => onExport(inRange)} disabled={!inRange.length}>⬇ Export Excel</button>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setAccountsOpen(true)}>🏦 Accounts ({fin.accounts.filter(a => a.active).length})</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={fin.loadAll} disabled={fin.loading} aria-label="Refresh">{fin.loading ? <><Icon n="loader" /></> : <><Icon n="undo" /></>} Refresh</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => onExport(inRange)} disabled={!inRange.length}><Icon n="download" /> Export Excel</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setAccountsOpen(true)}><Icon n="bank" /> Accounts ({fin.accounts.filter(a => a.active).length})</button>
         </div>
       </div>
 
@@ -1735,7 +1756,10 @@ function FinanceTab({ fin, events, customers, selectedId, onSelect, onExport }) 
                 ))}
               </tbody>
             </table>
-            {!rows.length && <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>{fin.loading ? "Loading…" : events.length ? "No events match." : "No events yet — create one in the Events tab."}</div>}
+            {!rows.length && (fin.loading || !eventsLoaded ? <EmptyState loading title="Loading finance…" />
+              : events.length ? <EmptyState icon="search" title="No events match" text="Try another name, customer or venue."
+                  action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setQ("")}>Clear search</button>} />
+              : <EmptyState icon="folder" title="No events yet" text="Create an event in the Events tab, then record its payments here." />)}
           </div>
         </div>
 
@@ -1746,7 +1770,7 @@ function FinanceTab({ fin, events, customers, selectedId, onSelect, onExport }) 
                 <div style={{fontSize:16,fontWeight:800,color:N.text}}>{ev.username}</div>
                 <div style={{fontSize:12,color:N.textDim}}>{[ev.event_type, custName[ev.customer_id], ev.package_price && `${formatTsh(ev.package_price)} / card`].filter(Boolean).join(" · ")}</div>
               </div>
-              <button className="nk-modal-close" aria-label="Close event finance" onClick={() => onSelect(null)}>✕</button>
+              <button className="nk-modal-close" aria-label="Close event finance" onClick={() => onSelect(null)}><Icon n="x" /></button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
               <MoneyTile label="Income"   value={formatTsh(evSum.income)}  tone="good" />
@@ -1788,7 +1812,7 @@ function FinanceTab({ fin, events, customers, selectedId, onSelect, onExport }) 
                 return (
                   <div key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",padding:10,borderRadius:10,background:N.navy700,border:`1px solid ${N.border}`}}>
                     <div style={{width:30,height:30,borderRadius:8,flexShrink:0,display:"grid",placeItems:"center",fontWeight:800,
-                      background:inc ? N.greenBg : N.redBg,color:inc ? N.green : N.red}}>{inc ? "↓" : "↑"}</div>
+                      background:inc ? N.greenBg : N.redBg,color:inc ? N.green : N.red}}>{inc ? <><Icon n="arrowDown" /></> : <><Icon n="arrowUp" /></>}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
                         <span style={{fontWeight:700,color:N.text,overflow:"hidden",textOverflow:"ellipsis"}}>{t.party || "—"}</span>
@@ -1800,21 +1824,20 @@ function FinanceTab({ fin, events, customers, selectedId, onSelect, onExport }) 
                       {t.note && <div style={{fontSize:12,color:N.textMid,marginTop:4}}>{t.note}</div>}
                       {t.created_by && <div style={{fontSize:10,color:N.textDim,marginTop:2}}>by {t.created_by}</div>}
                     </div>
-                    <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label="Remove transaction" title="Remove" onClick={() => fin.deleteTxn(t)}>🗑</button>
+                    <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label="Remove transaction" title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>
                   </div>
                 );
               })}
               {!evTxns.length && (
-                <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:12}}>
-                  No {txFilter === "all" ? "transactions" : txFilter === "income" ? "income" : "expenses"} yet.<br />Record the customer's payment with “+ Income”.
-                </div>
+                <EmptyState icon={txFilter === "expense" ? "arrowUp" : "arrowDown"} compact
+                  title={`No ${txFilter === "all" ? "transactions" : txFilter === "income" ? "income" : "expenses"} yet`}
+                  text={txFilter === "expense" ? "Record printing, credit, transport and other costs with + Expense." : "Record the customer's payment with + Income."} />
               )}
             </div>
           </div>
         ) : (
-          <div style={{...panelStyle,textAlign:"center",color:N.textDim,fontSize:13,padding:40}}>
-            <div style={{fontSize:36,marginBottom:8}}>📒</div>
-            Select an event to see its transactions and record income or expenses.
+          <div style={panelStyle}>
+            <EmptyState icon="book" title="Pick an event" text="Select an event to see its transactions and record income or expenses." />
           </div>
         )}
       </div>
@@ -1857,7 +1880,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
           <p style={{fontSize:12,color:N.textDim,marginTop:2}}>Track enquiries, follow up, and qualify them into customers</p>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={crm.loadAll} disabled={crm.loading}>{crm.loading ? "⏳" : "↺"} Refresh</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={crm.loadAll} disabled={crm.loading}>{crm.loading ? <><Icon n="loader" /></> : <><Icon n="undo" /></>} Refresh</button>
           <button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}>+ New Lead</button>
         </div>
       </div>
@@ -1912,9 +1935,11 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
             </tbody>
           </table>
           {!rows.length && (
-            <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>
-              {crm.loading ? "Loading leads…" : crm.leads.length ? "No leads match." : "No leads yet — add your first enquiry with “+ New Lead”."}
-            </div>
+            crm.loading ? <EmptyState loading title="Loading leads…" />
+              : crm.leads.length ? <EmptyState icon="search" title="No leads match" text="Try another search or stage."
+                  action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setFilter({ status:"all", q:"" })}>Show all leads</button>} />
+              : <EmptyState icon="target" title="No leads yet" text="Every enquiry starts here — record it, follow up, and turn it into a customer."
+                  action={<button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}><Icon n="plus" /> New Lead</button>} />
           )}
         </div>
 
@@ -1944,10 +1969,10 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
 
             {lead.status === "qualified" && (
               <div style={{background:N.greenBg,border:`1px solid ${alpha(N.green,"44")}`,borderRadius:10,padding:"10px 12px",marginBottom:12,fontSize:12,color:N.textMid}}>
-                <div style={{color:N.green,fontWeight:700,marginBottom:6}}>✓ Customer since {fmtDay(lead.qualified_at)}</div>
+                <div style={{color:N.green,fontWeight:700,marginBottom:6}}><Icon n="check" /> Customer since {fmtDay(lead.qualified_at)}</div>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                  {customer && <Sb bg={N.navy700} col={N.green} border={alpha(N.green,"44")} onClick={() => onOpenCustomer(customer.id)}>👤 {customer.name}</Sb>}
-                  {lead.event_id && <Sb bg={N.navy700} col={N.sky} border={alpha(N.sky,"44")} onClick={() => onOpenEvent(lead.event_id)}>🗂 View event</Sb>}
+                  {customer && <Sb bg={N.navy700} col={N.green} border={alpha(N.green,"44")} onClick={() => onOpenCustomer(customer.id)}><Icon n="user" /> {customer.name}</Sb>}
+                  {lead.event_id && <Sb bg={N.navy700} col={N.sky} border={alpha(N.sky,"44")} onClick={() => onOpenEvent(lead.event_id)}><Icon n="folder" /> View event</Sb>}
                 </div>
               </div>
             )}
@@ -1955,14 +1980,14 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
             <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:18}}>
               {open && (
                 <button className="nk-btn nk-btn-success" style={{padding:"7px 14px",fontSize:12}} onClick={() => crm.qualifyLead(lead)} disabled={crm.busy}>
-                  ✓ Qualify → Customer
+                  <Icon n="check" /> Qualify → Customer
                 </button>
               )}
-              <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => setEditing(lead)}>✏ Edit</button>
-              {open && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "lost")}>✗ Lost</button>}
-              {lead.status === "lost" && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "contacted")}>↺ Reopen</button>}
+              <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => setEditing(lead)}><Icon n="edit" /> Edit</button>
+              {open && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "lost")}><Icon n="xCircle" /> Lost</button>}
+              {lead.status === "lost" && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "contacted")}><Icon n="undo" /> Reopen</button>}
               <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12,color:N.red}}
-                onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}>🗑</button>
+                onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}><Icon n="trash" /></button>
             </div>
 
             <div className="nk-sec nk-sec-teal" style={{marginBottom:8}}>Follow-ups</div>
@@ -2020,7 +2045,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
           <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{crm.customers.length} customer{crm.customers.length === 1 ? "" : "s"} · {totalEvents} linked event{totalEvents === 1 ? "" : "s"}</p>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={crm.loadAll} disabled={crm.loading}>{crm.loading ? "⏳" : "↺"} Refresh</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={crm.loadAll} disabled={crm.loading}>{crm.loading ? <><Icon n="loader" /></> : <><Icon n="undo" /></>} Refresh</button>
           <button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}>+ New Customer</button>
         </div>
       </div>
@@ -2046,9 +2071,10 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
             </tbody>
           </table>
           {!rows.length && (
-            <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>
-              {crm.loading ? "Loading customers…" : crm.customers.length ? "No customers match." : "No customers yet — qualify a lead or add one with “+ New Customer”."}
-            </div>
+            crm.loading ? <EmptyState loading title="Loading customers…" />
+              : crm.customers.length ? <EmptyState icon="search" title="No customers match" text="Try another name, phone number or region." />
+              : <EmptyState icon="users" title="No customers yet" text="Qualify a lead or add a customer directly."
+                  action={<button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}><Icon n="plus" /> New Customer</button>} />
           )}
         </div>
 
@@ -2060,9 +2086,9 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
                 <div style={{fontSize:12,color:N.textDim,fontFamily:"JetBrains Mono, monospace",marginTop:2}}>{phoneLabel(customer.phone)}</div>
               </div>
               <div style={{display:"flex",gap:6}}>
-                <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => setEditing(customer)}>✏ Edit</button>
+                <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => setEditing(customer)}><Icon n="edit" /> Edit</button>
                 <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12,color:N.red}}
-                  onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}>🗑</button>
+                  onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}><Icon n="trash" /></button>
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
@@ -2075,8 +2101,8 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
               <div className="nk-sec" style={{margin:0}}>Events {events ? `(${events.length})` : ""}</div>
               <button className="nk-btn nk-btn-primary" style={{padding:"5px 12px",fontSize:11}} onClick={() => onNewEvent(customer)}>+ New event</button>
             </div>
-            {!events ? <div style={{fontSize:12,color:N.textDim}}>Loading events…</div>
-              : !events.length ? <div style={{fontSize:12,color:N.textDim}}>No events yet.</div>
+            {!events ? <EmptyState loading compact title="Loading events…" />
+              : !events.length ? <EmptyState icon="calendar" compact title="No events yet" text="Create this customer's first event with + New event." />
               : (
                 <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {events.map(ev => (
@@ -2100,7 +2126,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
                 {leadsOf.map(l => (
                   <button key={l.id} onClick={() => onOpenLead(l.id)}
                     style={{textAlign:"left",background:"transparent",border:`1px dashed ${N.border}`,borderRadius:9,padding:"8px 12px",cursor:"pointer",color:N.textMid,fontFamily:"inherit",fontSize:12}}>
-                    🎯 {l.event_type || "Lead"}{l.event_date ? ` · ${fmtDay(l.event_date)}` : ""} · added {fmtDay(l.created_at)} <LeadStatus status={l.status} />
+                    <Icon n="target" /> {l.event_type || "Lead"}{l.event_date ? ` · ${fmtDay(l.event_date)}` : ""} · added {fmtDay(l.created_at)} <LeadStatus status={l.status} />
                   </button>
                 ))}
               </div>
@@ -2121,7 +2147,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
 // Everything about one event in a single view: details, customer (and their other events),
 // the lead it came from with its follow-ups, card/send counts and the latest history.
 // Loads its own data; `onOpen(ev, tab)` jumps into the designer / report / history.
-function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCustomer, onOpenLead }) {
+function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCustomer, onOpenLead, onOpenFinance }) {
   const [d, setD] = useState(null);   // fresh per event: the parent renders <EventOverview key={eventId}>
   useEffect(() => {
     let live = true;
@@ -2130,7 +2156,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
       if (!live) return;
       if (error) { setD({ error: error.message }); return; }
       const none = Promise.resolve({ data: null });
-      const [cust, lead, cards, logs, siblings] = await Promise.all([
+      const [cust, lead, cards, logs, siblings, txns] = await Promise.all([
         ev.customer_id ? supabase.from("customers").select("*").eq("id", ev.customer_id).maybeSingle() : none,
         ev.lead_id ? supabase.from("leads").select("*").eq("id", ev.lead_id).maybeSingle()
                    : supabase.from("leads").select("*").eq("event_id", ev.id).limit(1).maybeSingle(),
@@ -2138,9 +2164,11 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
         supabase.from("event_logs").select("*").eq("event_id", ev.id).order("created_at", { ascending:false }).limit(8),
         ev.customer_id ? supabase.from("events").select("id,username,event_type,start_datetime,status").eq("customer_id", ev.customer_id)
                            .order("start_datetime", { ascending:false, nullsFirst:false }) : none,
+        // Finance tables may not exist yet — a failed query just hides the money card
+        supabase.from("event_transactions").select("kind,amount").eq("event_id", ev.id),
       ]);
       const fu = lead.data ? await supabase.from("lead_followups").select("*").eq("lead_id", lead.data.id).order("created_at", { ascending:false }) : { data: [] };
-      if (live) setD({ ev, customer: cust.data, lead: lead.data, followups: fu.data || [], cards: cards.data || [], logs: logs.data || [], siblings: siblings.data || [] });
+      if (live) setD({ ev, customer: cust.data, lead: lead.data, followups: fu.data || [], cards: cards.data || [], logs: logs.data || [], siblings: siblings.data || [], money: txns.error ? null : summariseTransactions(txns.data || []) });
     })();
     return () => { live = false; };
   }, [eventId]);
@@ -2160,28 +2188,28 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
               </div>
             )}
           </div>
-          <button className="nk-modal-close" onClick={onClose}>✕</button>
+          <button className="nk-modal-close" onClick={onClose}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
-          {!d ? <div style={{padding:40,textAlign:"center",color:N.textDim}}>Loading…</div>
-            : d.error ? <div style={{padding:40,textAlign:"center",color:N.red}}>Could not load this event: {d.error}</div>
+          {!d ? <EmptyState loading title="Loading event…" />
+            : d.error ? <EmptyState icon="alert" tone="bad" title="Could not load this event" text={d.error} />
             : (
               <>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16,alignItems:"center"}}>
                   <span className={`nk-badge ${ev.status==="active"?"badge-yes":ev.status==="completed"?"badge-sent":"badge-no"}`}>{ev.status}</span>
                   {ev.package_price != null && <Pill tone="good">{formatTsh(ev.package_price)}</Pill>}
                   <div style={{marginLeft:"auto",display:"flex",gap:6,flexWrap:"wrap"}}>
-                    <Sb bg={N.accent} col="#fff" border={N.accent} onClick={() => onOpen(ev, "design")}>🎨 Open in Design</Sb>
-                    <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} onClick={() => onOpen(ev, "reports")}>📋 Report</Sb>
-                    <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")} onClick={() => onOpen(ev, "history")}>🕘 History</Sb>
-                    <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={() => onEdit(ev)}>✏ Edit</Sb>
+                    <Sb bg={N.accent} col="#fff" border={N.accent} onClick={() => onOpen(ev, "design")}><Icon n="palette" /> Open in Design</Sb>
+                    <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} onClick={() => onOpen(ev, "reports")}><Icon n="report" /> Report</Sb>
+                    <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")} onClick={() => onOpen(ev, "history")}><Icon n="history" /> History</Sb>
+                    <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={() => onEdit(ev)}><Icon n="edit" /> Edit</Sb>
                   </div>
                 </div>
 
                 <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"flex-start"}}>
                   <div style={{flex:"1 1 380px",minWidth:0}}>
                     <div style={card}>
-                      <div className="nk-sec" style={{marginBottom:10}}>👤 Customer</div>
+                      <div className="nk-sec" style={{marginBottom:10}}><Icon n="user" /> Customer</div>
                       {d.customer ? (
                         <>
                           <button onClick={() => onOpenCustomer(d.customer.id)} style={{background:"none",border:"none",padding:0,cursor:"pointer",textAlign:"left",color:N.text,fontFamily:"inherit"}}>
@@ -2202,12 +2230,12 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
                             </div>
                           )}
                         </>
-                      ) : <div style={{fontSize:12,color:N.textDim}}>Not linked to a customer — use ✏ Edit to choose one.</div>}
+                      ) : <div style={{fontSize:12,color:N.textDim}}>Not linked to a customer — use <Icon n="edit" /> Edit to choose one.</div>}
                     </div>
 
                     <div style={card}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                        <div className="nk-sec" style={{margin:0}}>🎯 Lead &amp; follow-ups</div>
+                        <div className="nk-sec" style={{margin:0}}><Icon n="target" /> Lead &amp; follow-ups</div>
                         {d.lead && <Sb bg="transparent" col={N.sky} border={alpha(N.sky,"44")} onClick={() => onOpenLead(d.lead.id)}>Open lead</Sb>}
                       </div>
                       {d.lead ? (
@@ -2226,8 +2254,38 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
                   </div>
 
                   <div style={{flex:"1 1 320px",minWidth:0}}>
+                    {d.money && (
+                      <div style={card}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                          <div className="nk-sec" style={{margin:0}}><Icon n="wallet" /> Profit</div>
+                          {onOpenFinance && <Sb bg="transparent" col={N.sky} border={alpha(N.sky,"44")} onClick={() => onOpenFinance(ev.id)}>Open in Finance</Sb>}
+                        </div>
+                        {d.money.count ? (
+                          <>
+                            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                              {[
+                                ["Income",   formatTsh(d.money.income),  N.green],
+                                ["Expenses", formatTsh(d.money.expense), N.red],
+                                ["Profit",   formatTsh(d.money.profit),  d.money.profit < 0 ? N.red : N.sky],
+                                ["Margin",   formatPct(d.money.marginPct), TONE[MARGIN_TONE[marginTone(d.money.marginPct)]]],
+                              ].map(([l, v, c]) => (
+                                <div key={l} style={{background:N.navy800,borderRadius:9,padding:"8px 10px",border:`1px solid ${alpha(c,"33")}`}}>
+                                  <div style={{fontSize:16,fontWeight:800,color:c,fontVariantNumeric:"tabular-nums"}}>{v}</div>
+                                  <div style={{fontSize:10,color:N.textDim,textTransform:"uppercase",letterSpacing:.5}}>{l}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{fontSize:11,color:N.textDim,marginTop:8}}>{d.money.count} transaction{d.money.count === 1 ? "" : "s"} recorded</div>
+                          </>
+                        ) : (
+                          <EmptyState icon="wallet" compact title="No money recorded yet"
+                            text="Record the customer's payments and the event's costs to see its profit."
+                            action={onOpenFinance && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => onOpenFinance(ev.id)}><Icon n="plus" /> Record a payment</button>} />
+                        )}
+                      </div>
+                    )}
                     <div style={card}>
-                      <div className="nk-sec" style={{marginBottom:10}}>🖼 Cards &amp; sending</div>
+                      <div className="nk-sec" style={{marginBottom:10}}><Icon n="image" /> Cards &amp; sending</div>
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                         {[
                           ["Contacts",   d.cards.length,                                                         N.textMid],
@@ -2243,14 +2301,14 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
                       </div>
                     </div>
                     <div style={card}>
-                      <div className="nk-sec" style={{marginBottom:10}}>🕘 Latest activity</div>
-                      {!d.logs.length ? <div style={{fontSize:12,color:N.textDim}}>Nothing recorded yet.</div> : d.logs.map(r => {
+                      <div className="nk-sec" style={{marginBottom:10}}><Icon n="history" /> Latest activity</div>
+                      {!d.logs.length ? <EmptyState icon="history" compact text="Nothing recorded yet — sends and changes appear here." /> : d.logs.map(r => {
                         const st = HISTORY_STATUSES[r.status] || { label: r.status, tone: "info" };
                         return (
                           <div key={r.id} style={{display:"flex",gap:8,alignItems:"baseline",fontSize:12,padding:"4px 0",borderBottom:`1px solid ${N.border}`}}>
                             <span style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:10,whiteSpace:"nowrap"}}>{fmtWhen(r.created_at)}</span>
                             <span style={{flex:1,minWidth:0,color:N.textMid,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                              {HISTORY_CHANNELS[r.channel]?.icon} {HISTORY_ACTIONS[r.action] || r.action}{r.recipient_name ? ` — ${r.recipient_name}` : ""}{!r.recipient_name && r.detail ? ` — ${r.detail}` : ""}
+                              <Icon n={HISTORY_CHANNELS[r.channel]?.icon} /> {HISTORY_ACTIONS[r.action] || r.action}{r.recipient_name ? ` — ${r.recipient_name}` : ""}{!r.recipient_name && r.detail ? ` — ${r.detail}` : ""}
                             </span>
                             <Pill tone={st.tone}>{st.label}</Pill>
                           </div>
@@ -2317,6 +2375,7 @@ export default function App() {
   const [eventSearch, setEventSearch] = useState("");
   const [eventDropdownOpen, setEventDropdownOpen] = useState(false);
   const [savedEvents,  setSavedEvents]  = useState([]);
+  const [eventsLoaded, setEventsLoaded] = useState(false);   // first events fetch finished (drives the loading state)
   const [coverUrl,          setCoverUrl]          = useState(null);
   const [isSaving,          setIsSaving]          = useState(false);
   const [loadingTemplate,   setLoadingTemplate]   = useState(false);
@@ -2501,6 +2560,7 @@ export default function App() {
   const loadSavedEvents = async () => {
     if (!supabase) return [];
     const { data, error } = await supabase.from("events").select("*").order("created_at", { ascending:false }).limit(50);
+    setEventsLoaded(true);
     if (!error && data) { setSavedEvents(data); return data; }
     return [];
   };
@@ -3198,7 +3258,7 @@ export default function App() {
     const resendBox = resent.length > 0 && (
       <div style={{marginTop:14,padding:12,borderRadius:10,background:N.amberBg,border:`1px solid ${alpha(N.amber,"55")}`}}>
         <div style={{color:N.amber,fontWeight:700,marginBottom:6}}>
-          ⚠ {plural(resent.length, "contact")} already received this message
+          <Icon n="alert" /> {plural(resent.length, "contact")} already received this message
         </div>
         <div className="nk-dialog-list">
           {resent.slice(0, 6).map(t => <div key={t.index}>{t.rec.name || "(no name)"} <span className="num">+{normalisePhone(t.rec.phone)}</span></div>)}
@@ -3236,7 +3296,7 @@ export default function App() {
           {extra > 0 && (
             <div style={{marginTop:14}}>
               <div style={{color:N.amber,fontWeight:700,marginBottom:6}}>
-                ⚠ {plural(extra, "extra record")} {extra === 1 ? "shares" : "share"} a number with another contact
+                <Icon n="alert" /> {plural(extra, "extra record")} {extra === 1 ? "shares" : "share"} a number with another contact
               </div>
               <div className="nk-dialog-list">
                 {duplicateGroups.slice(0, 6).map(g => (
@@ -3712,7 +3772,7 @@ export default function App() {
       const blob = await zip.generateAsync({ type:"blob" });
       const a = document.createElement("a"); a.download="nikadi_cards.zip"; a.href=URL.createObjectURL(blob); a.click();
       URL.revokeObjectURL(a.href);
-      showToast(`✓ nikadi_cards.zip (${records.length} cards)`, "success");
+      showToast(`Saved nikadi_cards.zip (${records.length} cards)`, "success");
     } catch (err) { showToast(`Download failed: ${err.message}`, "warn"); }
   };
 
@@ -3944,7 +4004,7 @@ export default function App() {
         {/* Toast */}
         {toast && (
           <div className={`nk-toast toast-${toast.type}`}>
-            <span className="nk-toast-icon">{toast.type==="success"?"✓":toast.type==="warn"?"⚠":"ℹ"}</span>
+            <span className="nk-toast-icon">{toast.type==="success"?<><Icon n="check" /></>:toast.type==="warn"?<><Icon n="alert" /></>:<><Icon n="info" /></>}</span>
             <span>{toast.msg}</span>
           </div>
         )}
@@ -3968,7 +4028,8 @@ export default function App() {
         {overviewId && (
           <EventOverview key={overviewId} eventId={overviewId} onClose={() => setOverviewId(null)} onSwitch={setOverviewId}
             onOpen={openEventIn} onEdit={(ev) => { setOverviewId(null); editEvent(ev); }}
-            onOpenCustomer={openCustomer} onOpenLead={openLead} />
+            onOpenCustomer={openCustomer} onOpenLead={openLead}
+            onOpenFinance={(id) => { setOverviewId(null); setFinanceSel(id); loadSavedEvents(); setTab("finance"); }} />
         )}
 
         {/* Choice dialog (bulk-send / re-send confirmations) */}
@@ -4000,7 +4061,7 @@ export default function App() {
               </div>
               <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
                 <button className="nk-btn nk-btn-ghost" onClick={()=>setDeleteTarget(null)}>Cancel</button>
-                <button className="nk-btn nk-btn-danger" onClick={()=>deleteEvent(deleteTarget)}>🗑 Delete</button>
+                <button className="nk-btn nk-btn-danger" onClick={()=>deleteEvent(deleteTarget)}><Icon n="trash" /> Delete</button>
               </div>
             </div>
           </div>
@@ -4017,26 +4078,26 @@ export default function App() {
           </div>
           <div style={{display:"flex",alignItems:"center",gap:6,marginLeft:16}}>
             <div className={`nk-db-dot ${dbDot}`} title={dbStatus} />
-            <span style={{fontSize:11,color:N.textDim}}>{dbStatus === "connected" ? "Supabase ✓" : dbStatus === "unconfigured" ? "No DB" : "DB Error"}</span>
+            <span style={{fontSize:11,color:N.textDim}}>{dbStatus === "connected" ? <>Supabase <Icon n="check" /></> : dbStatus === "unconfigured" ? "No DB" : "DB Error"}</span>
           </div>
           <div className="nk-header-actions">
             {savedEventId && (
               <span style={{fontSize:11,color:N.green,fontFamily:"JetBrains Mono, monospace"}}>
-                ● {eventData.username||"Event"}{eventData.event_type ? ` · ${eventData.event_type}` : ""}
+                <Icon n="dot" /> {eventData.username||"Event"}{eventData.event_type ? ` · ${eventData.event_type}` : ""}
               </span>
             )}
             <button className="nk-btn nk-btn-success" onClick={sendWaAll} disabled={bulkSending}>
-              {bulkSending ? "⏳ Sending…" : `📲 WA Send All (${records.filter(r=>r.phone).length})`}
+              {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`WA Send All (${records.filter(r=>r.phone).length})`}</>}
             </button>
             <button className="nk-btn nk-btn-primary" onClick={downloadAll}>
-              ⬇ Download All ({records.length})
+              <Icon n="download" /> Download All ({records.length})
             </button>
             {/* Theme: System (follows the browser) → Light → Dark */}
             <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}}
               onClick={()=>setThemePref(nextThemePref(themePref))}
               title={`Theme: ${THEME_LABELS[themePref]} — click to change`}
               aria-label={`Theme: ${THEME_LABELS[themePref]}. Click to change.`}>
-              {THEME_ICONS[themePref]} {THEME_LABELS[themePref]}
+              <Icon n={THEME_ICONS[themePref]} /> {THEME_LABELS[themePref]}
             </button>
             <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:4,paddingLeft:12,borderLeft:`1px solid ${N.border}`}}>
               {user.user_metadata?.avatar_url && (
@@ -4058,9 +4119,9 @@ export default function App() {
 
         {/* Tabs */}
         <nav className="nk-tabs">
-          <button className={`nk-tab${tab==="events"?" active":""}`}    onClick={()=>{ loadSavedEvents(); setTab("events"); }}>🗂 Events</button>
+          <button className={`nk-tab${tab==="events"?" active":""}`}    onClick={()=>{ loadSavedEvents(); setTab("events"); }}><Icon n="folder" /> Events</button>
           <button className={`nk-tab${tab==="leads"?" active":""}`}     onClick={()=>setTab("leads")}>
-            🎯 Leads
+            <Icon n="target" /> Leads
             {leadSummary.dueToday + leadSummary.overdue > 0 && (
               <span title="Follow-ups due today or overdue"
                 style={{marginLeft:6,background:N.red,color:"#fff",borderRadius:10,padding:"0 6px",fontSize:10,fontWeight:800}}>
@@ -4068,30 +4129,30 @@ export default function App() {
               </span>
             )}
           </button>
-          <button className={`nk-tab${tab==="customers"?" active":""}`} onClick={()=>setTab("customers")}>👥 Customers</button>
+          <button className={`nk-tab${tab==="customers"?" active":""}`} onClick={()=>setTab("customers")}><Icon n="users" /> Customers</button>
           <span className="nk-tab-sep" aria-hidden="true" />
-          <button className={`nk-tab${tab==="design"?" active":""}`}    onClick={()=>setTab("design")}>🎨 Design</button>
-          <button className={`nk-tab${tab==="vcard"?" active":""}`}     onClick={()=>setTab("vcard")}>📇 VCard</button>
-          <button className={`nk-tab${tab==="sms"?" active":""}`}       onClick={()=>setTab("sms")}>💬 SMS</button>
-          <button className={`nk-tab${tab==="whatsapp"?" active":""}`}  onClick={()=>setTab("whatsapp")}>📲 WhatsApp</button>
-          <button className={`nk-tab${tab==="batch"?" active":""}`}     onClick={()=>setTab("batch")}>📊 Batch & Send</button>
+          <button className={`nk-tab${tab==="design"?" active":""}`}    onClick={()=>setTab("design")}><Icon n="palette" /> Design</button>
+          <button className={`nk-tab${tab==="vcard"?" active":""}`}     onClick={()=>setTab("vcard")}><Icon n="contact" /> VCard</button>
+          <button className={`nk-tab${tab==="sms"?" active":""}`}       onClick={()=>setTab("sms")}><Icon n="sms" /> SMS</button>
+          <button className={`nk-tab${tab==="whatsapp"?" active":""}`}  onClick={()=>setTab("whatsapp")}><Icon n="whatsapp" /> WhatsApp</button>
+          <button className={`nk-tab${tab==="batch"?" active":""}`}     onClick={()=>setTab("batch")}><Icon n="table" /> Batch & Send</button>
           <span className="nk-tab-sep" aria-hidden="true" />
-          <button className={`nk-tab${tab==="reports"?" active":""}`}   onClick={()=>setTab("reports")}>📋 Reports</button>
-          <button className={`nk-tab${tab==="history"?" active":""}`}   onClick={()=>setTab("history")}>🕘 History</button>
+          <button className={`nk-tab${tab==="reports"?" active":""}`}   onClick={()=>setTab("reports")}><Icon n="report" /> Reports</button>
+          <button className={`nk-tab${tab==="history"?" active":""}`}   onClick={()=>setTab("history")}><Icon n="history" /> History</button>
           <span className="nk-tab-sep" aria-hidden="true" />
-          <button className={`nk-tab${tab==="finance"?" active":""}`}   onClick={()=>{ loadSavedEvents(); setTab("finance"); }}>💰 Finance</button>
+          <button className={`nk-tab${tab==="finance"?" active":""}`}   onClick={()=>{ loadSavedEvents(); setTab("finance"); }}><Icon n="wallet" /> Finance</button>
         </nav>
 
         {/* Info banners */}
         {tab==="batch" && (
           <div className="nk-banner">
-            <span style={{fontSize:16,marginTop:1}}>ℹ</span>
-            <span><strong>WhatsApp Sending:</strong> Select an image in the <strong>WhatsApp</strong> tab, then use <strong style={{color:N.green}}>📲 WA</strong> per row or <strong style={{color:N.green}}>WA Send All</strong> in the header. 1 second gap per number.</span>
+            <span style={{fontSize:16,marginTop:1}}><Icon n="info" /></span>
+            <span><strong>WhatsApp Sending:</strong> Select an image in the <strong>WhatsApp</strong> tab, then use <strong style={{color:N.green}}><Icon n="whatsapp" /> WA</strong> per row or <strong style={{color:N.green}}>WA Send All</strong> in the header. 1 second gap per number.</span>
           </div>
         )}
         {tab==="vcard" && (
           <div className="nk-banner">
-            <span style={{fontSize:16,marginTop:1}}>ℹ</span>
+            <span style={{fontSize:16,marginTop:1}}><Icon n="info" /></span>
             <span>Upload CSV with <code>Name</code> and <code>Phone</code> columns. Contacts will be saved as <code>{"{Name}"} {eventData.username||"EventUsername"}_Nikadi</code>.</span>
           </div>
         )}
@@ -4115,7 +4176,7 @@ export default function App() {
                         setEventSearch("");
                       }}
                       style={{background:"none",border:"none",color:N.red,cursor:"pointer",fontSize:16}}
-                    >✕</button>
+                    ><Icon n="x" /></button>
                   </div>
                 ) : (
                   <>
@@ -4125,7 +4186,7 @@ export default function App() {
                       value={eventSearch}
                       onChange={e=>setEventSearch(e.target.value)}
                       onFocus={()=>setEventDropdownOpen(true)}
-                      placeholder="🔍 Type to search..."
+                      placeholder="Type to search…"
                       style={{marginBottom:4,fontSize:12}}
                     />
                     {eventDropdownOpen && (
@@ -4165,7 +4226,7 @@ export default function App() {
 
                 {loadingTemplate && (
                   <div style={{fontSize:11,color:N.amber,background:N.amberBg,border:`1px solid ${alpha(N.amber,"44")}`,borderRadius:8,padding:"8px 12px",marginBottom:8,display:"flex",gap:8,alignItems:"center"}}>
-                    <span>⏳</span> Loading template from database…
+                    <span><Icon n="loader" /></span> Loading template from database…
                   </div>
                 )}
 
@@ -4192,22 +4253,22 @@ export default function App() {
                 <div className="nk-sec">Card Template</div>
                 <label className="nk-upload">
                   <input type="file" accept="image/*" style={{display:"none"}} onChange={onBgUpload} />
-                  <span className="nk-upload-icon">🖼️</span>
+                  <span className="nk-upload-icon"><Icon n="image" /></span>
                   <span className="nk-upload-label">Upload Template</span>
                   <span className="nk-upload-sub">PNG · JPG · SVG — positions auto-saved</span>
                 </label>
                 {bgSize && (
                   <div className="nk-chip">
-                    📐 {bgSize.w} × {bgSize.h} px<br/>
-                    <span className="nk-chip-ok">✓ Canvas locked to image</span>
-                    {coverUrl && <><br/><span className="nk-chip-ok">☁ Saved to cloud</span></>}
-                    {layoutRestored && <><br/><span className="nk-chip-ok">🔁 Layout restored</span></>}
+                    <Icon n="ruler" /> {bgSize.w} × {bgSize.h} px<br/>
+                    <span className="nk-chip-ok"><Icon n="check" /> Canvas locked to image</span>
+                    {coverUrl && <><br/><span className="nk-chip-ok"><Icon n="cloud" /> Saved to cloud</span></>}
+                    {layoutRestored && <><br/><span className="nk-chip-ok"><Icon n="repeat" /> Layout restored</span></>}
                   </div>
                 )}
                 {bgImage && (
                   <div style={{display:"flex",gap:6}}>
-                    <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetTemplate}>✕ Remove</button>
-                    {templateKey && <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetLayout} title="Reset element positions to defaults">↺ Reset Layout</button>}
+                    <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetTemplate}><Icon n="x" /> Remove</button>
+                    {templateKey && <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetLayout} title="Reset element positions to defaults"><Icon n="undo" /> Reset Layout</button>}
                   </div>
                 )}
                 {bgImage && supabase && (
@@ -4223,11 +4284,11 @@ export default function App() {
                         autoFocus
                       />
                       <button className="nk-btn nk-btn-primary" style={{fontSize:11,padding:"4px 10px"}} onClick={saveCurrentTemplate}>Save</button>
-                      <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setShowSaveTemplate(false)}>✕</button>
+                      <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 8px"}} onClick={()=>setShowSaveTemplate(false)}><Icon n="x" /></button>
                     </div>
                   ) : (
                     <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:6}} onClick={()=>{ setShowSaveTemplate(true); setTemplateSaveName(""); }}>
-                      💾 Save as Template
+                      <Icon n="save" /> Save as Template
                     </button>
                   )
                 )}
@@ -4244,14 +4305,14 @@ export default function App() {
                           title={`Apply "${tpl.name}"`}
                           onClick={()=>applySavedTemplate(tpl)}
                         >
-                          🖼️ {tpl.name}
+                          <Icon n="image" /> {tpl.name}
                         </button>
                         <button
                           className="nk-btn nk-btn-ghost"
                           style={{fontSize:10,padding:"3px 7px",color:N.red||"#f87171",flexShrink:0}}
                           title="Delete template"
                           onClick={()=>deleteSavedTemplate(tpl)}
-                        >✕</button>
+                        ><Icon n="x" /></button>
                       </div>
                     ))}
                   </div>
@@ -4263,7 +4324,7 @@ export default function App() {
                 <div className="nk-sec">Elements</div>
                 {isMichango && (
                   <div className="nk-michango-badge">
-                    <span>🚫</span>
+                    <span><Icon n="ban" /></span>
                     <span><strong>Michango mode</strong><br/>QR Code &amp; Card Type hidden from card</span>
                   </div>
                 )}
@@ -4282,7 +4343,7 @@ export default function App() {
                 {savedEventId && (
                   <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
                     onClick={saveLayout}>
-                    💾 Save Layout to DB
+                    <Icon n="save" /> Save Layout to DB
                   </button>
                 )}
               </div>
@@ -4292,14 +4353,14 @@ export default function App() {
                 <div className="nk-sec">Contacts (Cards)</div>
                 <label className="nk-upload">
                   <input type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onExcelUpload} />
-                  <span className="nk-upload-icon">📊</span>
+                  <span className="nk-upload-icon"><Icon n="table" /></span>
                   <span className="nk-upload-label">Upload Spreadsheet</span>
                   <span className="nk-upload-sub">Name · CardType · Phone</span>
                 </label>
                 {savedEventId && records.length > 0 && (
                   <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
                     onClick={()=>saveCards(savedEventId)}>
-                    💾 Save Cards to DB ({records.length})
+                    <Icon n="save" /> Save Cards to DB ({records.length})
                   </button>
                 )}
               </div>
@@ -4329,25 +4390,23 @@ export default function App() {
                     <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{savedEvents.length} event{savedEvents.length!==1?"s":""} · Click "Create Cards" to design cards for an event</p>
                   </div>
                   <div style={{display:"flex",gap:8}}>
-                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={loadSavedEvents}>↺ Refresh</button>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={loadSavedEvents}><Icon n="undo" /> Refresh</button>
                     <button className="nk-btn nk-btn-primary" onClick={()=>setModalEvent(BLANK_EVENT)}>+ New Event</button>
                   </div>
                 </div>
 
                 {!supabase && (
-                  <div style={{textAlign:"center",padding:60,color:N.textDim,background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
-                    <div style={{fontSize:48,marginBottom:12}}>🔌</div>
-                    <p style={{fontWeight:700,marginBottom:6}}>Supabase not configured</p>
-                    <p style={{fontSize:12}}>Add <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>VITE_SUPABASE_URL</code> and <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>VITE_SUPABASE_ANON_KEY</code> to <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>.env.local</code> and restart the dev server.</p>
+                  <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+                    <EmptyState icon="plug" tone="warn" title="Supabase not configured" text={<>Add <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>VITE_SUPABASE_URL</code> and <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>VITE_SUPABASE_ANON_KEY</code> to <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>.env.local</code> and restart the dev server.</>} />
                   </div>
                 )}
 
-                {supabase && savedEvents.length === 0 && (
-                  <div style={{textAlign:"center",padding:60,color:N.textDim,background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
-                    <div style={{fontSize:48,marginBottom:12}}>🗂️</div>
-                    <p style={{fontWeight:700,marginBottom:6}}>No events yet</p>
-                    <p style={{fontSize:12,marginBottom:20}}>Create your first event to get started.</p>
-                    <button className="nk-btn nk-btn-primary" onClick={()=>setModalEvent(BLANK_EVENT)}>+ Create First Event</button>
+                {supabase && !eventsLoaded && savedEvents.length === 0 && <EmptyState loading title="Loading events…" />}
+
+                {supabase && eventsLoaded && savedEvents.length === 0 && (
+                  <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+                    <EmptyState icon="folder" title="No events yet" text="Create your first event, then design its cards, import guests and send."
+                      action={<button className="nk-btn nk-btn-primary" onClick={()=>setModalEvent(BLANK_EVENT)}><Icon n="plus" /> Create First Event</button>} />
                   </div>
                 )}
 
@@ -4372,7 +4431,7 @@ export default function App() {
                               {customerById[ev.customer_id] && (
                                 <button onClick={(e)=>{ e.stopPropagation(); openCustomer(ev.customer_id); }} title="Open this customer"
                                   style={{background:"none",border:"none",padding:0,marginTop:2,cursor:"pointer",fontSize:11,color:N.green,fontFamily:"inherit"}}>
-                                  👤 {customerById[ev.customer_id].name}
+                                  <Icon n="user" /> {customerById[ev.customer_id].name}
                                 </button>
                               )}
                             </td>
@@ -4395,38 +4454,38 @@ export default function App() {
                                 <Sb bg={N.navy600} col={N.green} border={alpha(N.green,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setOverviewId(ev.id); }}
                                   title="Customer, lead, follow-ups, sending and history for this event">
-                                  🔎 Overview
+                                  <Icon n="eye" /> Overview
                                 </Sb>
                                 <Sb bg={N.accent} col="#fff" border={N.accent}
                                   onClick={(e)=>{ e.stopPropagation(); createCardsFromEvent(ev); }}
                                   title="Load this event and open card designer">
-                                  🎨 Create Cards
+                                  <Icon n="palette" /> Create Cards
                                 </Sb>
                                 <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "reports"); }}
                                   title="View this event's cards and download the send report">
-                                  📋 Report
+                                  <Icon n="report" /> Report
                                 </Sb>
                                 <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "history"); }}
                                   title="Every card and SMS sent for this event, with results">
-                                  🕘 History
+                                  <Icon n="history" /> History
                                 </Sb>
                                 <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); editEvent(ev); }}
                                   title="Edit event details">
-                                  ✏ Edit
+                                  <Icon n="edit" /> Edit
                                 </Sb>
                                 <Sb bg={N.redBg} col={N.red} border={alpha(N.red,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setDeleteTarget(ev); }}
                                   title="Delete this event">
-                                  🗑 Delete
+                                  <Icon n="trash" /> Delete
                                 </Sb>
                                 {ev.cover_image_url && (
                                   <Sb bg={N.navy700} col={N.textMid} border={N.border}
                                     onClick={(e)=>{ e.stopPropagation(); window.open(ev.cover_image_url,"_blank"); }}
                                     title="View template">
-                                    🖼
+                                    <Icon n="image" />
                                   </Sb>
                                 )}
                               </div>
@@ -4452,7 +4511,7 @@ export default function App() {
 
             {/* ─── FINANCE ─── */}
             {tab === "finance" && (
-              <FinanceTab fin={fin} events={savedEvents} customers={crm.customers} selectedId={financeSel} onSelect={setFinanceSel} onExport={exportFinance} />
+              <FinanceTab fin={fin} events={savedEvents} eventsLoaded={eventsLoaded} customers={crm.customers} selectedId={financeSel} onSelect={setFinanceSel} onExport={exportFinance} />
             )}
 
             {/* ─── DESIGN ─── */}
@@ -4460,8 +4519,8 @@ export default function App() {
               <>
                 <div className="nk-hint" style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap",justifyContent:"center"}}>
                   <span>{bgSize ? `Canvas: ${cw}×${ch}px — matches template` : "Default 440×280 · Upload template to match dimensions"}</span>
-                  {layoutRestored && <span className="nk-layout-chip">🔁 Layout restored</span>}
-                  {!savedEventId && <span style={{color:N.amber,fontSize:11}}>⚠ No event loaded — <span style={{cursor:"pointer",textDecoration:"underline"}} onClick={()=>setTab("events")}>select one</span></span>}
+                  {layoutRestored && <span className="nk-layout-chip"><Icon n="repeat" /> Layout restored</span>}
+                  {!savedEventId && <span style={{color:N.amber,fontSize:11}}><Icon n="alert" /> No event loaded — <span style={{cursor:"pointer",textDecoration:"underline"}} onClick={()=>setTab("events")}>select one</span></span>}
                 </div>
                 <CardCanvas bgImage={bgImage} bgSize={bgSize} elements={designElements}
                   record={activeRecord} selected={selected} onSelect={setSelected} onMove={onMove} />
@@ -4483,13 +4542,13 @@ export default function App() {
                     <div className="nk-sec nk-sec-purple">Upload Contact CSV</div>
                     <label className="nk-upload" style={{marginBottom:12}}>
                       <input type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onVcardCsvUpload} />
-                      <span className="nk-upload-icon">📇</span>
+                      <span className="nk-upload-icon"><Icon n="contact" /></span>
                       <span className="nk-upload-label">Upload CSV for VCard</span>
                       <span className="nk-upload-sub">Columns: Name · Phone</span>
                     </label>
                     {vcardContacts.length > 0 && (
                       <div className="nk-chip" style={{marginBottom:12}}>
-                        📇 {vcardContacts.length} contacts loaded<br/>
+                        <Icon n="contact" /> {vcardContacts.length} contacts loaded<br/>
                         <span className="nk-chip-ok">Event Username: {eventData.username||"— set via Events tab"}</span>
                       </div>
                     )}
@@ -4503,11 +4562,11 @@ export default function App() {
                       </p>
                     </div>
                     <button className="nk-btn nk-btn-purple nk-btn-full" onClick={downloadVCard} disabled={!vcardContacts.length}>
-                      ⬇ Download .vcf File
+                      <Icon n="download" /> Download .vcf File
                     </button>
                     {!eventData.username && (
                       <p style={{fontSize:11,color:N.amber,marginTop:8,textAlign:"center"}}>
-                        ⚠ Load an event first to set the username
+                        <Icon n="alert" /> Load an event first to set the username
                       </p>
                     )}
                   </div>
@@ -4536,10 +4595,7 @@ export default function App() {
                         </div>
                       </>
                     ) : (
-                      <div style={{textAlign:"center",padding:60,color:N.textDim}}>
-                        <div style={{fontSize:48,marginBottom:12}}>📇</div>
-                        <p>Upload a CSV to preview VCard contacts</p>
-                      </div>
+                      <EmptyState icon="contact" title="No contacts loaded" text="Upload a CSV with Name and Phone columns to preview the VCard contacts." />
                     )}
                   </div>
                 </div>
@@ -4569,7 +4625,7 @@ export default function App() {
                       })}
                       <button onClick={addExtraMessage}
                         style={{padding:"4px 11px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",background:"transparent",color:N.sky,border:`1px dashed ${alpha(N.sky,"66")}`}}>
-                        ＋ Add message
+                        <Icon n="plus" /> Add message
                       </button>
                     </div>
 
@@ -4581,11 +4637,11 @@ export default function App() {
                           <input className="nk-input" style={{flex:1}} value={activeExtra.title} maxLength={60}
                             onChange={e=>updateExtraMessage(activeExtra.id, { title: e.target.value })} />
                           <button className="nk-btn nk-btn-ghost" style={{padding:"4px 10px",fontSize:11,color:N.red}}
-                            onClick={()=>deleteExtraMessage(activeExtra)} title="Delete this message">🗑</button>
+                            onClick={()=>deleteExtraMessage(activeExtra)} title="Delete this message"><Icon n="trash" /></button>
                         </div>
                         <label className="nk-label">Send to</label>
                         <div style={{display:"flex",gap:5,marginBottom:8}}>
-                          {[["contacts","👥 Event contacts"],["upload","📄 Uploaded list"]].map(([src,label]) => {
+                          {[["contacts",<><Icon n="users" /> Event contacts</>],["upload",<><Icon n="file" /> Uploaded list</>]].map(([src,label]) => {
                             const on = activeExtra.source === src;
                             return (
                               <button key={src}
@@ -4605,19 +4661,19 @@ export default function App() {
                         </div>
                         {activeExtra.source === "upload" && (
                           <div style={{fontSize:11,color:N.textMid,marginBottom:8}}>
-                            📄 {activeExtra.fileName || "List"} — {activeExtra.recipients.length} recipients
+                            <Icon n="file" /> {activeExtra.fileName || "List"} — {activeExtra.recipients.length} recipients
                           </div>
                         )}
                         <div style={{display:"flex",gap:6}}>
                           <label className="nk-btn nk-btn-ghost" style={{flex:1,fontSize:11,padding:"6px 8px",textAlign:"center",cursor:"pointer"}}>
                             <input type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onMessageListUpload} />
-                            ⬆ {activeExtra.source === "upload" ? "Replace list" : "Upload list"}
+                            <Icon n="upload" /> {activeExtra.source === "upload" ? "Replace list" : "Upload list"}
                           </label>
                           <button className="nk-btn nk-btn-ghost" style={{flex:1,fontSize:11,padding:"6px 8px"}}
                             disabled={!vcardContacts.length}
                             title={vcardContacts.length ? `Use the ${vcardContacts.length} contacts loaded in the VCard tab` : "Upload a list in the VCard tab first"}
                             onClick={()=>setMessageList(activeExtra, { source:"upload", rows: vcardContacts, columns: vcardColumns, fileName:"VCard tab list" })}>
-                            📇 Use VCard list
+                            <Icon n="contact" /> Use VCard list
                           </button>
                         </div>
                         <p style={{fontSize:10,color:N.textDim,marginTop:8,lineHeight:1.6}}>
@@ -4631,10 +4687,10 @@ export default function App() {
                       {savedEventId && (
                         activeExtra
                           ? <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: extraMsgsSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
-                              {extraMsgsSaved ? "✓ saved" : "auto-saves"}
+                              {extraMsgsSaved ? <><Icon n="check" /> saved</> : "auto-saves"}
                             </span>
                           : <span style={{fontSize:10,fontFamily:"JetBrains Mono, monospace",color: smsDraftSaved ? N.green : N.textDim, transition:"color 0.3s"}}>
-                              {smsDraftSaved ? "✓ draft saved" : "draft auto-saves"}
+                              {smsDraftSaved ? <><Icon n="check" /> draft saved</> : "draft auto-saves"}
                             </span>
                       )}
                     </div>
@@ -4650,11 +4706,11 @@ export default function App() {
                           style={{fontSize:11,padding:"6px 14px"}}
                           onClick={saveSmsMessage}
                           disabled={smsMsgSaving || !savedEventId || smsMessage===smsPersistedMsg.current}>
-                          {smsMsgSaving?"⏳ Saving…":"💾 Save Template"}
+                          {smsMsgSaving?<><Icon n="loader" /> Saving…</>:<><Icon n="save" /> Save Template</>}
                         </button>
                       )}
                       {!activeExtra && savedEventId && smsMessage!==smsPersistedMsg.current && (
-                        <span style={{fontSize:11,color:N.amber}}>● Unsaved changes</span>
+                        <span style={{fontSize:11,color:N.amber}}><Icon n="dot" /> Unsaved changes</span>
                       )}
                       {!savedEventId && (
                         <span style={{fontSize:11,color:N.textDim}}>Save the event first to persist {activeExtra ? "this message" : "this template"}</span>
@@ -4723,12 +4779,12 @@ export default function App() {
                     <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
                       <div className="nk-sec nk-sec-teal" style={{margin:0}}>Remaining SMS</div>
                       <button className="nk-btn nk-btn-ghost" style={{padding:"3px 10px",fontSize:11}} onClick={fetchSmsBalance} disabled={smsBalanceLoading}>
-                        {smsBalanceLoading?"⏳":"↻"} Refresh
+                        {smsBalanceLoading?<><Icon n="loader" /></>:<><Icon n="refresh" /></>} Refresh
                       </button>
                     </div>
                     <div style={{background:N.tealBg,border:`1.5px solid ${alpha(N.teal,"55")}`,borderRadius:10,padding:"18px 20px",marginBottom:14,textAlign:"center"}}>
                       {smsBalanceLoading ? (
-                        <div style={{color:N.textDim,fontSize:13,padding:"8px 0"}}>Loading…</div>
+                        <div style={{color:N.textDim,fontSize:13,padding:"8px 0"}} role="status"><Icon n="loader" /> Checking balance…</div>
                       ) : smsBalance ? (
                         <>
                           <div style={{fontFamily:"JetBrains Mono, monospace",fontSize:36,fontWeight:800,color:N.teal,lineHeight:1}}>
@@ -4752,10 +4808,10 @@ export default function App() {
                       )}
                     </div>
                     <button className="nk-btn nk-btn-teal nk-btn-full" onClick={()=>sendAllSms(activeMsgId)} disabled={smsSending}>
-                      {smsSending?"⏳ Sending…":`💬 Send ${activeExtra ? `"${activeExtra.title}"` : "SMS"} to All (${activeRecipients.filter(r=>r.phone).length})`}
+                      {smsSending?<><Icon n="loader" /> Sending…</>:<><Icon n="sms" /> {`Send ${activeExtra ? `"${activeExtra.title}"` : "SMS"} to All (${activeRecipients.filter(r=>r.phone).length})`}</>}
                     </button>
                     <button className="nk-btn nk-btn-ghost nk-btn-full" onClick={downloadSmsCsv}>
-                      ⬇ Download SMS CSV
+                      <Icon n="download" /> Download SMS CSV
                     </button>
                   </div>
                   {/* ── iPhone Pro Max Mockup ── */}
@@ -4785,7 +4841,7 @@ export default function App() {
                           <div style={{paddingTop:14,paddingBottom:4,paddingLeft:20,paddingRight:16,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:9,fontWeight:600,color:"#000",background:"#f5f5f5",flexShrink:0}}>
                             <span>9:41</span>
                             <div style={{display:"flex",gap:4,alignItems:"center",fontSize:9}}>
-                              <span>●●●</span><span>WiFi</span><span>🔋</span>
+                              <span><Icon n="dot" /><Icon n="dot" /><Icon n="dot" /></span><span>WiFi</span><span><Icon n="battery" /></span>
                             </div>
                           </div>
                           {/* nav bar */}
@@ -4796,7 +4852,7 @@ export default function App() {
                               <div style={{fontSize:11,fontWeight:700,color:"#000",lineHeight:1.2}}>NIKADI</div>
                               <div style={{fontSize:9,color:"#8e8e93"}}>Text Message</div>
                             </div>
-                            <span style={{fontSize:14,color:"#007aff"}}>📞</span>
+                            <span style={{fontSize:14,color:"#007aff"}}><Icon n="phone" /></span>
                           </div>
                           {/* message area */}
                           <div style={{flex:1,minHeight:0,padding:"10px 8px",overflowY:"auto",display:"flex",flexDirection:"column",gap:6,background:"#fff"}}>
@@ -4823,9 +4879,9 @@ export default function App() {
                           </div>
                           {/* input bar */}
                           <div style={{background:"#f5f5f5",borderTop:"1px solid #e0e0e0",padding:"6px 8px",display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-                            <span style={{fontSize:14,color:"#007aff"}}>➕</span>
+                            <span style={{fontSize:14,color:"#007aff"}}><Icon n="plus" /></span>
                             <div style={{flex:1,background:"#fff",border:"1px solid #c7c7cc",borderRadius:14,padding:"4px 10px",fontSize:9,color:"#c7c7cc"}}>iMessage</div>
-                            <span style={{fontSize:14,color:"#007aff"}}>🎤</span>
+                            <span style={{fontSize:14,color:"#007aff"}}><Icon n="mic" /></span>
                           </div>
                         </div>
                       </div>
@@ -4839,7 +4895,7 @@ export default function App() {
                     {!smsSending && smsReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadSmsReport}
                         style={{background:N.tealBg,color:N.teal,border:`1px solid ${alpha(N.teal,"33")}`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
-                        <span style={{fontSize:16}}>⬇</span> Download SMS Report (.xlsx)
+                        <span style={{fontSize:16}}><Icon n="download" /></span> Download SMS Report (.xlsx)
                       </button>
                     )}
                     <div className="nk-table-wrap">
@@ -4858,10 +4914,10 @@ export default function App() {
                               </td>
                               <td>
                                 <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
-                                  {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
+                                  {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
                                 </span>
                               </td>
-                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>sendSmsToOne(i, activeMsgId)}>💬 Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
+                              <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>sendSmsToOne(i, activeMsgId)}><Icon n="sms" /> Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -4892,7 +4948,7 @@ export default function App() {
                     </div>
                     <button className="nk-btn nk-btn-primary nk-btn-full" style={{marginBottom:20}}
                       onClick={uploadAllCards} disabled={uploadingCards}>
-                      {uploadingCards ? "⏳ Uploading…" : `☁ Upload All Cards (${records.length})`}
+                      {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
                     </button>
 
                     {/* Template */}
@@ -4934,7 +4990,7 @@ export default function App() {
                     <button className="nk-btn nk-btn-success nk-btn-full"
                       onClick={sendWaAll}
                       disabled={bulkSending||!records.filter(r=>r.phone&&r.cardUrl).length}>
-                      {bulkSending ? "⏳ Sending…" : `📲 Send All (${records.filter(r=>r.phone&&r.cardUrl).length})`}
+                      {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`Send All (${records.filter(r=>r.phone&&r.cardUrl).length})`}</>}
                     </button>
                   </div>
 
@@ -4945,7 +5001,7 @@ export default function App() {
                     {!bulkSending && waReportReady && (
                       <button className="nk-btn nk-btn-full" onClick={downloadWaReport}
                         style={{background:N.greenBg,color:N.green,border:`1px solid ${alpha(N.green,"33")}`,marginBottom:12,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
-                        <span style={{fontSize:16}}>⬇</span> Download WA Report (.xlsx)
+                        <span style={{fontSize:16}}><Icon n="download" /></span> Download WA Report (.xlsx)
                       </button>
                     )}
                     {/* Records table */}
@@ -4962,7 +5018,7 @@ export default function App() {
                               </td>
                               <td>
                                 <span className={`nk-badge ${rec.uploadStatus==="uploaded"?"badge-yes":rec.uploadStatus==="uploading"?"badge-testing":rec.uploadStatus==="failed"?"badge-no":"badge-idle"}`}>
-                                  {rec.uploadStatus==="uploaded"?"✓ Ready":rec.uploadStatus==="uploading"?"⏳ Uploading":rec.uploadStatus==="failed"?"✗ Failed":"○ Pending"}
+                                  {rec.uploadStatus==="uploaded"?<><Icon n="check" /> Ready</>:rec.uploadStatus==="uploading"?<><Icon n="loader" /> Uploading</>:rec.uploadStatus==="failed"?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
                                 </span>
                               </td>
                               <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
@@ -4971,13 +5027,13 @@ export default function App() {
                                   <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                     onClick={()=>uploadCardSingle(i)}
                                     disabled={rec.uploadStatus==="uploading"}>
-                                    {rec.uploadStatus==="uploading"?"⏳":"☁"} Upload
+                                    {rec.uploadStatus==="uploading"?<><Icon n="loader" /></>:<><Icon n="cloud" /></>} Upload
                                   </Sb>
                                   {rec.phone && rec.cardUrl && (
                                     <Sb bg={N.greenBg} col={N.green}
                                       onClick={()=>sendWaSingle(i)}
                                       disabled={rec.waStatus===WA.sending}>
-                                      {rec.waStatus===WA.sending?"⏳":"📲"} Send
+                                      {rec.waStatus===WA.sending?<><Icon n="loader" /></>:<><Icon n="whatsapp" /></>} Send
                                     </Sb>
                                   )}
                                 </div>
@@ -5002,7 +5058,7 @@ export default function App() {
                   </div>
                   <button className="nk-btn nk-btn-success" onClick={downloadFullReport}
                     style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={{fontSize:16}}>⬇</span> Download Report (.xlsx)
+                    <span style={{fontSize:16}}><Icon n="download" /></span> Download Report (.xlsx)
                   </button>
                 </div>
 
@@ -5045,7 +5101,7 @@ export default function App() {
                             </td>
                             <td>
                               <span style={{fontSize:12,color:smsColor,fontWeight:600}}>
-                                {rec.smsStatus===SMS.delivered?"✓ Delivered":rec.smsStatus===SMS.sent?"↑ Sent":rec.smsStatus===SMS.failed?"✗ Failed":"○ Pending"}
+                                {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
                               </span>
                             </td>
                           </tr>
@@ -5080,20 +5136,18 @@ export default function App() {
                   {savedEventId && (
                     <div style={{display:"flex",gap:8}}>
                       <button className="nk-btn nk-btn-ghost" onClick={()=>loadHistory()} disabled={historyLoading}>
-                        {historyLoading ? "⏳" : "↻"} Refresh
+                        {historyLoading ? <><Icon n="loader" /></> : <><Icon n="refresh" /></>} Refresh
                       </button>
                       <button className="nk-btn nk-btn-success" onClick={downloadHistory} disabled={!shown.length}>
-                        ⬇ Export (.xlsx)
+                        <Icon n="download" /> Export (.xlsx)
                       </button>
                     </div>
                   )}
                 </div>
 
                 {!savedEventId ? (
-                  <div style={{textAlign:"center",padding:60,color:N.textDim}}>
-                    <div style={{fontSize:48,marginBottom:12}}>🕘</div>
-                    <p>No event open. Pick one in the Events tab.</p>
-                  </div>
+                  <EmptyState icon="history" title="No event open" text="History is kept per event. Pick one to see every card, SMS and change."
+                    action={<button className="nk-btn nk-btn-primary" onClick={()=>{ loadSavedEvents(); setTab("events"); }}><Icon n="folder" /> Go to Events</button>} />
                 ) : (
                   <>
                     <div className="nk-stats" style={{marginBottom:16}}>
@@ -5122,7 +5176,7 @@ export default function App() {
                         value={historyFilter.q} onChange={e=>setF({ q:e.target.value })} />
                       <select className="nk-input" style={{width:150}} value={historyFilter.channel} onChange={e=>setF({ channel:e.target.value })}>
                         <option value="all">All channels</option>
-                        {Object.entries(HISTORY_CHANNELS).map(([k,c])=><option key={k} value={k}>{c.icon} {c.label}</option>)}
+                        {Object.entries(HISTORY_CHANNELS).map(([k,c])=><option key={k} value={k}>{c.label}</option>)}
                       </select>
                       <select className="nk-input" style={{width:150}} value={historyFilter.status} onChange={e=>setF({ status:e.target.value })}>
                         <option value="all">All results</option>
@@ -5130,7 +5184,7 @@ export default function App() {
                       </select>
                       {filtered && (
                         <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"6px 10px"}}
-                          onClick={()=>setHistoryFilter({ channel:"all", status:"all", q:"" })}>✕ Clear</button>
+                          onClick={()=>setHistoryFilter({ channel:"all", status:"all", q:"" })}><Icon n="x" /> Clear</button>
                       )}
                       <span style={{fontSize:11,color:N.textDim,marginLeft:"auto"}}>
                         {shown.length}{filtered ? ` of ${historyRows.length}` : ""} entr{shown.length===1?"y":"ies"}
@@ -5148,7 +5202,7 @@ export default function App() {
                             return (
                               <tr key={r.id}>
                                 <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:11,color:N.textMid,whiteSpace:"nowrap"}}>{fmt(r.created_at)}</td>
-                                <td style={{fontSize:12,whiteSpace:"nowrap"}}>{ch.icon} {ch.label}</td>
+                                <td style={{fontSize:12,whiteSpace:"nowrap"}}><Icon n={ch.icon} /> {ch.label}</td>
                                 <td style={{fontSize:12,color:N.textMid,whiteSpace:"nowrap"}}>{HISTORY_ACTIONS[r.action] || r.action}</td>
                                 <td>
                                   {r.recipient_name || r.recipient_phone ? (
@@ -5175,16 +5229,17 @@ export default function App() {
                         </tbody>
                       </table>
                       {!shown.length && (
-                        <div style={{textAlign:"center",padding:40,color:N.textDim,fontSize:13}}>
-                          {historyLoading ? "Loading history…"
-                            : historyRows.length ? "No entries match these filters."
-                            : "Nothing recorded yet. Sends, uploads and event changes will appear here."}
+                        <div>
+                          {historyLoading ? <EmptyState loading title="Loading history…" />
+                            : historyRows.length ? <EmptyState icon="search" title="No entries match these filters"
+                                action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={()=>setHistoryFilter({ channel:"all", status:"all", q:"" })}>Clear filters</button>} />
+                            : <EmptyState icon="history" title="Nothing recorded yet" text="Sends, uploads and event changes will appear here." />}
                         </div>
                       )}
                     </div>
                     {historyHasMore && (
                       <button className="nk-btn nk-btn-ghost nk-btn-full" style={{marginTop:12}} onClick={()=>loadHistory(true)} disabled={historyLoading}>
-                        {historyLoading ? "⏳ Loading…" : "Load older entries"}
+                        {historyLoading ? <><Icon n="loader" /> Loading…</> : "Load older entries"}
                       </button>
                     )}
                   </>
@@ -5263,7 +5318,7 @@ export default function App() {
                     {["left","center","right"].map(a=>(
                       <button key={a} onClick={()=>updateEl("align",a)}
                         style={{flex:1,padding:"7px 0",borderRadius:8,border:`1.5px solid ${(selectedEl.align||"left")===a?N.accent:N.border}`,background:(selectedEl.align||"left")===a?alpha(N.accent,"22"):"transparent",color:(selectedEl.align||"left")===a?N.sky:N.textDim,cursor:"pointer",fontSize:16,fontFamily:"inherit"}}>
-                        {a==="left"?"⬅":a==="center"?"⬛":"➡"}
+                        {a==="left"?<><Icon n="alignLeft" /></>:a==="center"?<><Icon n="alignCenter" /></>:<><Icon n="alignRight" /></>}
                       </button>
                     ))}
                   </div>
@@ -5291,7 +5346,7 @@ export default function App() {
               <div className="nk-chip">
                 Canvas: {cw} × {ch} px<br/>
                 Export: {cw} × {ch} px<br/>
-                {bgSize ? <span className="nk-chip-ok">✓ Locked to template</span> : <span className="nk-chip-warn">⚠ Default size</span>}
+                {bgSize ? <span className="nk-chip-ok"><Icon n="check" /> Locked to template</span> : <span className="nk-chip-warn"><Icon n="alert" /> Default size</span>}
               </div>
 
               <div className="nk-divider" />
@@ -5306,7 +5361,7 @@ export default function App() {
 
               {activeRecord.phone && (
                 <button className="nk-btn nk-btn-success nk-btn-full" onClick={()=>sendWaSingle(activeIdx)} disabled={activeRecord.waStatus===WA.sending}>
-                  {activeRecord.waStatus===WA.sending ? "⏳ Sending…" : activeRecord.waStatus===WA.sent ? "✓ WA Sent" : "📲 Send via WhatsApp"}
+                  {activeRecord.waStatus===WA.sending ? <><Icon n="loader" /> Sending…</> : activeRecord.waStatus===WA.sent ? <><Icon n="check" /> WA Sent</> : <><Icon n="whatsapp" /> Send via WhatsApp</>}
                 </button>
               )}
 
