@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment } from "react";
+import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
@@ -2023,6 +2023,7 @@ function AccountsModal({ fin, onClose }) {
 // Finance tab: business-wide totals, each event's income / expense / profit / margin,
 // and the selected event's transactions with who paid (or was paid) via which account
 function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, onSelect, onExport }) {
+  const canDelete = useCanDelete();
   const [q,       setQ]       = useState("");
   const [range,   setRange]   = useState({ from:"", to:"" });
   const [txFilter, setTxFilter] = useState("all");
@@ -2171,7 +2172,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                     </div>
                     <div style={{display:"flex",flexDirection:"column",gap:4}}>
                       <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label={`Edit ${t.kind} of ${formatTsh(t.amount)}`} title="Edit" onClick={() => setEditingTxn(t)}><Icon n="edit" /></button>
-                      <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12,color:N.red}} aria-label={`Remove ${t.kind} of ${formatTsh(t.amount)}`} title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>
+                      {canDelete && (<button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12,color:N.red}} aria-label={`Remove ${t.kind} of ${formatTsh(t.amount)}`} title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>)}
                     </div>
                   </div>
                 );
@@ -2397,6 +2398,11 @@ function WelcomeModal({ name, onClose, onGuide }) {
    rules (has_perm() in supabase-roles-settings-scan.sql); the UI only hides
    what a role can't use. Pure logic: src/lib/permissions.js, settings.js, cardRules.js.
 ══════════════════════════════════════════════════════════════════════════ */
+// Deleting records is for Super Admins only (the database enforces the same rule). Components
+// read this to hide their delete buttons; <App> provides it.
+const CanDeleteContext = createContext(false);
+const useCanDelete = () => useContext(CanDeleteContext);
+
 const isMissingTable = (e) => !!e && (e.code === "42P01" || e.code === "PGRST205" || /schema cache|does not exist/i.test(e.message || ""));
 
 function useAccess({ userId, email, showToast }) {
@@ -2485,7 +2491,7 @@ function useAccess({ userId, email, showToast }) {
     return true;
   };
 
-  // Superuser always sees every event; other roles when their "sees all events" flag is on
+  // Super Admin always sees every event; other roles when their "sees all events" flag is on
   const seesAllEvents = st.setupMissing || role === "superuser" || !!(st.roleRows || []).find(r => r.key === role)?.sees_all_events;
   const setSeesAll = async (roleKey, value) => {
     const { error } = await supabase.from("app_roles").update({ sees_all_events: value }).eq("key", roleKey);
@@ -2508,7 +2514,7 @@ function NoAccess({ email, name, avatar, onSignOut, onRetry }) {
     catch { /* clipboard blocked: the email is shown on screen to copy by hand */ }
   };
   const steps = [
-    ["users", "Ask an administrator", "A Superuser or Admin of Nikadi Studio can give you access."],
+    ["users", "Ask an administrator", "A Super Admin or Admin of Nikadi Studio can give you access."],
     ["settings", "They invite this email", "In Settings → Users → Invite user, with the role you need."],
     ["refresh", "Come back and check again", "Your workspace opens straight away — no need to sign in again."],
   ];
@@ -2652,7 +2658,7 @@ function UsersSettings({ access, askDialog, myEmail }) {
                   {canEdit && (
                     <td><div className="nk-row-actions">
                       <Sb bg="transparent" col={N.sky} border={N.border} label={`Change role of ${u.email}`} disabled={locked}
-                        title={locked ? "Only a Superuser can change a Superuser" : undefined} onClick={() => setEditing(u)}><Icon n="edit" /> Edit</Sb>
+                        title={locked ? "Only a Super Admin can change a Super Admin" : undefined} onClick={() => setEditing(u)}><Icon n="edit" /> Edit</Sb>
                       <Sb bg="transparent" col={u.active ? N.red : N.green} border={N.border} disabled={locked || u.email === myEmail}
                         label={`${u.active ? "Deactivate" : "Reactivate"} ${u.email}`} title={u.email === myEmail ? "You can't deactivate yourself" : undefined}
                         onClick={() => toggle(u)}><Icon n={u.active ? "ban" : "check"} /> {u.active ? "Deactivate" : "Reactivate"}</Sb>
@@ -2719,7 +2725,7 @@ function UserModal({ initial, iAmSuper, busy, onSave, onClose }) {
   );
 }
 
-// Roles × modules grid of None / View / Edit. Superuser is fixed to everything.
+// Roles × modules grid of None / View / Edit. Super Admin is fixed to everything.
 function PermissionsSettings({ access }) {
   const editable = ROLES.filter(r => r.key !== "superuser");
   const [roleKey, setRoleKey] = useState(editable[0].key);
@@ -2736,7 +2742,7 @@ function PermissionsSettings({ access }) {
     <div style={card}>
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
         {editable.map(r => <button key={r.key} style={segStyle(roleKey === r.key)} onClick={() => setRoleKey(r.key)}>{r.label}</button>)}
-        <span style={{...segStyle(false),opacity:.7,cursor:"default",display:"inline-flex",alignItems:"center",gap:6}} title="Superusers always have every permission"><Icon n="lock" /> Superuser: everything</span>
+        <span style={{...segStyle(false),opacity:.7,cursor:"default",display:"inline-flex",alignItems:"center",gap:6}} title="Super Admins always have every permission, including deleting data"><Icon n="lock" /> Super Admin: everything</span>
       </div>
       <div style={{background:N.navy700,border:`1px solid ${N.border}`,borderRadius:10,padding:"10px 12px",marginBottom:12}}>
         <Toggle checked={!!(access.roleRows || []).find(r => r.key === roleKey)?.sees_all_events} disabled={!canEdit}
@@ -2781,6 +2787,7 @@ function PermissionsSettings({ access }) {
 
 // One editable list (templates / sender IDs / card types) with an inline add/edit form
 function ListEditor({ title, hint, rows, columns, blank, renderForm, validate, onSave, onDelete, onDefault, canEdit, busy, rowKey = "id", rowLabel }) {
+  const canDelete = useCanDelete();
   const [form, setForm] = useState(null);
   const [errors, setErrors] = useState({});
   const submit = async () => {
@@ -2814,7 +2821,7 @@ function ListEditor({ title, hint, rows, columns, blank, renderForm, validate, o
                   <td><div className="nk-row-actions">
                     {onDefault && !r.is_default && <Sb bg="transparent" col={N.amber} border={N.border} label={`Make ${rowLabel(r)} the default`} onClick={() => onDefault(r)}><Icon n="check" /> Default</Sb>}
                     <Sb bg="transparent" col={N.sky} border={N.border} label={`Edit ${rowLabel(r)}`} onClick={() => { setErrors({}); setForm({ ...r }); }}><Icon n="edit" /> Edit</Sb>
-                    <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${rowLabel(r)}`} onClick={() => onDelete(r)}><Icon n="trash" /> Delete</Sb>
+                    {canDelete && (<Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${rowLabel(r)}`} onClick={() => onDelete(r)}><Icon n="trash" /> Delete</Sb>)}
                   </div></td>
                 )}
               </tr>
@@ -3271,6 +3278,7 @@ function CommentModal({ card: c, onSave, onClose }) {
 // Leads tab: pipeline numbers, filterable list (open leads with due follow-ups first) and
 // the selected lead's details, follow-ups and actions (qualify → customer, lost, reopen)
 function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
+  const canDelete = useCanDelete();
   const [filter,  setFilter]  = useState({ status:"open", q:"" });
   const [editing, setEditing] = useState(null);   // null | {} (new) | lead row
   const lead = crm.leads.find(l => l.id === selectedId) || null;
@@ -3401,8 +3409,8 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
               <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => setEditing(lead)}><Icon n="edit" /> Edit</button>
               {open && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "lost")}><Icon n="xCircle" /> Lost</button>}
               {lead.status === "lost" && <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12}} onClick={() => crm.setLeadStatus(lead, "contacted")}><Icon n="undo" /> Reopen</button>}
-              <button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12,color:N.red}}
-                aria-label="Delete lead" title="Delete lead" onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}><Icon n="trash" /></button>
+              {canDelete && (<button className="nk-btn nk-btn-ghost" style={{padding:"7px 12px",fontSize:12,color:N.red}}
+                aria-label="Delete lead" title="Delete lead" onClick={async () => { if (await crm.deleteLead(lead)) onSelect(null); }}><Icon n="trash" /></button>)}
             </div>
 
             <div className="nk-sec nk-sec-teal" style={{marginBottom:8}}>Follow-ups</div>
@@ -3423,6 +3431,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
 // Customers tab: customer list (with event counts) and the selected customer's details,
 // events (click one for the full overview) and the leads they came from
 function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNewEvent, eventsVersion }) {
+  const canDelete = useCanDelete();
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState(null);   // null | {} (new) | customer row
   const [loaded,  setLoaded]  = useState({ id:null, list:[] });   // events of customer `id`
@@ -3498,8 +3507,8 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
               </div>
               <div style={{display:"flex",gap:6}}>
                 <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => setEditing(customer)}><Icon n="edit" /> Edit</button>
-                <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12,color:N.red}}
-                  aria-label="Delete customer" title="Delete customer" onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}><Icon n="trash" /></button>
+                {canDelete && (<button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12,color:N.red}}
+                  aria-label="Delete customer" title="Delete customer" onClick={async () => { if (await crm.deleteCustomer(customer)) onSelect(null); }}><Icon n="trash" /></button>)}
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
@@ -5621,9 +5630,10 @@ export default function App() {
   if (!access.setupMissing && !access.role) return <NoAccess email={user.email} name={user.user_metadata?.full_name} avatar={user.user_metadata?.avatar_url} onRetry={access.loadAll} onSignOut={() => supabase?.auth.signOut()} />;
   const tabModule = TAB_MODULE[tab];
   const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && !access.can(tabModule, "edit");
+  const canDeleteData = access.setupMissing || access.role === "superuser";
 
   return (
-    <>
+    <CanDeleteContext.Provider value={canDeleteData}>
       <style>{CSS}</style>
       <div className="nk-app">
 
@@ -5725,7 +5735,7 @@ export default function App() {
             <button className="nk-btn nk-btn-primary" onClick={downloadAll} title="Download every card" aria-label={`Download all ${records.length} cards`}>
               <Icon n="download" /> <span className="nk-btn-label">Download All ({records.length})</span>
             </button>
-            {access.role && <span className="nk-hide-md" title={access.setupMissing ? "Roles not set up yet — everyone has full access" : "Your role"}><RoleBadge role={access.role} /></span>}
+            {access.role && <span className="nk-hide-md" title={access.setupMissing ? "Roles not set up yet — everyone has full access" : access.role === "superuser" ? "Your role — only Super Admins can delete data" : "Your role"}><RoleBadge role={access.role} /></span>}
             <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => goTab("guide")}
               title="How Nikadi Studio works" aria-label="Help: how Nikadi Studio works">
               <Icon n="help" /> <span className="nk-btn-label">Help</span>
@@ -6018,12 +6028,12 @@ export default function App() {
                         >
                           <Icon n="image" /> {tpl.name}
                         </button>
-                        <button
+                        {canDeleteData && (<button
                           className="nk-btn nk-btn-ghost"
                           style={{fontSize:10,padding:"3px 7px",color:N.red||"#f87171",flexShrink:0}}
                           title="Delete template" aria-label="Delete template"
                           onClick={()=>deleteSavedTemplate(tpl)}
-                        ><Icon n="x" /></button>
+                        ><Icon n="x" /></button>)}
                       </div>
                     ))}
                   </div>
@@ -6198,11 +6208,11 @@ export default function App() {
                                   title="Edit event details">
                                   <Icon n="edit" /> Edit
                                 </Sb>
-                                <Sb bg={N.redBg} col={N.red} border={alpha(N.red,"44")}
+                                {canDeleteData && (<Sb bg={N.redBg} col={N.red} border={alpha(N.red,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setDeleteTarget(ev); }}
                                   title="Delete this event">
                                   <Icon n="trash" /> Delete
-                                </Sb>
+                                </Sb>)}
                                 {ev.cover_image_url && (
                                   <Sb bg={N.navy700} col={N.textMid} border={N.border}
                                     onClick={(e)=>{ e.stopPropagation(); window.open(ev.cover_image_url,"_blank"); }}
@@ -7117,6 +7127,6 @@ export default function App() {
 
         </div>
       </div>
-    </>
+    </CanDeleteContext.Provider>
   );
 }

@@ -324,7 +324,7 @@ CREATE TABLE IF NOT EXISTS app_roles (
   sort        INT  NOT NULL DEFAULT 0
 );
 INSERT INTO app_roles (key, label, description, sort) VALUES
-  ('superuser',         'Superuser',         'Sees and manages everything, including Superusers', 0),
+  ('superuser',         'Super Admin',       'Sees and manages everything — the only role that can delete data', 0),
   ('admin',             'Admin',             'Runs the system day to day; manages users and settings', 1),
   ('sales_officer',     'Sales Officer',     'Leads, customers and events', 2),
   ('graphics_designer', 'Graphics Designer', 'Card design, guest lists and WhatsApp delivery', 3),
@@ -386,7 +386,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   last_seen_at TIMESTAMPTZ
 );
 
--- >>> SUPERUSERS: the owner accounts. Edit this list if needed BEFORE the first run. <<<
+-- >>> SUPER ADMINS (role key 'superuser'): the owner accounts. Edit this list if needed BEFORE the first run. <<<
 INSERT INTO app_users (email, role, full_name, invited_by) VALUES
   ('noberthbariki@gmail.com',    'superuser', NULL, 'setup'),
   ('nnikombolwe@simusolar.com',  'superuser', NULL, 'setup')
@@ -453,7 +453,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT public.my_role() IS NOT NULL
 $$;
 
--- Superuser: always true. Otherwise the role's row in role_permissions decides.
+-- Super Admin (role key 'superuser'): always true. Otherwise the role's row in role_permissions decides.
 CREATE OR REPLACE FUNCTION public.has_perm(p_module TEXT, p_edit BOOLEAN DEFAULT FALSE) RETURNS BOOLEAN
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT CASE
@@ -535,12 +535,12 @@ BEGIN
   IF caller IS NULL THEN RETURN COALESCE(NEW, OLD); END IF;   -- SQL editor / service role
   IF caller <> 'superuser' AND (
        (TG_OP <> 'INSERT' AND OLD.role = 'superuser') OR (TG_OP <> 'DELETE' AND NEW.role = 'superuser')) THEN
-    RAISE EXCEPTION 'Only a Superuser can manage Superuser accounts';
+    RAISE EXCEPTION 'Only a Super Admin can manage Super Admin accounts';
   END IF;
   IF TG_OP <> 'INSERT' AND OLD.role = 'superuser' AND OLD.active
      AND (TG_OP = 'DELETE' OR NEW.role <> 'superuser' OR NOT NEW.active)
      AND (SELECT count(*) FROM app_users WHERE role = 'superuser' AND active AND email <> OLD.email) = 0 THEN
-    RAISE EXCEPTION 'At least one active Superuser must remain';
+    RAISE EXCEPTION 'At least one active Super Admin must remain';
   END IF;
   IF TG_OP <> 'DELETE' THEN NEW.email := lower(trim(NEW.email)); END IF;
   RETURN COALESCE(NEW, OLD);
@@ -840,6 +840,18 @@ CREATE POLICY p_assign_write ON event_assignments FOR ALL TO authenticated
   USING (public.has_any_perm(ARRAY['events','users'], TRUE) AND public.can_see_event(event_id))
   WITH CHECK (public.has_any_perm(ARRAY['events','users'], TRUE) AND public.can_see_event(event_id));
 
+-- Deleting data is for Super Admins only. A RESTRICTIVE policy is combined (AND) with the
+-- permissive ones above, so every other role is refused a DELETE even if its module allows edits.
+-- Not included on purpose: event_cards (re-saving a guest list removes dropped guests) and
+-- event_assignments (taking someone off a team) — those are edits, not deleting records.
+DO $$ DECLARE t TEXT; BEGIN
+  FOREACH t IN ARRAY ARRAY['events','customers','leads','lead_followups','finance_accounts','event_transactions',
+                           'saved_templates','wa_templates','sender_ids','card_type_rules','app_users','app_settings','role_permissions'] LOOP
+    EXECUTE format('CREATE POLICY %I ON public.%I AS RESTRICTIVE FOR DELETE TO authenticated USING (public.my_role() = %L)',
+                   'p_' || t || '_delete_super_admin', t, 'superuser');
+  END LOOP;
+END $$;
+
 -- Storage: uploads need the module that makes them
 DROP POLICY IF EXISTS "authenticated_insert_templates" ON storage.objects;
 DROP POLICY IF EXISTS "authenticated_delete_templates" ON storage.objects;
@@ -847,7 +859,7 @@ DROP POLICY IF EXISTS "authenticated_insert_wa_cards"  ON storage.objects;
 CREATE POLICY "authenticated_insert_templates" ON storage.objects FOR INSERT TO authenticated
   WITH CHECK (bucket_id = 'templates' AND public.has_perm('design', TRUE));
 CREATE POLICY "authenticated_delete_templates" ON storage.objects FOR DELETE TO authenticated
-  USING (bucket_id = 'templates' AND public.has_perm('design', TRUE));
+  USING (bucket_id = 'templates' AND public.my_role() = 'superuser');
 CREATE POLICY "authenticated_insert_wa_cards" ON storage.objects FOR INSERT TO authenticated
   WITH CHECK (bucket_id = 'wa-cards' AND public.has_any_perm(ARRAY['whatsapp','batch','design'], TRUE));
 

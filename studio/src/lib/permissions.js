@@ -3,7 +3,7 @@
 // what a role can't use. DEFAULT_MATRIX must match the SQL seed.
 
 export const ROLES = [
-  { key: "superuser",         label: "Superuser",         description: "Sees and manages everything, including Superusers" },
+  { key: "superuser",         label: "Super Admin",       description: "Sees and manages everything — the only role that can delete data" },
   { key: "admin",             label: "Admin",             description: "Runs the system day to day; manages users and settings" },
   { key: "sales_officer",     label: "Sales Officer",     description: "Leads, customers and events" },
   { key: "graphics_designer", label: "Graphics Designer", description: "Card design, guest lists and WhatsApp delivery" },
@@ -21,7 +21,7 @@ export const MODULES = [
   { key: "calls", label: "Calls" }, { key: "settings", label: "Settings" }, { key: "users", label: "Users & roles" },
 ];
 
-// "E" = view + edit, "V" = view only; missing = no access. Superuser is always everything.
+// "E" = view + edit, "V" = view only; missing = no access. Super Admin (key "superuser") is always everything.
 const M = (s) => Object.fromEntries(s.split(" ").filter(Boolean).map(x => x.split(":")));
 export const DEFAULT_MATRIX = {
   admin:             M("events:E leads:E customers:E design:E vcard:E sms:E whatsapp:E batch:E reports:E history:E finance:E scanner:E calls:E settings:E users:E"),
@@ -79,6 +79,6 @@ export const validateInvite = ({ email = "", role = "" } = {}, { allowSuperuser 
   const errors = {};
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) errors.email = "Enter a valid email address";
   if (!ROLE_LABEL[role]) errors.role = "Choose a role";
-  else if (role === "superuser" && !allowSuperuser) errors.role = "Only a Superuser can create a Superuser";
+  else if (role === "superuser" && !allowSuperuser) errors.role = "Only a Super Admin can create a Super Admin";
   return errors;
 };

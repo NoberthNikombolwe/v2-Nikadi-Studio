@@ -1,5 +1,5 @@
 // Event team: which users are assigned to which event (event_assignments), and what
-// they do there. Superuser / Admin (and any role with "sees all events") see every
+// they do there. Super Admin / Admin (and any role with "sees all events") see every
 // event; everyone else only sees events they're assigned to or created — the database
 // enforces this with can_see_event() in supabase-roles-settings-scan.sql.
 
