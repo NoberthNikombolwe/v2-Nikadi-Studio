@@ -265,7 +265,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 UPDATE event_cards SET call_status = CASE lower(call_status) WHEN 'p' THEN 'picked' WHEN 'b' THEN 'busy'
   WHEN 'yes' THEN 'yes' WHEN 'no' THEN 'no' ELSE NULL END
  WHERE call_status IS NOT NULL AND call_status NOT IN ('picked','busy','yes','no');
-DO $ BEGIN
+DO $$ BEGIN
   ALTER TABLE event_cards ADD CONSTRAINT event_cards_call_status_valid CHECK (call_status IS NULL OR call_status IN ('picked','busy','yes','no'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
