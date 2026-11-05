@@ -109,6 +109,37 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS lead_id       UUID REFERENCES leads(
 ALTER TABLE events ADD COLUMN IF NOT EXISTS package_price NUMERIC(12,2);
 ALTER TABLE events ADD COLUMN IF NOT EXISTS region        TEXT;
 
+-- ── Finance: accounts and per-event transactions ────────────────────────
+-- finance_accounts are the business's own money accounts (bank, mobile money, cash).
+-- event_transactions record every income received and expense paid for an event:
+-- amount, date, which account it went into / came out of, and the other party
+-- (who sent the money, or who was paid).
+CREATE TABLE IF NOT EXISTS finance_accounts (
+  id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name        TEXT NOT NULL,                  -- e.g. "CRDB Bank", "M-Pesa Till"
+  type        TEXT NOT NULL DEFAULT 'bank',   -- bank | mobile | cash | other
+  number      TEXT,
+  active      BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  created_by  TEXT DEFAULT (auth.jwt() ->> 'email')
+);
+
+CREATE TABLE IF NOT EXISTS event_transactions (
+  id          UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  event_id    UUID REFERENCES events(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('income','expense')),
+  amount      NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  txn_date    DATE NOT NULL DEFAULT CURRENT_DATE,
+  account_id  UUID REFERENCES finance_accounts(id) ON DELETE SET NULL,
+  party       TEXT,                           -- income: who sent it; expense: who was paid
+  category    TEXT,
+  reference   TEXT,                           -- bank / mobile-money transaction reference
+  note        TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  created_by  TEXT DEFAULT (auth.jwt() ->> 'email')
+);
+CREATE INDEX IF NOT EXISTS idx_event_transactions_event ON event_transactions(event_id);
+
 -- Saved templates table (reusable card designs)
 CREATE TABLE IF NOT EXISTS saved_templates (
   id              UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -149,6 +180,8 @@ ALTER TABLE event_logs       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customers        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE leads            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lead_followups   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE finance_accounts   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_transactions ENABLE ROW LEVEL SECURITY;
 
 -- Legacy wide-open policies (anyone holding the anon key had full access)
 DROP POLICY IF EXISTS "allow_all_events"            ON events;
@@ -170,6 +203,11 @@ CREATE POLICY "authenticated_all_customers"      ON customers      FOR ALL TO au
 CREATE POLICY "authenticated_all_leads"          ON leads          FOR ALL TO authenticated USING (true) WITH CHECK (true);
 CREATE POLICY "authenticated_all_lead_followups" ON lead_followups FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
+DROP POLICY IF EXISTS "authenticated_all_finance_accounts"   ON finance_accounts;
+DROP POLICY IF EXISTS "authenticated_all_event_transactions" ON event_transactions;
+CREATE POLICY "authenticated_all_finance_accounts"   ON finance_accounts   FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_all_event_transactions" ON event_transactions FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
 -- event_logs is append-only: read + insert (as yourself) only, no update/delete policies
 DROP POLICY IF EXISTS "authenticated_read_event_logs"   ON event_logs;
 DROP POLICY IF EXISTS "authenticated_insert_event_logs" ON event_logs;
@@ -188,6 +226,8 @@ REVOKE ALL ON public.event_logs      FROM anon;
 REVOKE ALL ON public.customers       FROM anon;
 REVOKE ALL ON public.leads           FROM anon;
 REVOKE ALL ON public.lead_followups  FROM anon;
+REVOKE ALL ON public.finance_accounts   FROM anon;
+REVOKE ALL ON public.event_transactions FROM anon;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.events          TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.event_cards     TO authenticated;
@@ -197,6 +237,8 @@ GRANT SELECT, INSERT                 ON public.event_logs      TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.customers       TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads           TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.lead_followups  TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.finance_accounts   TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.event_transactions TO authenticated;
 
 -- service_role: Edge Functions and other server-side calls
 GRANT ALL ON public.events          TO service_role;
@@ -206,6 +248,8 @@ GRANT ALL ON public.event_logs      TO service_role;
 GRANT ALL ON public.customers       TO service_role;
 GRANT ALL ON public.leads           TO service_role;
 GRANT ALL ON public.lead_followups  TO service_role;
+GRANT ALL ON public.finance_accounts   TO service_role;
+GRANT ALL ON public.event_transactions TO service_role;
 
 -- =====================================================================
 -- STORAGE BUCKETS

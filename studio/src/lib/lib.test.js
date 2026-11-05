@@ -274,3 +274,64 @@ test("validateCustomer needs a name; phone is optional but must be valid", () =>
   assert.deepEqual(validateCustomer({ name: "Amina", phone: "0712345678" }), {});
   assert.deepEqual(Object.keys(validateCustomer({ name: "", phone: "12" })).sort(), ["name", "phone"]);
 });
+
+// ── finance ──
+import { validateTransaction, txnToRow, summariseTransactions, marginTone, formatPct, summariseByAccount,
+         summariseByCategory, filterTransactions, sortTransactions, validateAccount, groupByEvent } from "./finance.js";
+
+test("validateTransaction requires amount, date, account and party", () => {
+  const e = validateTransaction({ kind: "income" });
+  assert.deepEqual(Object.keys(e).sort(), ["account_id", "amount", "party", "txn_date"]);
+  assert.deepEqual(validateTransaction({ kind: "expense", amount: "50k", txn_date: "2026-11-05", account_id: "a", party: "Printer" }), {});
+  assert.ok(validateTransaction({ kind: "income", amount: "-5", txn_date: "2026-11-05", account_id: "a", party: "x" }).amount);
+  assert.ok(validateTransaction({ kind: "bogus" }).kind);
+});
+
+test("txnToRow parses amount and trims text", () => {
+  const r = txnToRow({ kind: "income", amount: "1.5k", txn_date: "2026-11-05", account_id: "a", party: " Juma ", reference: "" }, "e1");
+  assert.equal(r.amount, 1500); assert.equal(r.party, "Juma"); assert.equal(r.reference, null); assert.equal(r.event_id, "e1");
+});
+
+test("summariseTransactions computes profit, margin and outstanding", () => {
+  const s = summariseTransactions([
+    { kind: "income", amount: 100000 }, { kind: "income", amount: "50000" }, { kind: "expense", amount: 60000 },
+  ], 200000);
+  assert.equal(s.income, 150000); assert.equal(s.expense, 60000); assert.equal(s.profit, 90000);
+  assert.equal(s.marginPct, 60); assert.equal(s.outstanding, 50000);
+  assert.equal(summariseTransactions([{ kind: "expense", amount: 10 }]).marginPct, null);
+  assert.equal(summariseTransactions([]).outstanding, null);
+});
+
+test("marginTone and formatPct", () => {
+  assert.equal(marginTone(null), "none"); assert.equal(marginTone(-1), "bad");
+  assert.equal(marginTone(10), "warn"); assert.equal(marginTone(30), "good");
+  assert.equal(formatPct(12.5), "+12.5%"); assert.equal(formatPct(-3), "-3%"); assert.equal(formatPct(null), "—");
+});
+
+test("summaries by account, category and event", () => {
+  const t = [
+    { event_id: "e1", kind: "income", amount: 100, account_id: "a", category: "deposit" },
+    { event_id: "e1", kind: "expense", amount: 30, account_id: "a" },
+    { event_id: "e2", kind: "income", amount: 50, account_id: "b", category: "deposit" },
+  ];
+  assert.deepEqual(summariseByAccount(t).a, { income: 100, expense: 30, net: 70 });
+  assert.deepEqual(summariseByCategory(t), { income: { deposit: 150 }, expense: { other: 30 } });
+  assert.equal(groupByEvent(t).e1.length, 2);
+});
+
+test("filterTransactions and sortTransactions", () => {
+  const t = [
+    { kind: "income", txn_date: "2026-01-02", party: "Juma", account_id: "a" },
+    { kind: "expense", txn_date: "2026-03-01", party: "Printer", account_id: "b" },
+  ];
+  assert.equal(filterTransactions(t, { kind: "expense" }).length, 1);
+  assert.equal(filterTransactions(t, { q: "juma" }).length, 1);
+  assert.equal(filterTransactions(t, { from: "2026-02-01" }).length, 1);
+  assert.equal(filterTransactions(t, { account: "a" }).length, 1);
+  assert.equal(sortTransactions(t)[0].party, "Printer");
+});
+
+test("validateAccount requires a name", () => {
+  assert.ok(validateAccount({}).name);
+  assert.deepEqual(validateAccount({ name: "CRDB", type: "bank" }), {});
+});

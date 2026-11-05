@@ -9,11 +9,13 @@ export const HISTORY_CHANNELS = {
   sms:      { label: "SMS",      icon: "💬" },
   card:     { label: "Card",     icon: "🖼" },
   event:    { label: "Event",    icon: "🗂" },
+  finance:  { label: "Finance",  icon: "💰" },
 };
 
 export const HISTORY_ACTIONS = {
   send: "Sent", status: "Delivery report", upload: "Card upload", bulk: "Bulk send",
   create: "Event created", update: "Event updated", contacts: "Contacts changed",
+  income: "Income recorded", expense: "Expense recorded", remove: "Transaction removed",
 };
 
 // Display order + tone (UI maps tone → colour) for each status
