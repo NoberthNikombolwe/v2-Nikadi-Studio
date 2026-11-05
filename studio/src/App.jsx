@@ -1774,7 +1774,32 @@ function useFinance({ enabled, showToast, askDialog, logHistory }) {
     setAccounts(as => as.map(x => x.id === data.id ? data : x));
   };
 
-  return { accounts, txns, loading, busy, error, loaded, loadAll, addTxn, deleteTxn, saveAccount, toggleAccount };
+  // Saves changes to an existing transaction and logs what changed to the event's history
+  const updateTxn = async (t, form) => {
+    setBusy(true);
+    const row = txnToRow(form, t.event_id);
+    const { data, error: e } = await supabase.from("event_transactions").update(row).eq("id", t.id).select().single();
+    setBusy(false);
+    if (e) return fail("Could not update transaction", e);
+    setTxns(ts => ts.map(x => x.id === data.id ? data : x));
+    const accName = (id) => accounts.find(a => a.id === id)?.name || "—";
+    const changes = [
+      Number(t.amount) !== Number(data.amount) && `amount ${formatTsh(t.amount)} → ${formatTsh(data.amount)}`,
+      t.kind !== data.kind && `type ${TXN_KINDS[t.kind]?.label} → ${TXN_KINDS[data.kind]?.label}`,
+      t.txn_date !== data.txn_date && `date ${t.txn_date} → ${data.txn_date}`,
+      t.account_id !== data.account_id && `account ${accName(t.account_id)} → ${accName(data.account_id)}`,
+      (t.party || "") !== (data.party || "") && `party ${t.party || "—"} → ${data.party || "—"}`,
+      (t.category || "") !== (data.category || "") && "category",
+      (t.reference || "") !== (data.reference || "") && "reference",
+      (t.note || "") !== (data.note || "") && "note",
+    ].filter(Boolean);
+    logHistory({ channel:"finance", action:"txn_edit", name:data.party, title:formatTsh(data.amount),
+      detail: changes.length ? `Changed: ${changes.join("; ")}` : "Saved without changes" }, data.event_id);
+    showToast("Transaction updated", "success");
+    return data;
+  };
+
+  return { accounts, txns, loading, busy, error, loaded, loadAll, addTxn, updateTxn, deleteTxn, saveAccount, toggleAccount };
 }
 
 // Big number tile used across the Finance tab
@@ -1792,10 +1817,16 @@ function MoneyTile({ label, value, tone = "info", sub }) {
 const MarginPill = ({ pct }) => <Pill tone={MARGIN_TONE[marginTone(pct)]}>{formatPct(pct)}</Pill>;
 
 // Record an income or expense for one event: amount, date, account, who sent / was paid
-function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving, onManageAccounts }) {
-  const active = accounts.filter(a => a.active);
-  const [form, setForm] = useState({ kind: initialKind, amount:"", txn_date: localDate(), account_id: active.length === 1 ? active[0].id : "",
-    party: initialKind === "income" ? (event?.username || "") : "", category: initialKind === "income" ? "deposit" : "printing", reference:"", note:"" });
+// Record a new income / expense, or edit one (`initial` = the transaction being edited)
+function TxnModal({ kind: initialKind, initial, event, accounts, onSave, onClose, saving, onManageAccounts }) {
+  // An edited transaction keeps its account in the list even if that account was deactivated since
+  const active = accounts.filter(a => a.active || a.id === initial?.account_id);
+  const [form, setForm] = useState(() => initial
+    ? { kind: initial.kind, amount: String(initial.amount ?? ""), txn_date: initial.txn_date || localDate(), account_id: initial.account_id || "",
+        party: initial.party || "", category: initial.category || (initial.kind === "income" ? "deposit" : "printing"),
+        reference: initial.reference || "", note: initial.note || "" }
+    : { kind: initialKind, amount:"", txn_date: localDate(), account_id: active.length === 1 ? active[0].id : "",
+        party: initialKind === "income" ? (event?.username || "") : "", category: initialKind === "income" ? "deposit" : "printing", reference:"", note:"" });
   const [errors, setErrors] = useState({});
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
   const setKind = (k) => setForm(f => ({ ...f, kind:k, category: k === "income" ? "deposit" : "printing" }));
@@ -1811,7 +1842,7 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
       <div className="nk-modal" style={{maxWidth:560}}>
         <div className="nk-modal-head">
           <div>
-            <div className="nk-modal-title">{isIncome ? "Record income" : "Record expense"}</div>
+            <div className="nk-modal-title">{initial ? (isIncome ? "Edit income" : "Edit expense") : (isIncome ? "Record income" : "Record expense")}</div>
             <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{event?.username}{event?.event_type ? ` · ${event.event_type}` : ""}</div>
           </div>
           <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
@@ -1865,7 +1896,7 @@ function TxnModal({ kind: initialKind, event, accounts, onSave, onClose, saving,
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
           <button className={`nk-btn ${isIncome ? "nk-btn-success" : "nk-btn-primary"}`} onClick={save} disabled={saving}>
-            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> {`Save ${isIncome ? "income" : "expense"}`}</>}
+            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> {`${initial ? "Save changes" : `Save ${isIncome ? "income" : "expense"}`}`}</>}
           </button>
         </div>
       </div>
@@ -1952,6 +1983,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
   const [range,   setRange]   = useState({ from:"", to:"" });
   const [txFilter, setTxFilter] = useState("all");
   const [adding,  setAdding]  = useState(null);   // null | "income" | "expense"
+  const [editingTxn, setEditingTxn] = useState(null);   // transaction open in the edit form
   const [accountsOpen, setAccountsOpen] = useState(false);
   if (fin.error) return (
     <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
@@ -2093,7 +2125,10 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                       {t.note && <div style={{fontSize:12,color:N.textMid,marginTop:4}}>{t.note}</div>}
                       {t.created_by && <div style={{fontSize:10,color:N.textDim,marginTop:2}}>by {t.created_by}</div>}
                     </div>
-                    <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label="Remove transaction" title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>
+                    <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                      <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label={`Edit ${t.kind} of ${formatTsh(t.amount)}`} title="Edit" onClick={() => setEditingTxn(t)}><Icon n="edit" /></button>
+                      <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12,color:N.red}} aria-label={`Remove ${t.kind} of ${formatTsh(t.amount)}`} title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>
+                    </div>
                   </div>
                 );
               })}
@@ -2112,6 +2147,12 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
           onManageAccounts={() => { setAdding(null); setAccountsOpen(true); }}
           onClose={() => setAdding(null)}
           onSave={async (form) => { if (await fin.addTxn(form, ev)) setAdding(null); }} />
+      )}
+      {editingTxn && (
+        <TxnModal key={editingTxn.id} initial={editingTxn} event={events.find(e => e.id === editingTxn.event_id) || ev} accounts={fin.accounts} saving={fin.busy}
+          onManageAccounts={() => { setEditingTxn(null); setAccountsOpen(true); }}
+          onClose={() => setEditingTxn(null)}
+          onSave={async (form) => { if (await fin.updateTxn(editingTxn, form)) setEditingTxn(null); }} />
       )}
       {accountsOpen && <AccountsModal fin={fin} onClose={() => setAccountsOpen(false)} />}
     </div>
