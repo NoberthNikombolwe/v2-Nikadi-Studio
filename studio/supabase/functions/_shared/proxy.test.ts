@@ -122,3 +122,56 @@ test("ALLOWED_ORIGINS restricts the CORS origin", async () => {
   const res = await proxy(req("/api/v2/balance", { headers: { Origin: "https://evil.example" } }));
   assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://app.example.com");
 });
+
+// ── role checks (module option) ──
+let permImpl: () => Promise<Response>;
+const guarded = createProxy({
+  name: "send-sms",
+  tokenEnv: ["SMS_BEARER_TOKEN"],
+  module: "sms",
+  routes: [{ method: "POST", path: "/api/sms/v2/text/single" }, { method: "GET", path: "/api/v2/balance" }],
+});
+const withPerm = (impl: () => Promise<Response>) => {
+  permImpl = impl;
+  const base = (globalThis as any).fetch;
+  (globalThis as any).fetch = async (url: string, init?: RequestInit) => {
+    if (url === "https://proj.supabase.co/rest/v1/rpc/has_perm") { calls.push({ url, init }); return permImpl(); }
+    return base(url, init);
+  };
+};
+
+test("role check: allowed role is forwarded, asking for edit on POST", async () => {
+  withPerm(async () => new Response("true", { status: 200 }));
+  const res = await guarded(req("/api/sms/v2/text/single", { method: "POST", body: "{}" }));
+  assert.equal(res.status, 200);
+  const perm = calls.find((c) => c.url.endsWith("/rpc/has_perm"))!;
+  assert.deepEqual(JSON.parse(String(perm.init?.body)), { p_module: "sms", p_edit: true });
+  assert.equal(new Headers(perm.init?.headers).get("Authorization"), "Bearer user-jwt");
+  assert.equal(upstreamCalls().length, 1);
+});
+
+test("role check: a role without permission gets 403 and nothing is sent", async () => {
+  withPerm(async () => new Response("false", { status: 200 }));
+  const res = await guarded(req("/api/sms/v2/text/single", { method: "POST", body: "{}" }));
+  assert.equal(res.status, 403);
+  assert.equal(upstreamCalls().length, 0);
+});
+
+test("role check: GET only needs view permission", async () => {
+  withPerm(async () => new Response("true", { status: 200 }));
+  await guarded(req("/api/v2/balance"));
+  const perm = calls.find((c) => c.url.endsWith("/rpc/has_perm"))!;
+  assert.equal(JSON.parse(String(perm.init?.body)).p_edit, false);
+});
+
+test("role check: passes before the roles SQL is installed (has_perm missing)", async () => {
+  withPerm(async () => new Response("{}", { status: 404 }));
+  const res = await guarded(req("/api/sms/v2/text/single", { method: "POST", body: "{}" }));
+  assert.equal(res.status, 200);
+});
+
+test("role check: fails closed when the permission lookup errors", async () => {
+  withPerm(async () => new Response("{}", { status: 500 }));
+  const res = await guarded(req("/api/sms/v2/text/single", { method: "POST", body: "{}" }));
+  assert.equal(res.status, 403);
+});

@@ -10,12 +10,13 @@ export const HISTORY_CHANNELS = {
   card:     { label: "Card",     icon: "image" },
   event:    { label: "Event",    icon: "folder" },
   finance:  { label: "Finance",  icon: "wallet" },
+  calls:    { label: "Calls",    icon: "phone" },
 };
 
 export const HISTORY_ACTIONS = {
   send: "Sent", status: "Delivery report", upload: "Card upload", bulk: "Bulk send",
   create: "Event created", update: "Event updated", contacts: "Contacts changed",
-  income: "Income recorded", expense: "Expense recorded", remove: "Transaction removed",
+  call: "Guest call", income: "Income recorded", expense: "Expense recorded", remove: "Transaction removed",
 };
 
 // Display order + tone (UI maps tone → colour) for each status
@@ -26,6 +27,10 @@ export const HISTORY_STATUSES = {
   invalid:   { label: "Invalid",   tone: "warn" },
   not_sent:  { label: "Not sent",  tone: "bad"  },
   failed:    { label: "Failed",    tone: "bad"  },
+  picked:    { label: "Picked up", tone: "info" },
+  busy:      { label: "Busy",      tone: "warn" },
+  yes:       { label: "Coming",    tone: "good" },
+  no:        { label: "Not coming", tone: "bad" },
 };
 
 const clip = (v, max) => (v === undefined || v === null || v === "" ? null : String(v).slice(0, max));

@@ -4,6 +4,7 @@ import { createProxy } from "../_shared/proxy.ts";
 // SMS_BEARER_TOKEN when the provider issues one token for both). See ../_shared/proxy.ts.
 Deno.serve(createProxy({
   name: "send-wa",
+  module: "whatsapp",
   tokenEnv: ["WA_BEARER_TOKEN", "SMS_BEARER_TOKEN"],
   routes: [
     { method: "POST", path: "/api/whatsapp/v2/text/single" },

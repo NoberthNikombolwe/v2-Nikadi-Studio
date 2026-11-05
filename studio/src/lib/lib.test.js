@@ -354,3 +354,86 @@ test("guideProgress counts completed steps and finds the next one", () => {
   const all = guideProgress({ hasLead: true, hasCustomer: true, hasEvent: true, hasDesign: true, guests: 1, uploaded: 1, waSent: 1, smsSent: 1, txns: 1 });
   assert.equal(all.pct, 100); assert.equal(all.next, null);
 });
+
+// ── permissions / card rules / scan / calls / settings ──
+import fs from "node:fs";
+import { DEFAULT_MATRIX, can, canSeeTab, visibleNav, matrixFromRows, rowsForRole, validateInvite, MODULES } from "./permissions.js";
+import { peopleForCardType, scanStatus, remaining, scanTotals, validateCardRule } from "./cardRules.js";
+import { buildQrPayload, parseQrPayload, matchByName, newScanCode } from "./scan.js";
+import { callOptions, nextCallStatus, summariseCalls, filterCalls } from "./calls.js";
+import { settingsFromRows, pickDefault, resolveChoice, validateTemplate, validateSenderId } from "./settings.js";
+
+test("DEFAULT_MATRIX matches the SQL seed exactly", () => {
+  const sql = fs.readFileSync(new URL("../../supabase-roles-settings-scan.sql", import.meta.url), "utf8");
+  const seed = {};
+  for (const [, r, m, p] of sql.matchAll(/\('(\w+)','(\w+)','([EV])'\)/g)) (seed[r] || (seed[r] = {}))[m] = p;
+  assert.deepEqual(seed, DEFAULT_MATRIX);
+});
+
+test("can / canSeeTab / visibleNav", () => {
+  assert.equal(can(null, "superuser", "finance", "edit"), true);
+  assert.equal(can(null, "sales_officer", "finance"), false);
+  assert.equal(can(null, "sales_officer", "design"), true);
+  assert.equal(can(null, "sales_officer", "design", "edit"), false);
+  assert.equal(can(null, null, "events"), false);
+  assert.equal(canSeeTab(null, "finance_officer", "guide"), true);
+  assert.equal(canSeeTab(null, "finance_officer", "settings"), false);
+  assert.equal(canSeeTab(null, "admin", "settings"), true);
+  const nav = visibleNav([{ label: "A", items: [{ id: "finance" }] }, { label: "B", items: [{ id: "events" }] }], null, "sales_officer");
+  assert.deepEqual(nav.map(g => g.label), ["B"]);
+  const m = matrixFromRows([{ role: "x", module: "events", can_view: true, can_edit: false }, { role: "x", module: "leads", can_view: false, can_edit: false }]);
+  assert.deepEqual(m, { x: { events: "V" } });
+  assert.equal(rowsForRole("x", { events: "E" }).length, MODULES.length);
+  assert.ok(validateInvite({ email: "a@b.co", role: "superuser" }).role);
+  assert.deepEqual(validateInvite({ email: "a@b.co", role: "superuser" }, { allowSuperuser: true }), {});
+  assert.ok(validateInvite({ email: "nope", role: "admin" }).email);
+});
+
+test("peopleForCardType follows rules, numbers, then the default", () => {
+  const rules = [{ name: "Double", people: 2 }, { name: "VIP Table", people: 10 }];
+  assert.equal(peopleForCardType("double", rules), 2);
+  assert.equal(peopleForCardType(" VIP TABLE ", rules), 10);
+  assert.equal(peopleForCardType("5", rules), 5);
+  assert.equal(peopleForCardType("5", rules, { numeric_card_types: false, default_people: 1 }), 1);
+  assert.equal(peopleForCardType("Gold", rules, { numeric_card_types: true, default_people: 3 }), 3);
+  assert.equal(peopleForCardType("0", rules), 1);
+  assert.equal(scanStatus(0, 2), "pending"); assert.equal(scanStatus(1, 2), "partial"); assert.equal(scanStatus(2, 2), "complete");
+  assert.equal(remaining(1, 3), 2);
+  assert.deepEqual(scanTotals([{ max_scans: 2, scan_count: 2 }, { max_scans: 1, scan_count: 0 }]), { cards: 2, people: 3, entered: 2, complete: 1 });
+  assert.ok(validateCardRule({ name: "double", people: 2 }, rules).name);
+  assert.ok(validateCardRule({ name: "New", people: 0 }, rules).people);
+});
+
+test("QR payload round-trips and falls back to name", () => {
+  const id = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+  assert.deepEqual(parseQrPayload(buildQrPayload({ dbId: id, name: "Amina", cardType: "Double" })), { id, name: "Amina", cardType: "Double" });
+  assert.deepEqual(parseQrPayload("Name=Juma;TypeCard=Single"), { id: null, name: "Juma", cardType: "Single" });
+  assert.equal(parseQrPayload(id.toUpperCase()).id, id);
+  assert.equal(parseQrPayload("ID=not-a-uuid;Name=?").id, null);
+  const cards = [{ name: "Juma", card_type: "Single" }, { name: "juma", card_type: "Double" }];
+  assert.equal(matchByName(cards, { name: "JUMA", cardType: "double" }).length, 1);
+  assert.equal(matchByName(cards, { name: "Juma" }).length, 2);
+  assert.match(newScanCode(), /^[A-HJ-NP-Z2-9]{6}$/);
+});
+
+test("call flow and summary", () => {
+  assert.deepEqual(callOptions(null), ["picked", "busy", "yes", "no"]);
+  assert.deepEqual(callOptions("busy"), ["busy", "yes", "no"]);
+  assert.deepEqual(callOptions("yes"), ["yes"]);
+  assert.equal(nextCallStatus("yes", "yes"), null);
+  const cards = [{ call_status: "yes", n: 2 }, { call_status: "no", n: 1 }, { call_status: null, n: 1 }];
+  const s = summariseCalls(cards, c => c.n);
+  assert.equal(s.peopleYes, 2); assert.equal(s.peopleExpected, 3); assert.equal(s.notCalled, 1);
+  assert.equal(filterCalls(cards, { status: "todo" }).length, 1);
+});
+
+test("settings helpers", () => {
+  assert.equal(settingsFromRows([{ key: "country_code", value: "254" }]).country_code, "254");
+  const list = [{ name: "A", active: true }, { name: "B", active: true, is_default: true }, { name: "C", active: false }];
+  assert.equal(pickDefault(list).name, "B");
+  assert.equal(resolveChoice(list, "A", "name").name, "A");
+  assert.equal(resolveChoice(list, "C", "name").name, "B");
+  assert.ok(validateTemplate({ name: "has space" }).name);
+  assert.ok(validateSenderId({ sender_id: "TOOLONGSENDER1" }).sender_id);
+  assert.deepEqual(validateSenderId({ sender_id: "NIKADI 2" }), {});
+});

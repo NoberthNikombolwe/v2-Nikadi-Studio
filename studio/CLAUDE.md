@@ -46,15 +46,29 @@ Before finishing a change run `npm run lint`, `npm test`, `npm run test:function
 | Table | `customers` | qualified leads (or added directly); one customer → many `events` via `events.customer_id` (events also keep `lead_id`, `package_price`, `region`) |
 | Table | `finance_accounts` | the business's money accounts (bank / mobile money / cash), `active` flag |
 | Table | `event_transactions` | per-event `income` / `expense`: amount, `txn_date`, `account_id`, `party` (who paid / was paid), category, reference, note, `created_by` |
+| Table | `app_roles` / `app_modules` / `role_permissions` | the 7 roles, the modules (≈ tabs), and each role's view/edit per module (Superuser is always everything) |
+| Table | `app_users` | who may sign in (invite-only; trigger on `auth.users` rejects others) and their role, active flag, last seen |
+| Table | `app_settings` / `wa_templates` / `sender_ids` / `card_type_rules` | Settings data: general values, WhatsApp templates, SMS sender IDs, card type → people |
+| Table | `scan_logs` | every door check-in attempt (written only by `scan_card()`) |
 | Table | `event_logs` | append-only event history: every card/SMS sent and its result, uploads, late WA reports, bulk summaries, event changes |
 | Bucket | `templates` | template/background images |
 | Bucket | `wa-cards` | per-contact rendered card JPEGs for WhatsApp (must stay public) |
 
-Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) (idempotent). RLS is **signed-in users only** — never add `anon` policies for these tables or buckets; the anon key is public. Keep the SQL file in sync when adding tables or columns.
+Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) (idempotent). Roles, settings, scanner and calls are in [supabase-roles-settings-scan.sql](supabase-roles-settings-scan.sql), which is **also appended to the end of supabase-schema.sql** (between the "BEGIN roles-settings-scan" marker and the end) — edit the standalone file, then re-copy it there; it must stay last because it replaces the open policies created earlier in the file. Policies call `has_perm(module, edit)` / `has_any_perm(...)` / `is_active_user()`; a new table needs policies of that form. The public scan page uses SECURITY DEFINER RPCs that check `events.scan_code` (`public_scan_event`, `public_find_cards`, `public_recent_scans`, `scan_card`) — still no anon table policies. RLS is **signed-in users only** — never add `anon` policies for these tables or buckets; the anon key is public. Keep the SQL file in sync when adding tables or columns.
+
+### Roles, settings, scanner, calls
+
+- **`useAccess()`** (App.jsx) loads my `app_users` row, `role_permissions` (→ `matrixFromRows`) and every Settings list. `access.can(module, "view"|"edit")` gates UI; `navGroups` = `visibleNav(NAV_GROUPS, …)`; a tab without edit shows a "View only" banner. Not invited / deactivated → `<NoAccess>`. If the roles tables don't exist yet (`access.setupMissing`) everyone keeps full access. Keep `DEFAULT_MATRIX` in [src/lib/permissions.js](src/lib/permissions.js) identical to the SQL seed — a test compares them. New tab → add it to `TAB_MODULE` and (if new) to `MODULES` + `app_modules`.
+- **Edge Functions** pass `module` to `createProxy` (`sms` / `whatsapp`); the proxy calls `has_perm` with the user's JWT (edit for POST) and returns 403 otherwise.
+- **WhatsApp template / SMS sender** come from Settings: `resolveChoice(list, event's choice, key)` → event's own (`events.wa_template` / `events.sms_sender_id`, saved by `rememberForEvent`) else the default. The WA request's `account` is the template's or `app_settings.wa_account`.
+- **Card types → people**: `peopleForCardType` ([src/lib/cardRules.js](src/lib/cardRules.js)) mirrors SQL `people_for_card_type()`; a trigger keeps `event_cards.max_scans` in sync and re-syncs all cards when rules/settings change.
+- **QR codes** carry `ID=<event_cards.id>;Name=…;TypeCard=…` (`buildQrPayload`); `parseQrPayload` + `matchByName` handle older ID-less cards. **`saveCards` updates existing rows in place** (keeps ids, scan and call progress), inserts new ones, deletes removed ones last — never go back to delete-and-reinsert.
+- **Scanner**: `<ScanPanel>` ([src/ScanPanel.jsx](src/ScanPanel.jsx)) is shared by `<ScannerTab>` and `<PublicScanPage>` (`#/scan/<eventId>`, routed in main.jsx, no login). Check-ins only via `scan_card()` (atomic; multi-person cards prompt for a count). `html5-qrcode` is lazy-imported from npm. `useEventCards` keeps the list live via realtime.
+- **Calls**: `<CallsTab>` updates `event_cards.call_status` (`picked|busy|yes|no`, flow in [src/lib/calls.js](src/lib/calls.js)) and logs each change to history (channel `calls`).
 
 ### localStorage keys
 
-`nikadi_layout_<templateFingerprint>` (auto-saved element layout per template), `nikadi_last_event` (last opened event id) , `nikadi_theme` (`light`/`dark`; absent = follow the browser) and `nikadi_guide_seen` (welcome pop-up already shown).
+`nikadi_layout_<templateFingerprint>` (auto-saved element layout per template), `nikadi_last_event` (last opened event id) , `nikadi_theme` (`light`/`dark`; absent = follow the browser) , `nikadi_guide_seen` (welcome pop-up already shown) and `nikadi_door_name` (public scan page). The public scan code is kept in sessionStorage (`nikadi_scan_code_<eventId>`).
 
 ## Conventions
 

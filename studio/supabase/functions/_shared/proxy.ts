@@ -8,6 +8,9 @@
 //      so the function can't be used as a general-purpose relay to the account.
 //   3. The provider bearer token comes from a server-side secret and is never
 //      accepted from, or returned to, the client.
+//   4. With `module` set, the caller's role must allow it (has_perm() in
+//      supabase-roles-settings-scan.sql): edit for POST (sending), view for GET.
+//      Before that SQL has been run (has_perm doesn't exist yet) any signed-in user passes.
 //
 // Deploy with --no-verify-jwt (the project uses non-JWT publishable keys, which the
 // gateway's legacy JWT check rejects); the check in this file replaces it.
@@ -22,6 +25,7 @@ export type ProxyOptions = {
   name: string;          // function name, used to strip the routing prefix
   tokenEnv: string[];    // secret names to read the provider token from, first set one wins
   routes: Route[];       // allowlisted provider endpoints
+  module?: string;       // app module the caller's role needs (e.g. "sms", "whatsapp")
 };
 
 // CORS: set ALLOWED_ORIGINS (comma-separated) to restrict browsers to your app's origin(s).
@@ -63,7 +67,28 @@ const isSignedIn = async (req: Request): Promise<boolean> => {
   }
 };
 
-export const createProxy = ({ name, tokenEnv, routes }: ProxyOptions) =>
+// Asks the database whether the caller's role may use `module` (as that user, via their JWT).
+// true / false from has_perm(); null when the roles SQL isn't installed yet.
+const roleAllows = async (req: Request, module: string, edit: boolean): Promise<boolean | null> => {
+  const url = Deno.env.get("SUPABASE_URL");
+  const key = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!url || !key) return false;
+  try {
+    const res = await fetch(`${url}/rest/v1/rpc/has_perm`, {
+      method: "POST",
+      headers: { Authorization: req.headers.get("Authorization") ?? "", apikey: key, "Content-Type": "application/json" },
+      body: JSON.stringify({ p_module: module, p_edit: edit }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) return false;
+    return (await res.json()) === true;
+  } catch {
+    return false;
+  }
+};
+
+export const createProxy = ({ name, tokenEnv, routes, module }: ProxyOptions) =>
   async (req: Request): Promise<Response> => {
     if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders(req) });
 
@@ -76,6 +101,10 @@ export const createProxy = ({ name, tokenEnv, routes }: ProxyOptions) =>
     const route = routes.find((r) => r.path === upstreamPath);
     if (!route) return json(req, 404, { error: "Unknown endpoint" });
     if (route.method !== req.method) return json(req, 405, { error: "Method not allowed" });
+
+    if (module && (await roleAllows(req, module, req.method === "POST")) === false) {
+      return json(req, 403, { error: "Your role is not allowed to do this" });
+    }
 
     const token = tokenEnv.map((k) => Deno.env.get(k)).find(Boolean);
     if (!token) return json(req, 500, { error: "Server is not configured" });

@@ -5,6 +5,12 @@ import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipie
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
+import ScanPanel from "./ScanPanel";
+import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, canSeeTab, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE } from "./lib/permissions";
+import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, validateSenderId } from "./lib/settings";
+import { peopleForCardType, peopleLabel, scanTotals, validateCardRule } from "./lib/cardRules";
+import { buildQrPayload, matchByName, SCAN_REASON, newScanCode } from "./lib/scan";
+import { CALL_STATUSES, callOptions, nextCallStatus, summariseCalls, filterCalls } from "./lib/calls";
 import { GUIDE_STAGES, GUIDE_STEPS, GUIDE_LINKS, stepsOfStage, guideProgress } from "./lib/guide";
 import { ACCOUNT_TYPES, TXN_KINDS, TXN_CATEGORIES, validateTransaction, txnToRow, validateAccount, summariseTransactions, marginTone, formatPct,
          summariseByAccount, summariseByCategory, groupByEvent, filterTransactions, sortTransactions, transactionExportRows } from "./lib/finance";
@@ -680,7 +686,7 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
             ctx.strokeRect(dx-4, el.y-el.fontSize-2, w+8, el.fontSize+10); ctx.setLineDash([]);
           }
         } else if (el.type === "qr") {
-          const qrData = `Name=${record?.name||"?"};TypeCard=${record?.cardType||"?"}`;
+          const qrData = buildQrPayload(record || {});
           const img = new Image(); img.crossOrigin = "anonymous";
           img.onload = () => {
             ctx.save(); ctx.shadowColor="rgba(0,0,0,0.2)"; ctx.shadowBlur=6;
@@ -762,7 +768,7 @@ async function exportCard(bgImage, bgSize, elements, record) {
   const cv = document.createElement("canvas"); cv.width=cw; cv.height=ch;
   const ctx = cv.getContext("2d");
   const qrEls  = elements.filter(e=>e.type==="qr");
-  const qrData = `Name=${record?.name||"?"};TypeCard=${record?.cardType||"?"}`;
+  const qrData = buildQrPayload(record || {});
   // Web fonts load lazily, and canvas drawing doesn't trigger a load — wait for every font a
   // text element uses, or the card silently falls back to a default font
   await Promise.all(elements.filter(el => el.type==="text").map(el =>
@@ -1047,7 +1053,9 @@ const NAV_GROUPS = [
   { label:"Studio",  items:[{ id:"design", label:"Design", icon:"palette" }, { id:"vcard", label:"VCard", icon:"contact" }, { id:"sms", label:"SMS", icon:"sms" },
                             { id:"whatsapp", label:"WhatsApp", icon:"whatsapp" }, { id:"batch", label:"Batch & Send", icon:"table" }] },
   { label:"Insight", items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
+  { label:"Guests",  items:[{ id:"calls", label:"Calls", icon:"phone" }, { id:"scanner", label:"Scanner", icon:"scan" }] },
   { label:"Money",   items:[{ id:"finance", label:"Finance", icon:"wallet" }] },
+  { label:"Admin",   items:[{ id:"settings", label:"Settings", icon:"settings" }] },
   { label:"Help",    items:[{ id:"guide", label:"Guide", icon:"map" }] },
 ];
 const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
@@ -2097,7 +2105,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
    connect) and <WelcomeModal> (first sign-in). Content lives in src/lib/guide.js.
 ══════════════════════════════════════════════════════════════════════════ */
 const TAB_LABEL = { events:"Events", leads:"Leads", customers:"Customers", design:"Design", vcard:"VCard", sms:"SMS",
-  whatsapp:"WhatsApp", batch:"Batch & Send", reports:"Reports", history:"History", finance:"Finance", guide:"Guide" };
+  whatsapp:"WhatsApp", batch:"Batch & Send", reports:"Reports", history:"History", finance:"Finance", guide:"Guide", calls:"Calls", scanner:"Scanner", settings:"Settings" };
 const stepNo = Object.fromEntries(GUIDE_STEPS.map((st, i) => [st.id, i + 1]));
 
 // One step of the flow map: number (or tick when the open event has done it), icon, title
@@ -2114,7 +2122,7 @@ function GuideStep({ step, done, isNext, onOpen }) {
       <span className="nk-guide-ico"><Icon n={step.icon} /></span>
       <span style={{flex:1,minWidth:0}}>
         <span className="nk-guide-title">{step.title}</span>
-        <span className="nk-guide-where">{TAB_LABEL[step.tab]}{isNext ? " · next" : ""}</span>
+        <span className="nk-guide-where">{TAB_LABEL[step.tab]}{step.optional ? " · optional" : ""}{isNext ? " · next" : ""}</span>
       </span>
       <Icon n="arrowRight" style={{color:N.textDim}} />
     </button>
@@ -2274,6 +2282,814 @@ function WelcomeModal({ name, onClose, onGuide }) {
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Skip for now</button>
           <button className="nk-btn nk-btn-primary" onClick={onGuide}><Icon n="map" /> Show me how it works</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ACCESS & SETTINGS — useAccess() (my role, the permission matrix and every
+   Settings list), <NoAccess>, <SettingsTab>. The database enforces the same
+   rules (has_perm() in supabase-roles-settings-scan.sql); the UI only hides
+   what a role can't use. Pure logic: src/lib/permissions.js, settings.js, cardRules.js.
+══════════════════════════════════════════════════════════════════════════ */
+const isMissingTable = (e) => !!e && (e.code === "42P01" || e.code === "PGRST205" || /schema cache|does not exist/i.test(e.message || ""));
+
+function useAccess({ userId, email, showToast }) {
+  const [st, setSt] = useState({ loading: true, setupMissing: false, me: null, matrix: null,
+    settings: DEFAULT_SETTINGS, waTemplates: [], senderIds: [], cardRules: [] });
+  const [users, setUsers] = useState(null);
+  const [busy, setBusy]   = useState(false);
+  const fail = (what, e) => { showToast(`${what}: ${errMsg(e)}`, "warn"); return null; };
+
+  // My role + permissions + every settings list (all readable by any active user)
+  const loadAll = async () => {
+    if (!supabase || !userId) { setSt(s => ({ ...s, loading: false })); return; }
+    const me = await supabase.from("app_users").select("*").eq("email", (email || "").toLowerCase()).maybeSingle();
+    if (isMissingTable(me.error)) {
+      // Roles not set up yet: keep the old "everyone can do everything" behaviour until the SQL is run
+      setSt(s => ({ ...s, loading: false, setupMissing: true, me: { email, role: "superuser", active: true } }));
+      return;
+    }
+    const [perms, sets, tpl, snd, rules] = await Promise.all([
+      supabase.from("role_permissions").select("*"),
+      supabase.from("app_settings").select("*"),
+      supabase.from("wa_templates").select("*").order("sort").order("name"),
+      supabase.from("sender_ids").select("*").order("sender_id"),
+      supabase.from("card_type_rules").select("*").order("sort").order("name"),
+    ]);
+    setSt({ loading: false, setupMissing: false, me: me.data || null,
+      matrix: perms.error ? null : matrixFromRows(perms.data),
+      settings: settingsFromRows(sets.data || []), waTemplates: tpl.data || [], senderIds: snd.data || [], cardRules: rules.data || [] });
+    if (me.data?.active) supabase.rpc("touch_last_seen").then(() => {}, () => {});
+  };
+  useEffect(() => { loadAll(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- loads data from the database
+
+  const role = st.me?.active ? st.me.role : null;
+  const allow = (module, level = "view") => st.setupMissing || can(st.matrix, role, module, level);
+
+  const loadUsers = async () => {
+    const { data, error } = await supabase.from("app_users").select("*").order("created_at", { ascending: true });
+    if (error) return fail("Could not load users", error);
+    setUsers(data);
+  };
+
+  // Generic save for the settings tables: insert (no id) or update; refreshes the lists
+  const save = async (table, row, what, idKey = "id") => {
+    setBusy(true);
+    const id = row[idKey];
+    const body = { ...row }; if (idKey === "id") delete body.id;
+    const q = id && idKey === "id" ? supabase.from(table).update(body).eq("id", id) : supabase.from(table).upsert([row]);
+    const { error } = await q;
+    setBusy(false);
+    if (error) return fail(`Could not save ${what}`, error);
+    showToast(`${what[0].toUpperCase()}${what.slice(1)} saved`, "success");
+    await (table === "app_users" ? loadUsers() : loadAll());
+    return true;
+  };
+  const remove = async (table, id, what) => {
+    const { error } = await supabase.from(table).delete().eq("id", id);
+    if (error) return fail(`Could not delete ${what}`, error);
+    showToast(`${what[0].toUpperCase()}${what.slice(1)} deleted`, "success");
+    await loadAll();
+    return true;
+  };
+  // Makes one row the default (clears the old default first — only one may be default)
+  const makeDefault = async (table, id) => {
+    setBusy(true);
+    const a = await supabase.from(table).update({ is_default: false }).eq("is_default", true);
+    const b = a.error ? a : await supabase.from(table).update({ is_default: true, active: true }).eq("id", id);
+    setBusy(false);
+    if (b.error) return fail("Could not set the default", b.error);
+    await loadAll();
+    return true;
+  };
+  const savePermissions = async (roleKey, perms) => {
+    setBusy(true);
+    const { error } = await supabase.from("role_permissions").upsert(rowsForRole(roleKey, perms), { onConflict: "role,module" });
+    setBusy(false);
+    if (error) return fail("Could not save permissions", error);
+    showToast(`${ROLE_LABEL[roleKey]} permissions saved`, "success");
+    await loadAll();
+    return true;
+  };
+  const saveSetting = async (key, value) => {
+    const { error } = await supabase.from("app_settings").upsert([{ key, value }]);
+    if (error) return fail("Could not save setting", error);
+    await loadAll();
+    return true;
+  };
+
+  return { ...st, role, can: allow, users, busy, loadAll, loadUsers, save, remove, makeDefault, savePermissions, saveSetting };
+}
+
+// Shown when the signed-in account isn't an active user of the system
+function NoAccess({ email, onSignOut, onRetry }) {
+  return (
+    <div style={{minHeight:"100vh",background:N.navy900,display:"grid",placeItems:"center",padding:16}}>
+      <div style={{maxWidth:440,width:"100%",background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16}}>
+        <EmptyState icon="lock" tone="warn" title="You don't have access yet"
+          text={<>The account <strong style={{color:N.text}}>{email}</strong> hasn't been given a role in Nikadi Studio, or it was deactivated. Ask an administrator to invite you in Settings → Users.</>}
+          action={<><button className="nk-btn nk-btn-ghost" onClick={onRetry}><Icon n="refresh" /> Check again</button>
+                    <button className="nk-btn nk-btn-primary" onClick={onSignOut}>Sign out</button></>} />
+      </div>
+    </div>
+  );
+}
+
+const ROLE_TONE = { superuser:"bad", admin:"warn", sales_officer:"info", graphics_designer:"info", help_desk:"good", telesales:"good", finance_officer:"warn" };
+const RoleBadge = ({ role }) => role ? <Pill tone={ROLE_TONE[role] || "info"}>{ROLE_LABEL[role] || role}</Pill> : null;
+
+// Settings tab: users, roles & permissions, WhatsApp templates, sender IDs, card types, general
+function SettingsTab({ access, askDialog, myEmail }) {
+  const sections = [
+    ["users",     "Users",                "users",    access.can("users")],
+    ["perms",     "Roles & permissions",  "shield",   access.can("users")],
+    ["templates", "WhatsApp templates",   "whatsapp", access.can("settings")],
+    ["senders",   "Sender IDs",           "sms",      access.can("settings")],
+    ["cards",     "Card types",           "contact",  access.can("settings")],
+    ["general",   "General",              "settings", access.can("settings")],
+  ].filter(s => s[3]);
+  const [sec, setSec] = useState(sections[0]?.[0] || "users");
+  if (access.setupMissing) return (
+    <div className="nk-page" style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+      <EmptyState icon="database" tone="warn" title="Roles & settings aren't set up in the database yet"
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-roles-settings-scan.sql</code> in the Supabase SQL editor, then reload. Until then everyone keeps full access.</>}
+        action={<button className="nk-btn nk-btn-ghost" onClick={access.loadAll}><Icon n="refresh" /> Check again</button>} />
+    </div>
+  );
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px"}}>
+      <div style={{marginBottom:16}}>
+        <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Settings</h2>
+        <p style={{fontSize:12,color:N.textDim,marginTop:2}}>People, permissions and the data the rest of the system uses</p>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}} role="tablist">
+        {sections.map(([k, l, ic]) => (
+          <button key={k} role="tab" aria-selected={sec === k} style={{...segStyle(sec === k),display:"inline-flex",alignItems:"center",gap:6}} onClick={() => setSec(k)}>
+            <Icon n={ic} /> {l}
+          </button>
+        ))}
+      </div>
+      {sec === "users"     && <UsersSettings access={access} askDialog={askDialog} myEmail={myEmail} />}
+      {sec === "perms"     && <PermissionsSettings access={access} />}
+      {sec === "templates" && <TemplatesSettings access={access} askDialog={askDialog} />}
+      {sec === "senders"   && <SendersSettings access={access} askDialog={askDialog} />}
+      {sec === "cards"     && <CardTypeSettings access={access} askDialog={askDialog} />}
+      {sec === "general"   && <GeneralSettings access={access} />}
+    </div>
+  );
+}
+
+const card = { background:N.navy800, border:`1px solid ${N.border}`, borderRadius:14, padding:16, marginBottom:16 };
+
+function UsersSettings({ access, askDialog, myEmail }) {
+  const [editing, setEditing] = useState(null);   // null | {} (invite) | user row
+  const [q, setQ] = useState("");
+  useEffect(() => { access.loadUsers(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const iAmSuper = access.role === "superuser";
+  const canEdit = access.can("users", "edit");
+  const list = (access.users || []).filter(u => !q.trim() || [u.email, u.full_name, ROLE_LABEL[u.role]].filter(Boolean).join(" ").toLowerCase().includes(q.trim().toLowerCase()));
+  const counts = (access.users || []).reduce((m, u) => (u.active ? { ...m, [u.role]: (m[u.role] || 0) + 1 } : m), {});
+  const toggle = async (u) => {
+    if (u.active && (await askDialog({ title: `Deactivate ${u.full_name || u.email}?`, body: "They are signed out of everything on their next action and can't sign in again until reactivated. Their history is kept.",
+      actions: [{ value: "yes", label: "Deactivate", kind: "danger" }] })) !== "yes") return;
+    await access.save("app_users", { email: u.email, role: u.role, active: !u.active }, "user", "email");
+  };
+  return (
+    <>
+      <div className="nk-stats">
+        {ROLES.map(r => <div key={r.key} className="nk-stat"><div className="nk-stat-num" style={{color:TONE[ROLE_TONE[r.key]],fontSize:20}}>{counts[r.key] || 0}</div><div className="nk-stat-label">{r.label}</div></div>)}
+      </div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+        <input className="nk-input" style={{flex:"1 1 220px",maxWidth:320,marginBottom:0}} placeholder="Search name, email or role…" value={q} onChange={e => setQ(e.target.value)} />
+        <span style={{marginLeft:"auto"}} />
+        {canEdit && <button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}><Icon n="plus" /> Invite user</button>}
+      </div>
+      <div className="nk-table-wrap">
+        <table className="nk-table">
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last seen</th><th>Invited by</th>{canEdit && <th></th>}</tr></thead>
+          <tbody>
+            {list.map(u => {
+              const locked = u.role === "superuser" && !iAmSuper;
+              return (
+                <tr key={u.email} style={u.active ? undefined : { opacity: .55 }}>
+                  <td><div style={{fontWeight:700,color:N.text}}>{u.full_name || "—"}{u.email === myEmail && <span style={{color:N.textDim,fontWeight:500}}> (you)</span>}</div>
+                      <div style={{fontSize:11,color:N.textDim}}>{u.email}</div></td>
+                  <td><RoleBadge role={u.role} /></td>
+                  <td>{u.active ? (u.user_id ? <Pill tone="good">Active</Pill> : <Pill tone="info">Invited</Pill>) : <Pill tone="bad">Deactivated</Pill>}</td>
+                  <td style={{fontSize:12,color:N.textMid}}>{u.last_seen_at ? fmtWhen(u.last_seen_at) : "Never"}</td>
+                  <td style={{fontSize:12,color:N.textDim}}>{u.invited_by || "—"}</td>
+                  {canEdit && (
+                    <td><div className="nk-row-actions">
+                      <Sb bg="transparent" col={N.sky} border={N.border} label={`Change role of ${u.email}`} disabled={locked}
+                        title={locked ? "Only a Superuser can change a Superuser" : undefined} onClick={() => setEditing(u)}><Icon n="edit" /> Edit</Sb>
+                      <Sb bg="transparent" col={u.active ? N.red : N.green} border={N.border} disabled={locked || u.email === myEmail}
+                        label={`${u.active ? "Deactivate" : "Reactivate"} ${u.email}`} title={u.email === myEmail ? "You can't deactivate yourself" : undefined}
+                        onClick={() => toggle(u)}><Icon n={u.active ? "ban" : "check"} /> {u.active ? "Deactivate" : "Reactivate"}</Sb>
+                    </div></td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {!access.users ? <EmptyState loading title="Loading users…" /> : !list.length && <EmptyState icon="users" title="No users match" />}
+      </div>
+      {editing && <UserModal initial={editing} iAmSuper={iAmSuper} busy={access.busy} onClose={() => setEditing(null)}
+        onSave={async (form) => { if (await access.save("app_users", form, editing.email ? "user" : "invitation", "email")) setEditing(null); }} />}
+    </>
+  );
+}
+
+function UserModal({ initial, iAmSuper, busy, onSave, onClose }) {
+  const isNew = !initial.email;
+  const [form, setForm] = useState({ email: initial.email || "", full_name: initial.full_name || "", role: initial.role || "sales_officer", active: initial.active ?? true });
+  const [errors, setErrors] = useState({});
+  const submit = () => {
+    const e = validateInvite(form, { allowSuperuser: iAmSuper });
+    setErrors(e);
+    if (!Object.keys(e).length) onSave({ ...form, email: form.email.trim().toLowerCase(), full_name: form.full_name.trim() || null });
+  };
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:560}} role="dialog" aria-modal="true" aria-labelledby="nk-user-title">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title" id="nk-user-title">{isNew ? "Invite a user" : "Edit user"}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body">
+          {isNew && <p style={{fontSize:12,color:N.textDim,marginBottom:14}}>They sign in with Google using this email. Anyone not invited is refused.</p>}
+          <div className="nk-form-grid">
+            <Field label="Email *" error={errors.email}>
+              <input className="nk-input" type="email" autoFocus={isNew} disabled={!isNew} value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="name@company.com" />
+            </Field>
+            <Field label="Full name">
+              <input className="nk-input" value={form.full_name} onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))} placeholder="Shown in the user list" />
+            </Field>
+          </div>
+          <Field label="Role *" error={errors.role}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(220px, 1fr))",gap:8,marginBottom:10}}>
+              {ROLES.filter(r => iAmSuper || r.key !== "superuser").map(r => (
+                <button key={r.key} type="button" onClick={() => setForm(f => ({ ...f, role: r.key }))} aria-pressed={form.role === r.key}
+                  style={{textAlign:"left",padding:10,borderRadius:10,cursor:"pointer",fontFamily:"inherit",
+                    background: form.role === r.key ? alpha(N.accent,"1f") : N.navy700, border:`1.5px solid ${form.role === r.key ? N.accent : N.border}`}}>
+                  <div style={{fontWeight:700,color:N.text,fontSize:13}}>{r.label}</div>
+                  <div style={{fontSize:11,color:N.textDim,marginTop:2}}>{r.description}</div>
+                </button>
+              ))}
+            </div>
+          </Field>
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={submit} disabled={busy}>{busy ? <Icon n="loader" /> : <Icon n="save" />} {isNew ? "Send invitation" : "Save"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Roles × modules grid of None / View / Edit. Superuser is fixed to everything.
+function PermissionsSettings({ access }) {
+  const editable = ROLES.filter(r => r.key !== "superuser");
+  const [roleKey, setRoleKey] = useState(editable[0].key);
+  const current = (access.matrix || DEFAULT_MATRIX)[roleKey] || {};
+  // Unsaved edits belong to one role + one saved version; switching role or saving starts fresh
+  const stamp = roleKey + JSON.stringify(current);
+  const [pending, setPending] = useState(null);   // { stamp, perms }
+  const draft = pending?.stamp === stamp ? pending.perms : current;
+  const setDraft = (next) => setPending({ stamp, perms: typeof next === "function" ? next(draft) : next });
+  const canEdit = access.can("users", "edit");
+  const dirty = JSON.stringify(draft) !== JSON.stringify(current);
+  const levels = [["", "None"], ["V", "View"], ["E", "Edit"]];
+  return (
+    <div style={card}>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+        {editable.map(r => <button key={r.key} style={segStyle(roleKey === r.key)} onClick={() => setRoleKey(r.key)}>{r.label}</button>)}
+        <span style={{...segStyle(false),opacity:.7,cursor:"default",display:"inline-flex",alignItems:"center",gap:6}} title="Superusers always have every permission"><Icon n="lock" /> Superuser: everything</span>
+      </div>
+      <p style={{fontSize:12,color:N.textDim,marginBottom:12}}>{ROLES.find(r => r.key === roleKey)?.description}. <strong style={{color:N.textMid}}>View</strong> shows the module; <strong style={{color:N.textMid}}>Edit</strong> also allows changes. The database enforces this too.</p>
+      <div className="nk-table-wrap">
+        <table className="nk-table">
+          <thead><tr><th>Module</th><th>Access</th></tr></thead>
+          <tbody>
+            {MODULES.map(m => (
+              <tr key={m.key}>
+                <td style={{fontWeight:600,color:N.text}}>{m.label}</td>
+                <td><div className="nk-row-actions" role="radiogroup" aria-label={`${m.label} access`}>
+                  {levels.map(([v, l]) => {
+                    const on = (draft[m.key] || "") === v;
+                    return (
+                      <button key={v} type="button" role="radio" aria-checked={on} disabled={!canEdit}
+                        onClick={() => setDraft(d => { const n = { ...d }; if (v) n[m.key] = v; else delete n[m.key]; return n; })}
+                        style={{...segStyle(on), padding:"5px 12px",
+                          ...(on && v === "E" ? { color:N.green, borderColor:N.green } : on && v === "V" ? { color:N.sky, borderColor:N.sky } : {})}}>
+                        {l}
+                      </button>
+                    );
+                  })}
+                </div></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {canEdit && (
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}}>
+          <button className="nk-btn nk-btn-ghost" disabled={!dirty} onClick={() => setDraft(current)}>Undo changes</button>
+          <button className="nk-btn nk-btn-ghost" onClick={() => setDraft(DEFAULT_MATRIX[roleKey] || {})}>Reset to default</button>
+          <button className="nk-btn nk-btn-primary" disabled={!dirty || access.busy} onClick={() => access.savePermissions(roleKey, draft)}><Icon n="save" /> Save {ROLE_LABEL[roleKey]}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One editable list (templates / sender IDs / card types) with an inline add/edit form
+function ListEditor({ title, hint, rows, columns, blank, renderForm, validate, onSave, onDelete, onDefault, canEdit, busy, rowKey = "id", rowLabel }) {
+  const [form, setForm] = useState(null);
+  const [errors, setErrors] = useState({});
+  const submit = async () => {
+    const e = validate(form);
+    setErrors(e);
+    if (!Object.keys(e).length && await onSave(form)) setForm(null);
+  };
+  return (
+    <div style={card}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:12,flexWrap:"wrap"}}>
+        <div><div style={{fontWeight:800,color:N.text}}>{title}</div><div style={{fontSize:12,color:N.textDim,marginTop:2}}>{hint}</div></div>
+        {canEdit && !form && <button className="nk-btn nk-btn-primary" style={{fontSize:12}} onClick={() => { setErrors({}); setForm({ ...blank }); }}><Icon n="plus" /> Add</button>}
+      </div>
+      {form && (
+        <div style={{background:N.navy700,border:`1px solid ${N.accent}`,borderRadius:12,padding:14,marginBottom:12}}>
+          {renderForm(form, setForm, errors)}
+          <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+            <button className="nk-btn nk-btn-ghost" onClick={() => setForm(null)}>Cancel</button>
+            <button className="nk-btn nk-btn-primary" onClick={submit} disabled={busy}><Icon n="save" /> Save</button>
+          </div>
+        </div>
+      )}
+      <div className="nk-table-wrap">
+        <table className="nk-table">
+          <thead><tr>{columns.map(c => <th key={c.h} className={c.num ? "num" : undefined}>{c.h}</th>)}{canEdit && <th></th>}</tr></thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r[rowKey]} style={r.active === false ? { opacity: .55 } : undefined}>
+                {columns.map(c => <td key={c.h} className={c.num ? "num" : undefined}>{c.cell(r)}</td>)}
+                {canEdit && (
+                  <td><div className="nk-row-actions">
+                    {onDefault && !r.is_default && <Sb bg="transparent" col={N.amber} border={N.border} label={`Make ${rowLabel(r)} the default`} onClick={() => onDefault(r)}><Icon n="check" /> Default</Sb>}
+                    <Sb bg="transparent" col={N.sky} border={N.border} label={`Edit ${rowLabel(r)}`} onClick={() => { setErrors({}); setForm({ ...r }); }}><Icon n="edit" /> Edit</Sb>
+                    <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${rowLabel(r)}`} onClick={() => onDelete(r)}><Icon n="trash" /> Delete</Sb>
+                  </div></td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!rows.length && <EmptyState icon="inbox" compact title="Nothing here yet" text={canEdit ? "Add the first one with + Add." : ""} />}
+      </div>
+    </div>
+  );
+}
+
+const Toggle = ({ checked, onChange, label, disabled }) => (
+  <label style={{display:"inline-flex",alignItems:"center",gap:8,fontSize:13,color:N.textMid,cursor:disabled ? "default" : "pointer",marginBottom:10}}>
+    <input type="checkbox" checked={!!checked} disabled={disabled} onChange={e => onChange(e.target.checked)} style={{width:18,height:18,accentColor:"var(--nk-accent)"}} /> {label}
+  </label>
+);
+
+const confirmDelete = async (askDialog, what) => (await askDialog({ title: `Delete ${what}?`, body: "This can't be undone.", actions: [{ value: "yes", label: "Delete", kind: "danger" }] })) === "yes";
+
+function TemplatesSettings({ access, askDialog }) {
+  const canEdit = access.can("settings", "edit");
+  return (
+    <ListEditor title="WhatsApp templates" canEdit={canEdit} busy={access.busy} rows={access.waTemplates} rowLabel={t => t.name}
+      hint="Templates registered with the WhatsApp provider. The default is preselected; each event can choose its own in the WhatsApp tab."
+      blank={{ name: "", label: "", account: "", has_image_header: true, preview: "", active: true, sort: access.waTemplates.length + 1 }}
+      columns={[
+        { h: "Template", cell: t => <><div style={{fontWeight:700,color:N.text,fontFamily:"JetBrains Mono, monospace"}}>{t.name}</div><div style={{fontSize:11,color:N.textDim}}>{t.label || "—"}</div></> },
+        { h: "Account",  cell: t => t.account || <span style={{color:N.textDim}}>{access.settings.wa_account} (default)</span> },
+        { h: "Card image", cell: t => t.has_image_header ? <Pill tone="good">Yes</Pill> : <Pill tone="info">No</Pill> },
+        { h: "Status",   cell: t => <>{t.is_default && <Pill tone="warn">Default</Pill>} {t.active ? <Pill tone="good">Active</Pill> : <Pill tone="bad">Off</Pill>}</> },
+      ]}
+      validate={f => validateTemplate(f, access.waTemplates)}
+      onSave={f => access.save("wa_templates", { id: f.id, name: f.name.trim(), label: f.label?.trim() || null, account: f.account?.trim() || null,
+        has_image_header: !!f.has_image_header, preview: f.preview?.trim() || null, active: !!f.active, sort: Number(f.sort) || 0 }, "template")}
+      onDelete={async t => (await confirmDelete(askDialog, `template ${t.name}`)) && access.remove("wa_templates", t.id, "template")}
+      onDefault={t => access.makeDefault("wa_templates", t.id)}
+      renderForm={(f, set, e) => (
+        <>
+          <div className="nk-form-grid">
+            <Field label="Template name *" error={e.name}><input className="nk-input" autoFocus value={f.name} onChange={x => set(v => ({ ...v, name: x.target.value }))} placeholder="Exactly as registered, e.g. Mwaliko" /></Field>
+            <Field label="Label"><input className="nk-input" value={f.label || ""} onChange={x => set(v => ({ ...v, label: x.target.value }))} placeholder="Shown to staff" /></Field>
+            <Field label="Provider account"><input className="nk-input" value={f.account || ""} onChange={x => set(v => ({ ...v, account: x.target.value }))} placeholder={`Default: ${access.settings.wa_account}`} /></Field>
+            <Field label="Order"><input className="nk-input" type="number" value={f.sort ?? 0} onChange={x => set(v => ({ ...v, sort: x.target.value }))} /></Field>
+            <Field label="Preview text" span><textarea className="nk-input nk-textarea" rows={2} value={f.preview || ""} onChange={x => set(v => ({ ...v, preview: x.target.value }))} placeholder="What the guest reads (for reference)" /></Field>
+          </div>
+          <Toggle checked={f.has_image_header} onChange={c => set(v => ({ ...v, has_image_header: c }))} label="Sends the guest's card image" />{" "}
+          <Toggle checked={f.active} onChange={c => set(v => ({ ...v, active: c }))} label="Active" />
+        </>
+      )} />
+  );
+}
+
+function SendersSettings({ access, askDialog }) {
+  const canEdit = access.can("settings", "edit");
+  return (
+    <ListEditor title="SMS sender IDs" canEdit={canEdit} busy={access.busy} rows={access.senderIds} rowLabel={s => s.sender_id}
+      hint="The name guests see as the SMS sender (must be approved by the SMS provider). Each event can choose its own in the SMS tab."
+      blank={{ sender_id: "", label: "", active: true }}
+      columns={[
+        { h: "Sender ID", cell: s => <span style={{fontWeight:700,color:N.text,fontFamily:"JetBrains Mono, monospace"}}>{s.sender_id}</span> },
+        { h: "Label",     cell: s => s.label || "—" },
+        { h: "Status",    cell: s => <>{s.is_default && <Pill tone="warn">Default</Pill>} {s.active ? <Pill tone="good">Active</Pill> : <Pill tone="bad">Off</Pill>}</> },
+      ]}
+      validate={f => validateSenderId(f, access.senderIds)}
+      onSave={f => access.save("sender_ids", { id: f.id, sender_id: f.sender_id.trim(), label: f.label?.trim() || null, active: !!f.active }, "sender ID")}
+      onDelete={async s => (await confirmDelete(askDialog, `sender ID ${s.sender_id}`)) && access.remove("sender_ids", s.id, "sender ID")}
+      onDefault={s => access.makeDefault("sender_ids", s.id)}
+      renderForm={(f, set, e) => (
+        <>
+          <div className="nk-form-grid">
+            <Field label="Sender ID *" error={e.sender_id}><input className="nk-input" autoFocus maxLength={11} value={f.sender_id} onChange={x => set(v => ({ ...v, sender_id: x.target.value }))} placeholder="Up to 11 characters, e.g. NIKADI" /></Field>
+            <Field label="Label"><input className="nk-input" value={f.label || ""} onChange={x => set(v => ({ ...v, label: x.target.value }))} /></Field>
+          </div>
+          <Toggle checked={f.active} onChange={c => set(v => ({ ...v, active: c }))} label="Active" />
+        </>
+      )} />
+  );
+}
+
+// Card types → people admitted at the door, with a live preview of the rule
+function CardTypeSettings({ access, askDialog }) {
+  const canEdit = access.can("settings", "edit");
+  const [tryType, setTryType] = useState("Double");
+  const n = peopleForCardType(tryType, access.cardRules, access.settings);
+  return (
+    <>
+      <div style={card}>
+        <div style={{fontWeight:800,color:N.text,marginBottom:4}}>How the door counts people</div>
+        <ol style={{fontSize:12,color:N.textMid,paddingLeft:18,lineHeight:1.7,marginBottom:12}}>
+          <li>A card type listed below admits that many people (the name is matched ignoring capitals).</li>
+          <li>{access.settings.numeric_card_types ? <>A card type that is just a number (“5”) admits that many.</> : <>Numbers as card types are <strong>off</strong>.</>}</li>
+          <li>Anything else admits <strong>{peopleLabel(Number(access.settings.default_people) || 1)}</strong>.</li>
+        </ol>
+        <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+          <label className="nk-label" style={{margin:0}} htmlFor="nk-try-type">Try a card type</label>
+          <input id="nk-try-type" className="nk-input" style={{maxWidth:200,marginBottom:0}} value={tryType} onChange={e => setTryType(e.target.value)} />
+          <span style={{fontSize:14,fontWeight:800,color:N.green}}><Icon n="arrowRight" /> {peopleLabel(n)}</span>
+        </div>
+        <div style={{display:"flex",gap:18,flexWrap:"wrap",marginTop:14}}>
+          <Toggle checked={access.settings.numeric_card_types} disabled={!canEdit} onChange={c => access.saveSetting("numeric_card_types", c)} label="Numbers count as people (e.g. “5” = 5)" />
+          <label style={{display:"inline-flex",alignItems:"center",gap:8,fontSize:13,color:N.textMid}}>
+            Other card types admit
+            <input type="number" min={1} max={100} className="nk-input" style={{width:80,marginBottom:0}} disabled={!canEdit}
+              defaultValue={access.settings.default_people} onBlur={e => { const v = Math.max(1, Number(e.target.value) || 1); if (v !== Number(access.settings.default_people)) access.saveSetting("default_people", v); }} />
+            people
+          </label>
+        </div>
+        <p style={{fontSize:11,color:N.textDim,marginTop:8}}>Changes apply to every existing card at once (cards never drop below what has already been scanned).</p>
+      </div>
+      <ListEditor title="Card types" canEdit={canEdit} busy={access.busy} rows={access.cardRules} rowLabel={r => r.name}
+        hint="Write the card type exactly as it appears in your guest lists, e.g. Single, Double, VIP Table."
+        blank={{ name: "", people: 1, label: "", sort: access.cardRules.length + 1 }}
+        columns={[
+          { h: "Card type", cell: r => <span style={{fontWeight:700,color:N.text}}>{r.name}</span> },
+          { h: "Admits", num: true, cell: r => <strong style={{color:N.green}}>{peopleLabel(r.people)}</strong> },
+          { h: "Note", cell: r => r.label || "—" },
+        ]}
+        validate={f => validateCardRule(f, access.cardRules)}
+        onSave={f => access.save("card_type_rules", { id: f.id, name: f.name.trim(), people: Number(f.people), label: f.label?.trim() || null, sort: Number(f.sort) || 0 }, "card type")}
+        onDelete={async r => (await confirmDelete(askDialog, `card type ${r.name}`)) && access.remove("card_type_rules", r.id, "card type")}
+        renderForm={(f, set, e) => (
+          <div className="nk-form-grid">
+            <Field label="Card type *" error={e.name}><input className="nk-input" autoFocus value={f.name} onChange={x => set(v => ({ ...v, name: x.target.value }))} placeholder="e.g. Double" /></Field>
+            <Field label="People admitted *" error={e.people}><input className="nk-input" type="number" min={1} max={1000} value={f.people} onChange={x => set(v => ({ ...v, people: x.target.value }))} /></Field>
+            <Field label="Note" span><input className="nk-input" value={f.label || ""} onChange={x => set(v => ({ ...v, label: x.target.value }))} placeholder="Optional, e.g. couple" /></Field>
+          </div>
+        )} />
+    </>
+  );
+}
+
+function GeneralSettings({ access }) {
+  const canEdit = access.can("settings", "edit");
+  const fields = [
+    ["org_name", "Organisation name", "Shown on reports"],
+    ["country_code", "Default country code", "Local numbers like 0712… get this prefix (Tanzania = 255)"],
+    ["wa_account", "WhatsApp provider account", "Used by templates that don't name their own account"],
+  ];
+  return (
+    <div style={card}>
+      {fields.map(([k, l, hint]) => (
+        <div key={k} style={{marginBottom:14,maxWidth:420}}>
+          <label className="nk-label" htmlFor={`nk-set-${k}`}>{l}</label>
+          <input id={`nk-set-${k}`} className="nk-input" disabled={!canEdit} defaultValue={access.settings[k] ?? ""}
+            onBlur={e => { const v = e.target.value.trim(); if (v && v !== String(access.settings[k] ?? "")) access.saveSetting(k, v); }} />
+          <div style={{fontSize:11,color:N.textDim,marginTop:-6}}>{hint}</div>
+        </div>
+      ))}
+      <p style={{fontSize:11,color:N.textDim}}>Changes save when you leave a field.</p>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SCANNER & CALLS — <ScannerTab> (door check-in for signed-in staff, live
+   totals, share the public scan page) and <CallsTab> (guest confirmation calls).
+   Check-ins only ever go through the scan_card() database function.
+══════════════════════════════════════════════════════════════════════════ */
+const CARD_COLS = "id,name,card_type,phone,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
+
+// The open event's cards from the database, kept live with realtime updates
+function useEventCards(eventId) {
+  const [cards, setCards] = useState(null);
+  const [error, setError] = useState(null);
+  const load = async () => {
+    if (!supabase || !eventId) { setCards(null); return; }
+    const { data, error: e } = await supabase.from("event_cards").select(CARD_COLS).eq("event_id", eventId).order("name");
+    if (e) { setError(e.message); setCards([]); return; }
+    setError(null); setCards(data);
+  };
+  useEffect(() => {
+    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
+    if (!supabase || !eventId) return;
+    const ch = supabase.channel(`cards-${eventId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "event_cards", filter: `event_id=eq.${eventId}` }, (p) => {
+        if (p.eventType === "DELETE") { setCards(cs => cs && cs.filter(c => c.id !== p.old.id)); return; }
+        const row = p.new;
+        setCards(cs => !cs ? cs : cs.some(c => c.id === row.id) ? cs.map(c => c.id === row.id ? { ...c, ...row } : c) : [...cs, row]);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const patch = (id, changes) => setCards(cs => cs && cs.map(c => c.id === id ? { ...c, ...changes } : c));
+  return { cards, error, load, patch };
+}
+
+const NoEventOpen = ({ what, onGo }) => (
+  <EmptyState icon="folder" title="No event open" text={`${what} works on one event at a time. Open the event first.`}
+    action={<button className="nk-btn nk-btn-primary" onClick={() => onGo("events")}><Icon n="folder" /> Go to Events</button>} />
+);
+
+function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents }) {
+  const { cards, error, load } = useEventCards(eventId);
+  const [recent, setRecent] = useState([]);
+  const [sharing, setSharing] = useState(false);
+  const canScan = access.can("scanner", "edit");
+  const loadRecent = async () => {
+    if (!eventId) return;
+    const { data } = await supabase.from("scan_logs").select("*").eq("event_id", eventId).order("scanned_at", { ascending: false }).limit(15);
+    setRecent(data || []);
+  };
+  useEffect(() => { loadRecent(); }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- loads data from the database
+  if (!eventId) return <div className="nk-page"><NoEventOpen what="The scanner" onGo={onGo} /></div>;
+  if (error) return (
+    <div className="nk-page" style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+      <EmptyState icon="database" tone="warn" title="Scanning isn't set up in the database yet"
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-roles-settings-scan.sql</code>, then retry.<br /><span style={{fontSize:11,fontFamily:"JetBrains Mono, monospace"}}>{error}</span></>}
+        action={<button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Retry</button>} />
+    </div>
+  );
+  const totals = scanTotals(cards || []);
+  const byId = Object.fromEntries((cards || []).map(c => [c.id, c]));
+  const findCard = async ({ id, name, cardType }) => {
+    if (id) {
+      const { data } = await supabase.from("event_cards").select(CARD_COLS).eq("id", id).eq("event_id", eventId).maybeSingle();
+      return data ? [data] : [];
+    }
+    return matchByName(cards || [], { name, cardType });
+  };
+  const search = async (q) => (cards || []).filter(c => String(c.name || "").toLowerCase().includes(q.toLowerCase())).slice(0, 20);
+  const checkIn = async (c, count, method) => {
+    const { data, error: e } = await supabase.rpc("scan_card", { p_card_id: c.id, p_method: method, p_count: count, p_scanned_by: myEmail });
+    if (e) throw e;
+    loadRecent();
+    return data?.[0] || {};
+  };
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px",maxWidth:1200}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16,flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Door check-in</h2>
+          <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{eventRow?.username} · scan the QR code on each card, or search by name</p>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => { load(); loadRecent(); }}><Icon n="refresh" /> Refresh</button>
+          {canScan && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="link" /> Share scan page{eventRow?.scan_code ? " (on)" : ""}</button>}
+        </div>
+      </div>
+      <div className="nk-stats">
+        <MoneyTile label="People entered" value={`${totals.entered} / ${totals.people}`} tone="good" sub={totals.people ? `${Math.round(totals.entered / totals.people * 100)}% arrived` : null} />
+        <MoneyTile label="Cards fully used" value={`${totals.complete} / ${totals.cards}`} tone="info" />
+        <MoneyTile label="Still expected" value={Math.max(0, totals.people - totals.entered)} tone="warn" />
+      </div>
+      {cards === null ? <EmptyState loading title="Loading guest list…" />
+        : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." action={<button className="nk-btn nk-btn-ghost" onClick={() => onGo("design")}><Icon n="palette" /> Go to Design</button>} />
+        : <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests." />}
+      {recent.length > 0 && (
+        <div className="nk-table-wrap" style={{marginTop:16}}>
+          <table className="nk-table">
+            <thead><tr><th>Time</th><th>Guest</th><th className="num">People</th><th>Result</th><th>By</th></tr></thead>
+            <tbody>
+              {recent.map(r => (
+                <tr key={r.id}>
+                  <td style={{fontSize:12,color:N.textDim}}>{fmtWhen(r.scanned_at)}</td>
+                  <td style={{fontWeight:600}}>{byId[r.event_card_id]?.name || "Unknown card"}</td>
+                  <td className="num">{r.people}</td>
+                  <td>{r.accepted ? <Pill tone="good">Admitted</Pill> : <Pill tone="bad">{SCAN_REASON[r.reason] || r.reason}</Pill>}</td>
+                  <td style={{fontSize:12,color:N.textDim}}>{r.scanned_by || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {sharing && <ShareScanModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
+    </div>
+  );
+}
+
+// Turns the public, code-protected scan page on/off for an event and shows its link + code
+function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
+  const [code, setCode] = useState(eventRow?.scan_code || null);
+  const [busy, setBusy] = useState(false);
+  const link = `${window.location.origin}${import.meta.env.BASE_URL}#/scan/${eventRow?.id}`;
+  const setScanCode = async (value) => {
+    setBusy(true);
+    const { error } = await supabase.from("events").update({ scan_code: value }).eq("id", eventRow.id);
+    setBusy(false);
+    if (error) { showToast(`Could not update the scan page: ${error.message}`, "warn"); return; }
+    setCode(value); reloadEvents();
+    showToast(value ? "Scan page is on — share the link and code with the door staff" : "Scan page turned off", "success");
+  };
+  const copy = async (text, what) => {
+    try { await navigator.clipboard.writeText(text); showToast(`${what} copied`, "success"); }
+    catch { showToast(`Copy didn't work — select the ${what.toLowerCase()} and copy it by hand`, "warn"); }
+  };
+  return (
+    <DetailModal label="Share the scan page" onClose={onClose} width={560}>
+      <div style={{fontSize:18,fontWeight:800,color:N.text,marginBottom:4}}>Share the scan page</div>
+      <p style={{fontSize:12,color:N.textDim,marginBottom:16}}>Door staff without an account open this link on their phone and enter the code. They can only check guests in — they can't see phone numbers or anything else.</p>
+      {code ? (
+        <>
+          <div className="nk-guide-block"><div className="nk-guide-block-label">Link</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}><code style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:N.sky}}>{link}</code>
+              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy link" onClick={() => copy(link, "Link")}><Icon n="copy" /></Sb></div></div>
+          <div className="nk-guide-block"><div className="nk-guide-block-label">Code</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{flex:1,fontSize:28,fontWeight:800,letterSpacing:6,fontFamily:"JetBrains Mono, monospace",color:N.text}}>{code}</span>
+              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy code" onClick={() => copy(code, "Code")}><Icon n="copy" /></Sb></div></div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end",marginTop:12}}>
+            <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setScanCode(null)}><Icon n="ban" /> Turn off</button>
+            <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setScanCode(newScanCode())} title="The old code stops working immediately"><Icon n="refresh" /> New code</button>
+            <button className="nk-btn nk-btn-primary" onClick={onClose}>Done</button>
+          </div>
+        </>
+      ) : (
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
+          <button className="nk-btn nk-btn-primary" disabled={busy} onClick={() => setScanCode(newScanCode())}><Icon n="link" /> Turn on & create code</button>
+        </div>
+      )}
+    </DetailModal>
+  );
+}
+
+// Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo }) {
+  const { cards, error, load, patch } = useEventCards(eventId);
+  const [filter, setFilter] = useState({ status: "all", q: "" });
+  const [commenting, setCommenting] = useState(null);
+  const canEdit = access.can("calls", "edit");
+  if (!eventId) return <div className="nk-page"><NoEventOpen what="Calls" onGo={onGo} /></div>;
+  if (error) return (
+    <div className="nk-page" style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
+      <EmptyState icon="database" tone="warn" title="Call tracking isn't set up in the database yet"
+        text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>supabase-roles-settings-scan.sql</code>, then retry.</>}
+        action={<button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Retry</button>} />
+    </div>
+  );
+  const peopleOf = (c) => Number(c.max_scans) || peopleForCardType(c.card_type, access.cardRules, access.settings);
+  const sum = summariseCalls(cards || [], peopleOf);
+  const rows = filterCalls(cards || [], filter);
+  const update = async (c, changes, log) => {
+    const before = { call_status: c.call_status, call_comment: c.call_comment, call_updated_at: c.call_updated_at, call_by: c.call_by };
+    const next = { ...changes, call_updated_at: new Date().toISOString(), call_by: myEmail };
+    patch(c.id, next);
+    const { error: e } = await supabase.from("event_cards").update(next).eq("id", c.id);
+    if (e) { patch(c.id, before); showToast(`Could not save: ${e.message}`, "warn"); return false; }
+    logHistory({ channel: "calls", action: "call", name: c.name, phone: c.phone, ...log }, eventId);
+    return true;
+  };
+  const setStatus = (c, choice) => {
+    const s = nextCallStatus(c.call_status, choice);
+    update(c, { call_status: s }, { status: s || "ok", detail: s ? CALL_STATUSES[s].label : "Call status cleared" });
+  };
+  const exportCalls = async () => {
+    const XLSX = await loadXlsx();
+    const ws = XLSX.utils.json_to_sheet((cards || []).map(c => ({
+      Name: c.name, "Card type": c.card_type, People: peopleOf(c), Phone: c.phone ? `+${normalisePhone(c.phone)}` : "",
+      Status: c.call_status ? CALL_STATUSES[c.call_status].label : "Not called", Comment: c.call_comment || "",
+      Updated: c.call_updated_at ? fmtWhen(c.call_updated_at) : "", By: c.call_by || "",
+    })));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Calls");
+    XLSX.writeFile(wb, `${(eventRow?.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_")}_Calls_${localDate()}.xlsx`);
+  };
+  const filters = [["all", "All"], ["todo", "Not called"], ["picked", "Picked up"], ["busy", "Busy"], ["yes", "Coming"], ["no", "Not coming"]];
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px",maxWidth:1200}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16,flexWrap:"wrap",gap:12}}>
+        <div>
+          <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Guest calls</h2>
+          <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{eventRow?.username} · call each guest and record their answer</p>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={load}><Icon n="refresh" /> Refresh</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={exportCalls} disabled={!cards?.length}><Icon n="download" /> Export Excel</button>
+        </div>
+      </div>
+      <div className="nk-stats">
+        {[["Coming", `${sum.yes} · ${peopleLabel(sum.peopleYes)}`, "good", "yes"], ["Not coming", sum.no, "bad", "no"], ["Busy / no answer", sum.busy, "warn", "busy"],
+          ["Picked up", sum.picked, "info", "picked"], ["Not called yet", sum.notCalled, "info", "todo"]].map(([l, v, t, st]) => (
+          <button key={l} className="nk-stat" onClick={() => setFilter(f => ({ ...f, status: st }))} style={{cursor:"pointer",fontFamily:"inherit",borderColor:alpha(TONE[t],"33")}}>
+            <div className="nk-stat-num" style={{color:TONE[t],fontSize:18}}>{v}</div><div className="nk-stat-label">{l}</div>
+          </button>
+        ))}
+        <MoneyTile label="Expected at the door" value={peopleLabel(sum.peopleExpected)} tone="good" sub="Everyone except confirmed “no”" />
+      </div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+        <input className="nk-input" style={{flex:"1 1 220px",maxWidth:320,marginBottom:0}} placeholder="Search name or phone…" value={filter.q} onChange={e => setFilter(f => ({ ...f, q: e.target.value }))} />
+        {filters.map(([k, l]) => <button key={k} style={segStyle(filter.status === k)} onClick={() => setFilter(f => ({ ...f, status: k }))}>{l}</button>)}
+      </div>
+      <div className="nk-table-wrap">
+        <table className="nk-table">
+          <thead><tr><th>Guest</th><th>Phone</th><th>Answer</th><th>Comment</th><th>Updated</th></tr></thead>
+          <tbody>
+            {rows.map(c => (
+              <tr key={c.id}>
+                <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}</div></td>
+                <td>
+                  {c.phone ? (
+                    <div className="nk-row-actions">
+                      <a className="nk-btn-sm icon-only" href={`tel:+${normalisePhone(c.phone)}`} aria-label={`Call ${c.name}`} title={`Call ${c.name}`}
+                        style={{background:N.greenBg,color:N.green,borderColor:alpha(N.green,"44"),width:30,height:30,padding:0,justifyContent:"center",textDecoration:"none"}}><Icon n="phone" /></a>
+                      <span style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>+{normalisePhone(c.phone)}</span>
+                    </div>
+                  ) : <span style={{color:N.textDim,fontSize:12}}>No phone</span>}
+                </td>
+                <td>
+                  <div className="nk-row-actions">
+                    {callOptions(c.call_status).map(k => {
+                      const m = CALL_STATUSES[k], on = c.call_status === k;
+                      return (
+                        <button key={k} type="button" disabled={!canEdit} onClick={() => setStatus(c, k)} aria-pressed={on}
+                          title={on ? `${m.label} — tap again to clear` : `Mark as ${m.label.toLowerCase()}`}
+                          style={{...segStyle(on), padding:"4px 10px", fontSize:11, ...(on ? { color:TONE[m.tone], borderColor:TONE[m.tone], background:TONE_BG[m.tone] } : {})}}>
+                          {m.short === "Yes" || m.short === "No" ? m.label : m.short === "P" ? "Picked" : "Busy"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </td>
+                <td>
+                  <div className="nk-row-actions">
+                    <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
+                    {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
+                  </div>
+                </td>
+                <td style={{fontSize:11,color:N.textDim}}>{c.call_updated_at ? <>{fmtWhen(c.call_updated_at)}<br />{c.call_by}</> : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {cards === null ? <EmptyState loading title="Loading guests…" />
+          : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." />
+          : !rows.length && <EmptyState icon="search" title="No guests match" action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setFilter({ status: "all", q: "" })}>Show everyone</button>} />}
+      </div>
+      {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)}
+        onSave={async (text) => { if (await update(commenting, { call_comment: text || null }, { status: commenting.call_status || "ok", detail: `Comment: ${text || "(removed)"}` })) setCommenting(null); }} />}
+    </div>
+  );
+}
+
+function CommentModal({ card: c, onSave, onClose }) {
+  const [text, setText] = useState(c.call_comment || "");
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:480}} role="dialog" aria-modal="true" aria-labelledby="nk-comment-title">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title" id="nk-comment-title">Comment — {c.name}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body">
+          <textarea className="nk-input nk-textarea" rows={4} autoFocus value={text} onChange={e => setText(e.target.value)} placeholder="e.g. Coming with spouse; call again Friday" aria-label="Comment" />
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={() => onSave(text.trim())}><Icon n="save" /> Save</button>
         </div>
       </div>
     </div>
@@ -3129,6 +3945,15 @@ export default function App() {
   };
 
   /* ── CRM: leads → follow-ups → customers → events ── */
+  /* ── Access: my role, permissions and Settings data ── */
+  const access = useAccess({ userId, email: user?.email, showToast });
+  const navGroups = access.setupMissing ? NAV_GROUPS : visibleNav(NAV_GROUPS, access.matrix, access.role);
+  // Leave a tab the role can't see (e.g. after a role change)
+  useEffect(() => {
+    if (access.loading || access.setupMissing || !access.role) return;
+    if (!canSeeTab(access.matrix, access.role, tab)) setTab(navGroups[0]?.items[0]?.id || "guide");
+  }, [access.loading, access.role, access.matrix, tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const crm = useCrm({ enabled: !!userId, showToast, askDialog, logHistory, reloadEvents: loadSavedEvents });
   const [leadSel,     setLeadSel]     = useState(null);   // lead open in the Leads tab
   const [customerSel, setCustomerSel] = useState(null);   // customer open in the Customers tab
@@ -3159,6 +3984,22 @@ export default function App() {
   };
   /* ── Guide: live progress of the open event + first-run welcome ── */
   const openEventRow = savedEvents.find(e => e.id === savedEventId);   // DB row (has customer_id / lead_id)
+  // WhatsApp template / SMS sender for the open event: its own choice, else the Settings default
+  const activeWaTemplates = access.waTemplates.filter(t => t.active);
+  useEffect(() => {
+    const t = resolveChoice(access.waTemplates, openEventRow?.wa_template, "name");
+    if (t) setWaTemplate(t.name);
+  }, [savedEventId, access.waTemplates, openEventRow?.wa_template]);
+  const waAccount = access.waTemplates.find(t => t.name === waTemplate)?.account || access.settings.wa_account || "Nikadi";
+  const smsSender = resolveChoice(access.senderIds, openEventRow?.sms_sender_id, "sender_id")?.sender_id || smsSettings.senderId || "NIKADI";
+  // Remembers the event's choice of template / sender (when the role may change it)
+  const rememberForEvent = async (col, value, module) => {
+    if (!supabase || !savedEventId || !access.can(module, "edit")) return;
+    const { error } = await supabase.from("events").update({ [col]: value }).eq("id", savedEventId);
+    if (error) { if (!/column|schema cache/i.test(error.message)) showToast(`Could not save the choice: ${error.message}`, "warn"); return; }
+    setSavedEvents(es => es.map(e => e.id === savedEventId ? { ...e, [col]: value } : e));
+  };
+  const chooseWaTemplate = (name) => { setWaTemplate(name); rememberForEvent("wa_template", name, "whatsapp"); };
   const guide = guideProgress({
     hasEvent:    !!savedEventId,
     hasCustomer: !!openEventRow?.customer_id,
@@ -3463,24 +4304,38 @@ export default function App() {
     if (!toSave.length) { showToast("No contacts to save", "info"); return; }
     const { data: old, error: readErr } = await supabase.from("event_cards").select("id").eq("event_id", eventId);
     if (readErr) { showToast("Cards save error: " + readErr.message, "warn"); return; }
-    const rows = toSave.map(r => ({
+    const toRow = r => ({
       event_id:   eventId,
       name:       r.name||"",
       card_type:  r.cardType||"",
       phone:      r.phone||"",
       wa_status:  r.waStatus||WA.idle,
       sms_status: r.smsStatus||SMS.pending,
-    }));
-    const { data: inserted, error } = await supabase.from("event_cards").insert(rows).select("id");
-    if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
-    // Remember each row's new database id so per-card status updates (autoSaveCard) can target it
-    if (inserted?.length === entries.length) {
-      const ids = new Map(entries.map(({ i }, n) => [i, inserted[n].id]));
-      setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
+    });
+    // Rows that already exist keep their id (printed QR codes carry it) and their scan /
+    // call progress: they're updated in place. New rows are inserted; rows no longer in
+    // the list are deleted last, so a failed save never loses contacts.
+    const oldIds = new Set((old || []).map(o => o.id));
+    const keep   = entries.filter(({ r }) => r.dbId && oldIds.has(r.dbId));
+    const fresh  = entries.filter(({ r }) => !(r.dbId && oldIds.has(r.dbId)));
+    if (keep.length) {
+      const { error } = await supabase.from("event_cards").upsert(keep.map(({ r }) => ({ id: r.dbId, ...toRow(r) })));
+      if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
     }
-    if (old?.length) {
-      const { error: delErr } = await supabase.from("event_cards").delete().in("id", old.map(o => o.id));
-      if (delErr) { showToast("Cards saved, but old rows could not be removed: " + delErr.message, "warn"); return; }
+    if (fresh.length) {
+      const { data: inserted, error } = await supabase.from("event_cards").insert(fresh.map(({ r }) => toRow(r))).select("id");
+      if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
+      // Remember each new row's database id so per-card status updates (autoSaveCard) can target it
+      if (inserted?.length === fresh.length) {
+        const ids = new Map(fresh.map(({ i }, n) => [i, inserted[n].id]));
+        setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
+      }
+    }
+    const kept = new Set(keep.map(({ r }) => r.dbId));
+    const gone = (old || []).map(o => o.id).filter(id => !kept.has(id));
+    if (gone.length) {
+      const { error: delErr } = await supabase.from("event_cards").delete().in("id", gone);
+      if (delErr) { showToast("Cards saved, but removed rows could not be deleted: " + delErr.message, "warn"); return; }
     }
     // Status-only saves (after every send) keep the same count — only log real list changes
     if ((old?.length || 0) !== toSave.length) {
@@ -4050,7 +4905,7 @@ export default function App() {
     try {
       const reqBody = {
         to:       [Number(normalisePhone(rec.phone))],
-        account:  "Nikadi",
+        account:  waAccount,
         template: waTemplate,
         header:   { image: { file: rec.cardUrl, name: rec.name || "Event Card" } },
       };
@@ -4283,7 +5138,7 @@ export default function App() {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          from: smsSettings.senderId || "NIKADI",
+          from: smsSender,
           to:   normalisePhone(rec.phone),
           text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
           flash: 0,
@@ -4339,7 +5194,7 @@ export default function App() {
     let applyResults = (rs) => rs;
     try {
       const messages = targets.map(({rec}) => ({
-        from: smsSettings.senderId || "NIKADI",
+        from: smsSender,
         to:   normalisePhone(rec.phone),
         text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
       }));
@@ -4449,6 +5304,14 @@ export default function App() {
   );
 
   if (!user) return <LoginPage />;
+  if (access.loading) return (
+    <div style={{minHeight:"100vh",background:N.navy900,display:"grid",placeItems:"center"}}>
+      <EmptyState loading title="Checking your access…" />
+    </div>
+  );
+  if (!access.setupMissing && !access.role) return <NoAccess email={user.email} onRetry={access.loadAll} onSignOut={() => supabase?.auth.signOut()} />;
+  const tabModule = TAB_MODULE[tab];
+  const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && !access.can(tabModule, "edit");
 
   return (
     <>
@@ -4551,6 +5414,7 @@ export default function App() {
             <button className="nk-btn nk-btn-primary" onClick={downloadAll} title="Download every card" aria-label={`Download all ${records.length} cards`}>
               <Icon n="download" /> <span className="nk-btn-label">Download All ({records.length})</span>
             </button>
+            {access.role && <span className="nk-hide-md" title={access.setupMissing ? "Roles not set up yet — everyone has full access" : "Your role"}><RoleBadge role={access.role} /></span>}
             <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => goTab("guide")}
               title="How Nikadi Studio works" aria-label="Help: how Nikadi Studio works">
               <Icon n="help" /> <span className="nk-btn-label">Help</span>
@@ -4582,7 +5446,7 @@ export default function App() {
 
         {/* Tabs — wide screens: grouped tab bar; small screens: the drawer below */}
         <nav className="nk-tabs" aria-label="Main">
-          {NAV_GROUPS.map((g, gi) => (
+          {navGroups.map((g, gi) => (
             <div key={g.label} className="nk-tab-group">
               {gi > 0 && <span className="nk-tab-sep" aria-hidden="true" />}
               <span className="nk-tab-group-label">{g.label}</span>
@@ -4613,7 +5477,7 @@ export default function App() {
                 <div className="nk-drawer-event"><Icon n="dot" style={{color:N.green}} /> <span className="nk-ellipsis">{eventData.username||"Event"}{eventData.event_type ? ` · ${eventData.event_type}` : ""}</span></div>
               )}
               <nav aria-label="Main">
-                {NAV_GROUPS.map(g => (
+                {navGroups.map(g => (
                   <div key={g.label} className="nk-drawer-group">
                     <div className="nk-drawer-label">{g.label}</div>
                     {g.items.map(it => (
@@ -4635,12 +5499,20 @@ export default function App() {
                     : <Icon n="user" size="1.4em" />}
                   <div style={{flex:1,minWidth:0}}>
                     <div className="nk-ellipsis" style={{fontSize:13,color:N.text,fontWeight:600}}>{user.user_metadata?.full_name || user.email}</div>
+                    {access.role && <div style={{margin:"2px 0"}}><RoleBadge role={access.role} /></div>}
                     <div style={{fontSize:11,color:N.textDim,display:"flex",alignItems:"center",gap:5}}><span className={`nk-db-dot ${dbDot}`} /> {dbStatus === "connected" ? "Connected" : dbStatus === "unconfigured" ? "No database" : "Database error"}</div>
                   </div>
                   <button className="nk-btn nk-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={() => supabase?.auth.signOut()}>Sign out</button>
                 </div>
               </div>
             </aside>
+          </div>
+        )}
+
+        {viewOnly && (
+          <div className="nk-banner" role="note">
+            <span style={{fontSize:16,marginTop:1}}><Icon n="lock" /></span>
+            <span><strong>View only.</strong> Your role ({ROLE_LABEL[access.role]}) can see {TAB_LABEL[tab]} but not change it — ask an administrator if you need more access.</span>
           </div>
         )}
 
@@ -5010,6 +5882,17 @@ export default function App() {
                 onOpenEvent={setOverviewId} onOpenLead={openLead} onNewEvent={newEventForCustomer} />
             )}
 
+            {/* ─── SETTINGS / SCANNER / CALLS ─── */}
+            {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} />}
+            {tab === "scanner" && (
+              <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
+                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} />
+            )}
+            {tab === "calls" && (
+              <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
+                showToast={showToast} logHistory={logHistory} onGo={goTab} />
+            )}
+
             {/* ─── GUIDE ─── */}
             {tab === "guide" && (
               <GuideTab progress={guide} eventName={savedEventId ? (eventData.username || "Event") : null} onGo={goTab} />
@@ -5313,6 +6196,11 @@ export default function App() {
                         <div style={{color:N.textDim,fontSize:12,padding:"8px 0"}}>Click Refresh to load balance</div>
                       )}
                     </div>
+                    <label className="nk-label" htmlFor="nk-sms-sender">Sender ID</label>
+                    <select id="nk-sms-sender" className="nk-select" value={smsSender} disabled={!access.can("sms","edit")}
+                      onChange={e => rememberForEvent("sms_sender_id", e.target.value, "sms")} title="The name guests see as the SMS sender">
+                      {(access.senderIds.filter(x => x.active).length ? access.senderIds.filter(x => x.active).map(x => x.sender_id) : [smsSender]).map(id => <option key={id} value={id}>{id}</option>)}
+                    </select>
                     <button className="nk-btn nk-btn-teal nk-btn-full" onClick={()=>sendAllSms(activeMsgId)} disabled={smsSending}>
                       {smsSending?<><Icon n="loader" /> Sending…</>:<><Icon n="sms" /> {`Send ${activeExtra ? `"${activeExtra.title}"` : "SMS"} to All (${activeRecipients.filter(r=>r.phone).length})`}</>}
                     </button>
@@ -5461,9 +6349,9 @@ export default function App() {
                     <div className="nk-sec" style={{color:N.amber}}>WhatsApp Template</div>
                     <label className="nk-label">Template Name</label>
                     <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
-                      {["Mwaliko","Mchango","ImageTemp"].map(t => (
+                      {(activeWaTemplates.length ? activeWaTemplates.map(t => t.name) : ["Mwaliko","Mchango","ImageTemp"]).map(t => (
                         <button key={t}
-                          onClick={() => setWaTemplate(t)}
+                          onClick={() => chooseWaTemplate(t)}
                           style={{
                             padding:"6px 14px", borderRadius:6, fontSize:12, fontWeight:600, cursor:"pointer",
                             border: waTemplate===t ? `1.5px solid ${N.amber}` : `1.5px solid ${N.navy500}`,

@@ -103,7 +103,16 @@ const GoogleIcon = () => (
 
 export default function LoginPage() {
   const [loading, setLoading] = useState(false);
-  const [error, setError]     = useState(null);
+  // A rejected sign-in (e.g. an email that was not invited) comes back with the reason in the URL
+  const [error, setError]     = useState(() => {
+    const q = new URLSearchParams(window.location.hash.replace(/^#/, "") || window.location.search);
+    const msg = q.get("error_description");
+    if (!msg) return null;
+    window.history.replaceState(null, "", window.location.pathname);
+    return /invitation|database error saving new user/i.test(msg)
+      ? "This Google account has not been invited to Nikadi Studio. Ask an administrator to add your email in Settings → Users."
+      : msg.replace(/\+/g, " ");
+  });
 
   const signInWithGoogle = async () => {
     if (!supabase) {

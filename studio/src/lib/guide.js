@@ -46,6 +46,14 @@ export const GUIDE_STEPS = [
     what: "Write one or more messages per event with placeholders like {name}, and send to the guests or an uploaded list.",
     why: "Reminders, directions and thank-yous reach guests without WhatsApp too.",
     tips: ["Drafts save automatically.", "Check the SMS balance before a big send."] },
+  { id: "calls", stage: "deliver", tab: "calls", icon: "phone", title: "Confirm by phone", optional: true,
+    what: "Call each guest from the Calls tab and record Picked up / Busy, then Coming / Not coming, with a comment.",
+    why: "You know how many people to expect before the day — the summary adds up people using the card types.",
+    tips: ["Tap the phone icon to dial straight from your phone.", "Card types (Double = 2 people…) are set in Settings → Card types."] },
+  { id: "checkin", stage: "track", tab: "scanner", icon: "scan", title: "Check guests in", optional: true,
+    what: "Scan each card's QR code at the door (or search by name). Double and group cards ask how many are entering.",
+    why: "Nobody gets in twice on one card, even with several doors scanning at once.",
+    tips: ["Share the scan page (link + code) with door staff who don't have an account.", "A new code locks the old link out immediately."] },
   { id: "reports", stage: "track", tab: "reports", icon: "report", title: "Check delivery",
     what: "See which guests got their card and SMS, and download the Excel report.",
     why: "Share proof of delivery with the customer.",
@@ -70,6 +78,8 @@ export const GUIDE_LINKS = [
   { from: "Event",    to: "History",      label: "logs everything to" },
   { from: "Event",    to: "Transactions", label: "earns & spends via" },
   { from: "Account",  to: "Transactions", label: "moves money for" },
+  { from: "Card type", to: "Guests & cards", label: "sets how many enter on" },
+  { from: "Role",     to: "Users",        label: "decides what they see for" },
 ];
 
 export const stepsOfStage = (stageId) => GUIDE_STEPS.filter(s => s.stage === stageId);
@@ -92,7 +102,8 @@ export const guideProgress = (facts = {}) => {
     history:  !!f.hasEvent,
     finance:  f.txns > 0,
   };
-  const ids = GUIDE_STEPS.map(s => s.id);
+  // Optional steps (calls, door check-in) appear on the map but don't count toward progress
+  const ids = GUIDE_STEPS.filter(s => !s.optional).map(s => s.id);
   const count = ids.filter(id => done[id]).length;
   const next = ids.find(id => !done[id]) || null;
   return { done, count, total: ids.length, pct: Math.round((count / ids.length) * 100), next };
