@@ -74,6 +74,7 @@ const P = {
   minus:      <><path d="M5 12h14" /></>,
   copy:       <><rect x="8" y="8" width="14" height="14" rx="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></>,
   lock:       <><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>,
+  chevronDown:<><path d="m6 9 6 6 6-6" /></>,
   menu:       <><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /></>,
   trendUp:    <><path d="m22 7-8.5 8.5-5-5L2 17" /><path d="M16 7h6v6" /></>,
 };

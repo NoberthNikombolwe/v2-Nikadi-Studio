@@ -108,8 +108,25 @@ const CSS = `
   /* Tabs */
   .nk-tabs {
     display: flex; background: ${N.navy800};
-    border-bottom: 1px solid ${N.border}; padding: 0 28px; overflow-x: auto;
+    border-bottom: 1px solid ${N.border}; padding: 0 28px; flex-wrap: wrap; position: relative; z-index: 90;
   }
+  /* Collapsed nav groups: a button whose sub-menu opens on hover, keyboard focus or tap */
+  .nk-navdrop { position: relative; display: flex; }
+  .nk-navdrop-caret { opacity: .6; transition: transform .15s; }
+  .nk-navdrop:hover .nk-navdrop-caret, .nk-navdrop:focus-within .nk-navdrop-caret, .nk-navdrop.open .nk-navdrop-caret { transform: rotate(180deg); }
+  .nk-navdrop-menu {
+    position: absolute; top: 100%; left: 0; min-width: 200px; padding: 6px; z-index: 300;
+    background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 12px; box-shadow: 0 12px 32px var(--nk-shadow);
+    opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity .15s, transform .15s, visibility .15s;
+  }
+  .nk-navdrop:hover .nk-navdrop-menu, .nk-navdrop:focus-within .nk-navdrop-menu, .nk-navdrop.open .nk-navdrop-menu {
+    opacity: 1; visibility: visible; transform: translateY(0);
+  }
+  .nk-navdrop-item {
+    width: 100%; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; border: none;
+    background: transparent; color: ${N.textMid}; font: 600 13px 'Plus Jakarta Sans', sans-serif; cursor: pointer; text-align: left; white-space: nowrap;
+  }
+  .nk-navdrop-item:hover, .nk-navdrop-item:focus-visible { background: ${N.navy700}; color: ${N.text}; }
   .nk-tab {
     padding: 14px 20px; font-size: 13px; font-weight: 600;
     color: ${N.textDim}; border: none; background: none; cursor: pointer;
@@ -1050,11 +1067,11 @@ const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. 
 // Main navigation, in groups. eventOnly groups work on one event, so they only appear once an event is open.
 // Main navigation, in groups (tab bar on wide screens, drawer on phones / tablets)
 const NAV_GROUPS = [
-  { label:"Sales",   items:[{ id:"events", label:"Events", icon:"folder" }, { id:"leads", label:"Leads", icon:"target" }, { id:"customers", label:"Customers", icon:"users" }] },
-  { label:"Studio",  eventOnly:true, items:[{ id:"design", label:"Design", icon:"palette" }, { id:"vcard", label:"VCard", icon:"contact" }, { id:"sms", label:"SMS", icon:"sms" },
+  { label:"Sales",   icon:"target", items:[{ id:"events", label:"Events", icon:"folder" }, { id:"leads", label:"Leads", icon:"target" }, { id:"customers", label:"Customers", icon:"users" }] },
+  { label:"Studio",  icon:"palette", eventOnly:true, items:[{ id:"design", label:"Design", icon:"palette" }, { id:"vcard", label:"VCard", icon:"contact" }, { id:"sms", label:"SMS", icon:"sms" },
                             { id:"whatsapp", label:"WhatsApp", icon:"whatsapp" }, { id:"batch", label:"Batch & Send", icon:"table" }] },
-  { label:"Insight", eventOnly:true, items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
-  { label:"Guests",  eventOnly:true, items:[{ id:"calls", label:"Calls", icon:"phone" }, { id:"scanner", label:"Scanner", icon:"scan" }] },
+  { label:"Insight", icon:"chart", eventOnly:true, items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
+  { label:"Guests",  icon:"users", eventOnly:true, items:[{ id:"calls", label:"Calls", icon:"phone" }, { id:"scanner", label:"Scanner", icon:"scan" }] },
   { label:"Money",   items:[{ id:"finance", label:"Finance", icon:"wallet" }] },
   { label:"Admin",   items:[{ id:"settings", label:"Settings", icon:"settings" }] },
   { label:"Help",    items:[{ id:"guide", label:"Guide", icon:"map" }] },
@@ -3592,6 +3609,7 @@ export default function App() {
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
   const [menuOpen, setMenuOpen] = useState(false);   // mobile navigation drawer
+  const [navOpen, setNavOpen]   = useState(null);    // desktop: group whose sub-menu is open by click/tap (hover opens via CSS)
   // Table cells are one line with "…"; hovering a cut-off cell shows its full text as a tooltip
   useEffect(() => {
     const onOver = (e) => {
@@ -5447,19 +5465,46 @@ export default function App() {
         </header>
 
         {/* Tabs — wide screens: grouped tab bar; small screens: the drawer below */}
-        <nav className="nk-tabs" aria-label="Main">
-          {navGroups.map((g, gi) => (
-            <div key={g.label} className="nk-tab-group">
-              {gi > 0 && <span className="nk-tab-sep" aria-hidden="true" />}
-              <span className="nk-tab-group-label">{g.label}</span>
-              {g.items.map(it => (
-                <button key={it.id} className={`nk-tab${tab===it.id?" active":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
-                  <Icon n={it.icon} /> {it.label}
-                  {it.id === "leads" && leadsDue > 0 && <span className="nk-count" title="Follow-ups due today or overdue">{leadsDue}</span>}
-                </button>
-              ))}
-            </div>
-          ))}
+        <nav className="nk-tabs" aria-label="Main" onMouseLeave={() => setNavOpen(null)}>
+          {navGroups.map((g, gi) => {
+            const current = g.items.some(it => it.id === tab);
+            const due = g.items.some(it => it.id === "leads") && leadsDue > 0;
+            const tabBtn = (it) => (
+              <button key={it.id} className={`nk-tab${tab===it.id?" active":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
+                <Icon n={it.icon} /> {it.label}
+                {it.id === "leads" && leadsDue > 0 && <span className="nk-count" title="Follow-ups due today or overdue">{leadsDue}</span>}
+              </button>
+            );
+            return (
+              <div key={g.label} className="nk-tab-group">
+                {gi > 0 && <span className="nk-tab-sep" aria-hidden="true" />}
+                {current || g.items.length === 1 ? (
+                  <>
+                    {g.items.length > 1 && <span className="nk-tab-group-label">{g.label}</span>}
+                    {g.items.map(tabBtn)}
+                  </>
+                ) : (
+                  // Collapsed group: hover, keyboard focus or a tap opens its sub-menu
+                  <div className={`nk-navdrop${navOpen === g.label ? " open" : ""}`} onMouseEnter={() => setNavOpen(null)}>
+                    <button className="nk-tab" aria-haspopup="menu" aria-expanded={navOpen === g.label}
+                      onClick={() => setNavOpen(o => (o === g.label ? null : g.label))}>
+                      <Icon n={g.icon || g.items[0].icon} /> {g.label}
+                      {due && <span className="nk-count" title="Follow-ups due today or overdue">{leadsDue}</span>}
+                      <Icon n="chevronDown" className="nk-navdrop-caret" />
+                    </button>
+                    <div className="nk-navdrop-menu" role="menu" aria-label={g.label}>
+                      {g.items.map(it => (
+                        <button key={it.id} role="menuitem" className="nk-navdrop-item" onClick={() => { setNavOpen(null); goTab(it.id); }}>
+                          <Icon n={it.icon} /> <span style={{flex:1}}>{it.label}</span>
+                          {it.id === "leads" && leadsDue > 0 && <span className="nk-count">{leadsDue}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </nav>
 
         {welcome && <WelcomeModal name={user.user_metadata?.full_name} onClose={() => closeWelcome(false)} onGuide={() => closeWelcome(true)} />}
