@@ -680,16 +680,22 @@ REVOKE ALL ON FUNCTION public.public_view_event(UUID, TEXT), public.public_view_
 GRANT EXECUTE ON FUNCTION public.public_view_event(UUID, TEXT), public.public_view_guests(UUID, TEXT), public.public_view_history(UUID, TEXT) TO anon, authenticated;
 
 -- ─────────────────────────────────────────────────────────────────────
--- 8. WHATSAPP CARD STORAGE — size of the wa-cards bucket and clearing it.
---    Rendered card JPEGs pile up; the WhatsApp tab shows the usage and lets a
---    Super Admin clear them (files are removed through the Storage API).
+-- 8. STORAGE — how much each bucket holds (shown against the storage_quota_mb
+--    setting) and clearing the WhatsApp card images. The WhatsApp tab shows the
+--    usage; Settings → Storage manages it (clearing is Super Admin only and goes
+--    through the Storage API so the files are really removed).
 -- ─────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.wa_cards_usage()
-RETURNS TABLE (files BIGINT, bytes BIGINT, oldest TIMESTAMPTZ, newest TIMESTAMPTZ)
+INSERT INTO app_settings (key, value) VALUES ('storage_quota_mb', '1024')   -- Supabase Free plan = 1 GB
+ON CONFLICT (key) DO NOTHING;
+
+DROP FUNCTION IF EXISTS public.wa_cards_usage();
+CREATE OR REPLACE FUNCTION public.storage_usage()
+RETURNS TABLE (bucket TEXT, files BIGINT, bytes BIGINT, oldest TIMESTAMPTZ, newest TIMESTAMPTZ)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, storage AS $$
-  SELECT count(*), COALESCE(sum((o.metadata ->> 'size')::BIGINT), 0), min(o.created_at), max(o.created_at)
+  SELECT o.bucket_id, count(*), COALESCE(sum((o.metadata ->> 'size')::BIGINT), 0), min(o.created_at), max(o.created_at)
     FROM storage.objects o
-   WHERE o.bucket_id = 'wa-cards' AND public.has_any_perm(ARRAY['whatsapp','batch'])
+   WHERE public.is_active_user()
+   GROUP BY o.bucket_id
 $$;
 
 -- Names of the stored card files, oldest first (Super Admin only), for clearing in batches
@@ -700,8 +706,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, storage AS $$
    WHERE o.bucket_id = 'wa-cards' AND public.my_role() = 'superuser'
    ORDER BY o.created_at LIMIT LEAST(GREATEST(COALESCE(p_limit, 1000), 1), 1000)
 $$;
-REVOKE ALL ON FUNCTION public.wa_cards_usage(), public.wa_cards_names(INT) FROM public, anon;
-GRANT EXECUTE ON FUNCTION public.wa_cards_usage(), public.wa_cards_names(INT) TO authenticated;
+REVOKE ALL ON FUNCTION public.storage_usage(), public.wa_cards_names(INT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.storage_usage(), public.wa_cards_names(INT) TO authenticated;
 
 DROP POLICY IF EXISTS "superadmin_delete_wa_cards" ON storage.objects;
 CREATE POLICY "superadmin_delete_wa_cards" ON storage.objects FOR DELETE TO authenticated

@@ -2577,13 +2577,14 @@ const ROLE_TONE = { superuser:"bad", admin:"warn", sales_officer:"info", graphic
 const RoleBadge = ({ role }) => role ? <Pill tone={ROLE_TONE[role] || "info"}>{ROLE_LABEL[role] || role}</Pill> : null;
 
 // Settings tab: users, roles & permissions, WhatsApp templates, sender IDs, card types, general
-function SettingsTab({ access, askDialog, myEmail }) {
+function SettingsTab({ access, askDialog, myEmail, showToast }) {
   const sections = [
     ["users",     "Users",                "users",    access.can("users")],
     ["perms",     "Roles & permissions",  "shield",   access.can("users")],
     ["templates", "WhatsApp templates",   "whatsapp", access.can("settings")],
     ["senders",   "Sender IDs",           "sms",      access.can("settings")],
     ["cards",     "Card types",           "contact",  access.can("settings")],
+    ["storage",   "Storage",              "database", access.can("settings")],
     ["general",   "General",              "settings", access.can("settings")],
   ].filter(s => s[3]);
   const [sec, setSec] = useState(sections[0]?.[0] || "users");
@@ -2612,6 +2613,7 @@ function SettingsTab({ access, askDialog, myEmail }) {
       {sec === "templates" && <TemplatesSettings access={access} askDialog={askDialog} />}
       {sec === "senders"   && <SendersSettings access={access} askDialog={askDialog} />}
       {sec === "cards"     && <CardTypeSettings access={access} askDialog={askDialog} />}
+      {sec === "storage"   && <StorageSettings access={access} askDialog={askDialog} showToast={showToast} />}
       {sec === "general"   && <GeneralSettings access={access} />}
     </div>
   );
@@ -3220,32 +3222,78 @@ function TemplatePicker({ templates = [], currentUrl, currentImage, hasDesign, o
   );
 }
 
-// WhatsApp tab: how much the wa-cards bucket holds (wa_cards_usage RPC) and, for Super
-// Admins, clearing every stored card image (names via wa_cards_names, removed through the
-// Storage API in batches of 100). Cards must be uploaded again before the next send.
+// Storage use from Supabase (storage_usage RPC, per bucket) against the storage_quota_mb
+// setting. <StorageMeter> is the read-only view in the WhatsApp tab; <StorageSettings>
+// (Settings → Storage) manages it: the quota and clearing WhatsApp card images.
 const fmtBytes = (b) => !b ? "0 B" : b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
-function CardStoragePanel({ canClear, askDialog, showToast, onCleared }) {
-  const [usage, setUsage] = useState(null);     // { files, bytes, oldest, newest } | null = loading
+const BUCKET_LABEL = { "wa-cards": "WhatsApp card images", templates: "Card templates (backgrounds)" };
+function useStorageUsage(quotaMb) {
+  const [rows, setRows] = useState(null);   // null = loading
   const [error, setError] = useState(null);
-  const [clearing, setClearing] = useState(null); // { done, total } while clearing
   const load = async () => {
-    if (!supabase) return;
+    if (!supabase) { setRows([]); return; }
     setError(null);
-    const { data, error: e } = await supabase.rpc("wa_cards_usage");
-    if (e) { setUsage({}); setError(/wa_cards_usage|schema cache/i.test(e.message) ? "Run the latest supabase-schema.sql to see storage use." : e.message); return; }
-    const r = data?.[0] || {};
-    setUsage({ files: Number(r.files) || 0, bytes: Number(r.bytes) || 0, oldest: r.oldest, newest: r.newest });
+    const { data, error: e } = await supabase.rpc("storage_usage");
+    if (e) { setRows([]); setError(/storage_usage|schema cache/i.test(e.message) ? "Run the latest supabase-schema.sql to see storage use." : e.message); return; }
+    setRows((data || []).map(r => ({ ...r, files: Number(r.files) || 0, bytes: Number(r.bytes) || 0 })));
   };
-  useEffect(() => { load(); }, []);
-  const clearAll = async () => {
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
+  const used  = (rows || []).reduce((n, r) => n + r.bytes, 0);
+  const total = Math.max(1, Number(quotaMb) || 1024) * 1048576;
+  const cards = (rows || []).find(r => r.bucket === "wa-cards") || { files: 0, bytes: 0 };
+  return { rows, error, load, used, total, left: Math.max(0, total - used), pct: Math.min(100, used / total * 100), cards };
+}
+
+function StorageBar({ pct }) {
+  const col = pct >= 90 ? N.red : pct >= 70 ? N.amber : N.green;
+  return (
+    <div style={{height:8,borderRadius:4,background:N.navy900,overflow:"hidden",border:`1px solid ${N.border}`}} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label="Storage used">
+      <div style={{height:"100%",width:`${Math.max(pct, pct > 0 ? 2 : 0)}%`,background:col,transition:"width .3s"}} />
+    </div>
+  );
+}
+
+// WhatsApp tab: view only — remaining vs total, and how much the card images take
+function StorageMeter({ quotaMb, onManage }) {
+  const u = useStorageUsage(quotaMb);
+  return (
+    <div className="nk-chip" style={{marginTop:20,fontSize:12,lineHeight:1.7}}>
+      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+        <strong style={{color:N.text,flex:1}}><Icon n="database" /> Storage</strong>
+        <button className="nk-btn-sm icon-only" onClick={u.load} aria-label="Refresh storage size" title="Refresh storage size"
+          style={{background:"transparent",color:N.sky,border:`1px solid ${N.border}`,width:26,height:26,padding:0,justifyContent:"center",borderRadius:6,cursor:"pointer"}}><Icon n="refresh" /></button>
+      </div>
+      {u.rows === null ? <div style={{color:N.textDim}}><Icon n="loader" /> Checking…</div>
+        : u.error ? <div style={{color:N.amber}}>{u.error}</div>
+        : <>
+            <div style={{display:"flex",alignItems:"baseline",gap:6,marginBottom:6}}>
+              <span style={{fontSize:18,fontWeight:800,color:u.pct >= 90 ? N.red : N.text}}>{fmtBytes(u.left)}</span>
+              <span style={{color:N.textDim}}>left of {fmtBytes(u.total)}</span>
+            </div>
+            <StorageBar pct={u.pct} />
+            <div style={{color:N.textDim,fontSize:11,marginTop:6}}>{fmtBytes(u.used)} used ({u.pct.toFixed(0)}%) · card images {fmtBytes(u.cards.bytes)} ({u.cards.files.toLocaleString()})</div>
+            {u.pct >= 90 && <div style={{color:N.red,fontSize:11,marginTop:4}}><Icon n="alert" /> Storage almost full — clear old card images in Settings → Storage.</div>}
+          </>}
+      {onManage && <button className="nk-link" style={{fontSize:11,marginTop:6}} onClick={onManage}>Manage in Settings → Storage</button>}
+    </div>
+  );
+}
+
+// Settings → Storage: per-bucket use, the quota, and (Super Admin) clearing card images
+function StorageSettings({ access, askDialog, showToast }) {
+  const canEdit  = access.can("settings", "edit");
+  const canClear = access.role === "superuser";
+  const u = useStorageUsage(access.settings.storage_quota_mb);
+  const [clearing, setClearing] = useState(null);   // { done, total }
+  const clearCards = async () => {
     const ok = await askDialog({
       title: "Clear all WhatsApp card images?",
-      body: `This deletes all ${usage.files} stored card image${usage.files === 1 ? "" : "s"} (${fmtBytes(usage.bytes)}) for every event. Messages already delivered are not affected, but cards must be uploaded again before sending more — and any message still waiting to be delivered may arrive without its image.`,
+      body: `This deletes all ${u.cards.files} stored card image${u.cards.files === 1 ? "" : "s"} (${fmtBytes(u.cards.bytes)}) for every event. Messages already delivered are not affected, but cards must be uploaded again before sending more — and any message still waiting to be delivered may arrive without its image.`,
       actions: [{ value: "yes", label: "Clear all images", kind: "danger" }],
     });
     if (ok !== "yes") return;
     let done = 0;
-    setClearing({ done, total: usage.files });
+    setClearing({ done, total: u.cards.files });
     try {
       for (let guard = 0; guard < 500; guard++) {
         const { data, error: e } = await supabase.rpc("wa_cards_names", { p_limit: 1000 });
@@ -3256,43 +3304,63 @@ function CardStoragePanel({ canClear, askDialog, showToast, onCleared }) {
           const { error: re } = await supabase.storage.from("wa-cards").remove(names.slice(i, i + 100));
           if (re) throw re;
           done += Math.min(100, names.length - i);
-          setClearing({ done, total: usage.files });
+          setClearing({ done, total: u.cards.files });
         }
       }
-      showToast(`Cleared ${done} card image${done === 1 ? "" : "s"}`, "success");
-      onCleared?.();
+      showToast(`Cleared ${done} card image${done === 1 ? "" : "s"} — upload cards again before the next WhatsApp send`, "success");
     } catch (e) {
       showToast(`Clearing stopped after ${done} file${done === 1 ? "" : "s"}: ${e.message}`, "warn");
-    } finally { setClearing(null); load(); }
+    } finally { setClearing(null); u.load(); }
   };
   return (
-    <div className="nk-chip" style={{marginTop:20,fontSize:12,lineHeight:1.7}}>
-      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-        <strong style={{color:N.text,flex:1}}><Icon n="database" /> Card image storage</strong>
-        <button className="nk-btn-sm icon-only" onClick={load} disabled={!!clearing} aria-label="Refresh storage size" title="Refresh storage size"
-          style={{background:"transparent",color:N.sky,border:`1px solid ${N.border}`,width:26,height:26,padding:0,justifyContent:"center",borderRadius:6,cursor:"pointer"}}><Icon n="refresh" /></button>
+    <div style={card}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+        <div style={{fontSize:15,fontWeight:800,color:N.text,flex:1}}><Icon n="database" /> Supabase storage</div>
+        <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={u.load} disabled={!!clearing}><Icon n="refresh" /> Refresh</button>
       </div>
-      {usage === null ? <div style={{color:N.textDim}}><Icon n="loader" /> Checking…</div>
-        : error ? <div style={{color:N.amber}}>{error}</div>
+      {u.rows === null ? <EmptyState compact loading title="Checking storage…" />
+        : u.error ? <EmptyState compact tone="warn" icon="database" title="Storage use isn't available" text={u.error} />
         : <>
-            <div style={{fontSize:20,fontWeight:800,color:N.text}}>{fmtBytes(usage.bytes)}</div>
-            <div style={{color:N.textDim}}>{usage.files.toLocaleString()} image{usage.files === 1 ? "" : "s"} in Supabase (wa-cards)</div>
-            {usage.oldest && <div style={{color:N.textDim,fontSize:11}}>Oldest {fmtWhen(usage.oldest)} · newest {fmtWhen(usage.newest)}</div>}
+            <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap",marginBottom:8}}>
+              <span style={{fontSize:24,fontWeight:800,color:u.pct >= 90 ? N.red : N.text}}>{fmtBytes(u.used)}</span>
+              <span style={{color:N.textDim,fontSize:13}}>used of {fmtBytes(u.total)} · {fmtBytes(u.left)} left ({(100 - u.pct).toFixed(0)}%)</span>
+            </div>
+            <StorageBar pct={u.pct} />
+            <div className="nk-table-wrap" style={{marginTop:14}}>
+              <table className="nk-table">
+                <thead><tr><th>What</th><th className="num">Files</th><th className="num">Size</th><th>Oldest</th><th>Newest</th><th></th></tr></thead>
+                <tbody>
+                  {!u.rows.length && <tr><td colSpan={6} style={{color:N.textDim}}>Nothing stored yet</td></tr>}
+                  {u.rows.map(r => (
+                    <tr key={r.bucket}>
+                      <td style={{fontWeight:600}}>{BUCKET_LABEL[r.bucket] || r.bucket}</td>
+                      <td className="num">{r.files.toLocaleString()}</td>
+                      <td className="num">{fmtBytes(r.bytes)}</td>
+                      <td style={{fontSize:12,color:N.textDim}}>{r.oldest ? fmtWhen(r.oldest) : "—"}</td>
+                      <td style={{fontSize:12,color:N.textDim}}>{r.newest ? fmtWhen(r.newest) : "—"}</td>
+                      <td>{r.bucket === "wa-cards" && canClear && r.files > 0 && !clearing && (
+                        <Sb bg="transparent" col={N.red} border={alpha(N.red,"55")} label="Clear all WhatsApp card images" onClick={clearCards}><Icon n="trash" /></Sb>
+                      )}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {clearing && (
+              <div style={{marginTop:12}} role="status">
+                <StorageBar pct={clearing.total ? clearing.done / clearing.total * 100 : 100} />
+                <div style={{fontSize:12,color:N.textDim,marginTop:4}}><Icon n="loader" /> Deleting {clearing.done} / {clearing.total} card images…</div>
+              </div>
+            )}
+            {!canClear && u.cards.files > 0 && <p style={{fontSize:11,color:N.textDim,marginTop:10}}>Only a Super Admin can clear stored card images.</p>}
+            <p style={{fontSize:11,color:N.textDim,marginTop:10}}>Card templates are kept: events and saved templates still use them. WhatsApp card images can be cleared once the cards have been delivered — they are re-created when cards are uploaded again.</p>
           </>}
-      {clearing && (
-        <div style={{marginTop:8}} role="status">
-          <div style={{height:6,borderRadius:3,background:N.navy900,overflow:"hidden"}}>
-            <div style={{height:"100%",width:`${clearing.total ? Math.min(100, clearing.done / clearing.total * 100) : 100}%`,background:N.red,transition:"width .3s"}} />
-          </div>
-          <div style={{fontSize:11,color:N.textDim,marginTop:4}}><Icon n="loader" /> Deleting {clearing.done} / {clearing.total}…</div>
-        </div>
-      )}
-      {canClear && usage?.files > 0 && !clearing && (
-        <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:12,marginTop:8,color:N.red,borderColor:alpha(N.red,"55")}} onClick={clearAll}>
-          <Icon n="trash" /> Clear all card images
-        </button>
-      )}
-      {!canClear && usage?.files > 0 && <div style={{fontSize:11,color:N.textDim,marginTop:6}}>Only a Super Admin can clear stored images.</div>}
+      <div style={{marginTop:16,maxWidth:420}}>
+        <label className="nk-label" htmlFor="nk-set-quota">Storage plan size (MB)</label>
+        <input id="nk-set-quota" className="nk-input" type="number" min={100} step={100} disabled={!canEdit} defaultValue={access.settings.storage_quota_mb ?? 1024}
+          onBlur={e => { const v = Math.round(Number(e.target.value)); if (v >= 100 && v !== Number(access.settings.storage_quota_mb)) access.saveSetting("storage_quota_mb", v); }} />
+        <div style={{fontSize:11,color:N.textDim,marginTop:-6}}>Your Supabase plan's storage: Free = 1024 MB (1 GB), Pro = 102400 MB (100 GB). Used to show what's left.</div>
+      </div>
     </div>
   );
 }
@@ -6550,7 +6618,7 @@ export default function App() {
             {shareView && openEventRow && <ShareViewModal eventRow={openEventRow} showToast={showToast} onClose={() => setShareView(false)} reloadEvents={loadSavedEvents} />}
 
             {/* ─── SETTINGS / SCANNER / CALLS ─── */}
-            {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} />}
+            {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} showToast={showToast} />}
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} />
@@ -7011,8 +7079,8 @@ export default function App() {
                       onClick={uploadAllCards} disabled={uploadingCards}>
                       {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
                     </button>
-                    <CardStoragePanel key={uploadingCards ? "busy" : "idle"} canClear={canDeleteData} askDialog={askDialog} showToast={showToast}
-                      onCleared={() => setRecords(rs => rs.map(r => r.cardUrl || r.uploadStatus === "uploaded" ? { ...r, cardUrl: null, uploadStatus: "idle" } : r))} />
+                    <StorageMeter key={uploadingCards ? "busy" : "idle"} quotaMb={access.settings.storage_quota_mb}
+                      onManage={access.can("settings") ? () => goTab("settings") : null} />
                     <div style={{height:20}} />
 
                     {/* Template */}

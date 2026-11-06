@@ -1,6 +1,6 @@
 // Dynamic settings (app_settings, wa_templates, sender_ids) — pure helpers.
 
-export const DEFAULT_SETTINGS = { org_name: "Nikadi Studio", country_code: "255", wa_account: "Nikadi", numeric_card_types: true, default_people: 1 };
+export const DEFAULT_SETTINGS = { org_name: "Nikadi Studio", country_code: "255", wa_account: "Nikadi", numeric_card_types: true, default_people: 1, storage_quota_mb: 1024 };
 
 // app_settings rows → { key: value } merged over the defaults
 export const settingsFromRows = (rows = []) => ({ ...DEFAULT_SETTINGS, ...Object.fromEntries(rows.map(r => [r.key, r.value])) });
