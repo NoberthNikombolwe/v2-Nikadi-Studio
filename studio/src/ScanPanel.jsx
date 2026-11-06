@@ -62,6 +62,21 @@ const CSS = `
   .sp-stepper .sp-btn { width: 52px; height: 52px; font-size: 22px; padding: 0; }
   .sp-stepper-n { font-size: 40px; font-weight: 800; min-width: 70px; text-align: center; color: ${N.text}; }
   .nk-spin { animation: spSpin .9s linear infinite; } @keyframes spSpin { to { transform: rotate(360deg); } }
+  /* "It's working": a glowing line sweeps up and down over the camera while it looks for a code */
+  .sp-scanning { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+  .sp-laser { position: absolute; left: 6%; right: 6%; top: 8%; height: 3px; border-radius: 3px;
+    background: linear-gradient(90deg, transparent, ${N.green} 15%, ${N.green} 85%, transparent);
+    box-shadow: 0 0 10px 2px ${alpha(N.green, "aa")}, 0 0 28px 6px ${alpha(N.green, "55")};
+    animation: spLaser 2.2s ease-in-out infinite alternate; }
+  @keyframes spLaser { from { top: 8%; } to { top: 92%; } }
+  /* white on dark glass on purpose: it sits over the live camera picture, whatever the theme */
+  .sp-scan-tag { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; background: rgba(0,0,0,.55); color: #fff; font: 600 12px 'Plus Jakarta Sans', sans-serif; white-space: nowrap; }
+  .sp-scan-dot { width: 8px; height: 8px; border-radius: 50%; background: ${N.green}; animation: spPulse 1.2s ease-in-out infinite; }
+  @keyframes spPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) {
+    .sp-laser { top: 50%; animation: spPulse 1.6s ease-in-out infinite; }
+  }
   @media (max-width: 760px) { .sp-wrap { grid-template-columns: 1fr; } }
 `;
 
@@ -192,6 +207,12 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
             {camOn && !camReady && (
               <div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",color:N.textDim,fontSize:13}} role="status">
                 <span><Icon n="loader" /> Opening the camera…</span>
+              </div>
+            )}
+            {camOn && camReady && (
+              <div className="sp-scanning" role="status" aria-label="Scanning for a QR code">
+                <div className="sp-laser" />
+                <div className="sp-scan-tag"><span className="sp-scan-dot" /> Scanning — hold the QR code in view</div>
               </div>
             )}
             {!camOn && (
