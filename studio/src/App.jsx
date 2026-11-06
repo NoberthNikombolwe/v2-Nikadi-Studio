@@ -9,7 +9,7 @@ import ScanPanel from "./ScanPanel";
 import { TASK_SUGGESTIONS, groupAssignments, initials, eventsAssignedTo, assignableFor, validateAssignment } from "./lib/assignments";
 import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE } from "./lib/permissions";
 import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, validateSenderId } from "./lib/settings";
-import { peopleForCardType, peopleLabel, scanTotals, validateCardRule } from "./lib/cardRules";
+import { peopleForCardType, peopleLabel, scanTotals, validateCardRule, scanStatus, remaining as placesLeft, filterGuests, guestCounts, cardSource } from "./lib/cardRules";
 import { buildQrPayload, matchByName, SCAN_REASON, newScanCode } from "./lib/scan";
 import { CALL_STATUSES, callOptions, nextCallStatus, summariseCalls, filterCalls } from "./lib/calls";
 import { GUIDE_STAGES, GUIDE_STEPS, GUIDE_LINKS, stepsOfStage, guideProgress } from "./lib/guide";
@@ -2981,7 +2981,7 @@ function GeneralSettings({ access }) {
    totals, share the public scan page) and <CallsTab> (guest confirmation calls).
    Check-ins only ever go through the scan_card() database function.
 ══════════════════════════════════════════════════════════════════════════ */
-const CARD_COLS = "id,name,card_type,phone,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
+const CARD_COLS = "id,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
 
 // The open event's cards from the database, kept live with realtime updates
 function useEventCards(eventId) {
@@ -3034,6 +3034,7 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
     </div>
   );
   const totals = scanTotals(cards || []);
+  const counts = guestCounts(cards || []);
   const byId = Object.fromEntries((cards || []).map(c => [c.id, c]));
   const findCard = async ({ id, name, cardType }) => {
     if (id) {
@@ -3065,10 +3066,12 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
         <MoneyTile label="People entered" value={`${totals.entered} / ${totals.people}`} tone="good" sub={totals.people ? `${Math.round(totals.entered / totals.people * 100)}% arrived` : null} />
         <MoneyTile label="Cards fully used" value={`${totals.complete} / ${totals.cards}`} tone="info" />
         <MoneyTile label="Still expected" value={Math.max(0, totals.people - totals.entered)} tone="warn" />
+        <MoneyTile label="Guests scanned" value={`${counts.scanned} / ${totals.cards}`} tone="good" sub={`${counts.waiting} not scanned yet`} />
       </div>
       {cards === null ? <EmptyState loading title="Loading guest list…" />
         : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." action={<button className="nk-btn nk-btn-ghost" onClick={() => onGo("design")}><Icon n="palette" /> Go to Design</button>} />
-        : <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests." />}
+        : <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests."
+            renderBelow={({ begin, busy }) => <GuestList cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} />} />}
       {recent.length > 0 && (
         <div className="nk-table-wrap" style={{marginTop:16}}>
           <table className="nk-table">
@@ -3088,6 +3091,61 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
         </div>
       )}
       {sharing && <ShareScanModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
+    </div>
+  );
+}
+
+// Scanner guest list: every saved card for the event (sent or only uploaded), with live scan
+// state. Filters as you type and by state; "Check in" uses ScanPanel's flow (count prompt).
+const GUEST_FILTERS = [["all", "All"], ["waiting", "Not scanned"], ["partial", "Partly in"], ["complete", "Fully in"], ["entered", "Scanned"]];
+function GuestList({ cards = [], canScan, busy, onCheckIn }) {
+  const [q, setQ] = useState("");
+  const [state, setState] = useState("all");
+  const rows = filterGuests(cards, { q, state });
+  const count = (k) => k === "all" ? cards.length : filterGuests(cards, { state: k }).length;
+  const tone = { pending: "warn", partial: "info", complete: "good" };
+  const word = { pending: "Not scanned", partial: "Partly in", complete: "Fully in" };
+  return (
+    <div style={{marginTop:16}}>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
+        <h3 style={{fontSize:15,fontWeight:800,color:N.text,marginRight:"auto"}}>Guest list</h3>
+        <div style={{position:"relative",flex:"1 1 220px",maxWidth:320}}>
+          <input className="nk-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Filter by name, card type or phone" aria-label="Filter guests" style={{width:"100%"}} />
+        </div>
+      </div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}} role="group" aria-label="Show guests">
+        {GUEST_FILTERS.map(([k, l]) => (
+          <button key={k} className={`nk-btn ${state === k ? "nk-btn-primary" : "nk-btn-ghost"}`} style={{fontSize:12,padding:"5px 10px"}}
+            aria-pressed={state === k} onClick={() => setState(k)}>{l} ({count(k)})</button>
+        ))}
+      </div>
+      {!rows.length ? <EmptyState compact icon="search" title="No guests match" text="Change the filter or clear the search." /> : (
+        <div className="nk-table-wrap">
+          <table className="nk-table">
+            <thead><tr><th>Guest</th><th>Card type</th><th>Phone</th><th>Card</th><th className="num">Entered</th><th>Status</th><th>Last scan</th><th></th></tr></thead>
+            <tbody>
+              {rows.map(c => {
+                const st = scanStatus(c.scan_count, c.max_scans);
+                return (
+                  <tr key={c.id}>
+                    <td style={{fontWeight:600}}>{c.name || "—"}</td>
+                    <td>{c.card_type || "—"}</td>
+                    <td style={{fontSize:12,color:N.textDim}}>{c.phone || "—"}</td>
+                    <td>{cardSource(c) === "sent" ? <Pill tone="good">Sent</Pill> : <Pill tone="info">Uploaded</Pill>}</td>
+                    <td className="num">{c.scan_count || 0} / {c.max_scans || 1}</td>
+                    <td><Pill tone={tone[st]}>{word[st]}</Pill></td>
+                    <td style={{fontSize:12,color:N.textDim}}>{c.last_scanned_at ? fmtWhen(c.last_scanned_at) : "—"}</td>
+                    <td>{canScan && (
+                      <Sb bg="transparent" col={N.green} border={N.border} label={st === "complete" ? `Everyone on ${c.name}'s card has entered` : `Check in ${c.name} (${placesLeft(c.scan_count, c.max_scans)} left)`}
+                        disabled={busy || st === "complete"} onClick={() => onCheckIn(c)}><Icon n="check" /></Sb>
+                    )}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

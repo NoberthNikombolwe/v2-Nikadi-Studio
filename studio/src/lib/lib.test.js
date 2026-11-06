@@ -358,7 +358,7 @@ test("guideProgress counts completed steps and finds the next one", () => {
 // ── permissions / card rules / scan / calls / settings ──
 import fs from "node:fs";
 import { DEFAULT_MATRIX, can, canSeeTab, visibleNav, matrixFromRows, rowsForRole, validateInvite, MODULES } from "./permissions.js";
-import { peopleForCardType, scanStatus, remaining, scanTotals, validateCardRule } from "./cardRules.js";
+import { peopleForCardType, scanStatus, remaining, scanTotals, validateCardRule, filterGuests, guestCounts, cardSource } from "./cardRules.js";
 import { buildQrPayload, parseQrPayload, matchByName, newScanCode } from "./scan.js";
 import { callOptions, nextCallStatus, summariseCalls, filterCalls } from "./calls.js";
 import { settingsFromRows, pickDefault, resolveChoice, validateTemplate, validateSenderId } from "./settings.js";
@@ -454,4 +454,20 @@ test("event team helpers", () => {
   assert.ok(validateAssignment({ email: "amy@x.co" }, by.e1).email);
   assert.ok(validateAssignment({}).email);
   assert.deepEqual(validateAssignment({ email: "bo@x.co", task: "Door" }, by.e1), {});
+});
+
+test("scanner guest list: filter, counts, source", () => {
+  const cards = [
+    { name: "Zara", card_type: "Double", phone: "255711", scan_count: 1, max_scans: 2, wa_status: "sent" },
+    { name: "Ali", card_type: "Single", phone: "255722", scan_count: 0, max_scans: 1, sms_status: "pending" },
+    { name: "Mary", card_type: "Single", scan_count: 1, max_scans: 1, sms_status: "delivered" },
+  ];
+  assert.deepEqual(filterGuests(cards).map(c => c.name), ["Ali", "Mary", "Zara"]);
+  assert.deepEqual(filterGuests(cards, { state: "waiting" }).map(c => c.name), ["Ali"]);
+  assert.deepEqual(filterGuests(cards, { state: "partial" }).map(c => c.name), ["Zara"]);
+  assert.deepEqual(filterGuests(cards, { state: "entered" }).map(c => c.name), ["Mary", "Zara"]);
+  assert.deepEqual(filterGuests(cards, { q: "doub" }).map(c => c.name), ["Zara"]);
+  assert.deepEqual(filterGuests(cards, { q: "722" }).map(c => c.name), ["Ali"]);
+  assert.deepEqual(guestCounts(cards), { scanned: 2, waiting: 1, sent: 2 });
+  assert.equal(cardSource(cards[1]), "uploaded");
 });

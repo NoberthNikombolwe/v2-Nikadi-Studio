@@ -36,3 +36,27 @@ export const validateCardRule = (form = {}, rules = []) => {
   if (!Number.isInteger(n) || n < 1 || n > 1000) errors.people = "People must be a whole number from 1 to 1000";
   return errors;
 };
+
+// How a guest's card reached them: "sent" (WhatsApp/SMS sent or delivered) or "uploaded" (on the list only)
+export const cardSource = (c = {}) =>
+  /^(sent|delivered|read)$/i.test(c.wa_status || "") || /^(sent|delivered)$/i.test(c.sms_status || "") ? "sent" : "uploaded";
+
+// Scanner guest list: filter by text (name / card type / phone) and by scan state
+//   state: "all" | "entered" (anyone in) | "complete" | "partial" | "waiting" (nobody yet)
+export const filterGuests = (cards = [], { q = "", state = "all" } = {}) => {
+  const t = String(q).trim().toLowerCase();
+  return cards.filter(c => {
+    const st = scanStatus(c.scan_count, c.max_scans);
+    if (state === "entered" && !(Number(c.scan_count) > 0)) return false;
+    if (state === "waiting" && Number(c.scan_count) > 0) return false;
+    if ((state === "complete" || state === "partial") && st !== state) return false;
+    if (!t) return true;
+    return [c.name, c.card_type, c.phone].some(v => String(v || "").toLowerCase().includes(t));
+  }).sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+};
+
+// Guests (cards) with anyone checked in vs nobody yet
+export const guestCounts = (cards = []) => {
+  const scanned = cards.filter(c => Number(c.scan_count) > 0).length;
+  return { scanned, waiting: cards.length - scanned, sent: cards.filter(c => cardSource(c) === "sent").length };
+};

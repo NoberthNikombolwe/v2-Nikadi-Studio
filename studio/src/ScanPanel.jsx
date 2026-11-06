@@ -41,7 +41,9 @@ const CSS = `
 
 const statusTone = (s) => s === "complete" ? N.green : s === "partial" ? N.amber : N.textDim;
 
-export default function ScanPanel({ findCard, search, checkIn, scannerName, disabled, disabledReason }) {
+// renderBelow({ begin, busy }) — optional extra content (the staff guest list) that can start
+// a check-in through the same flow, including the "how many are entering?" prompt.
+export default function ScanPanel({ findCard, search, checkIn, scannerName, disabled, disabledReason, renderBelow }) {
   const camId = useId().replace(/:/g, "");
   const qr = useRef(null);
   const [camOn, setCamOn]   = useState(false);
@@ -120,13 +122,24 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
     finally { setBusy(false); }
   };
 
-  const doSearch = async (e) => {
-    e?.preventDefault();
-    if (q.trim().length < 2) { setHits([]); return; }
-    setBusy(true);
-    try { setHits(await search(q.trim())); } catch (err) { fail("Search failed", err.message); }
-    finally { setBusy(false); }
+  // Search as you type (debounced) — no need to press a button. Enter still searches at once.
+  const [searching, setSearching] = useState(false);
+  const searchSeq = useRef(0);
+  const runSearch = async (term) => {
+    const seq = ++searchSeq.current;
+    setSearching(true);
+    try { const r = await search(term); if (seq === searchSeq.current) setHits(r); }
+    catch (err) { if (seq === searchSeq.current) fail("Search failed", err.message); }
+    finally { if (seq === searchSeq.current) setSearching(false); }
   };
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) { searchSeq.current++; return; }
+    const t = setTimeout(() => runSearch(term), 250);
+    return () => clearTimeout(t);
+  }, [q]); // eslint-disable-line react-hooks/exhaustive-deps -- search callback identity changes every render
+  const doSearch = (e) => { e?.preventDefault(); if (q.trim().length >= 2) runSearch(q.trim()); };
+  const shownHits = q.trim().length >= 2 ? hits : [];
 
   const tone = result ? (result.tone === "good" ? N.green : N.red) : null;
   return (
@@ -187,11 +200,11 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
           <form className="sp-card" onSubmit={doSearch}>
             <label style={{fontSize:12,fontWeight:700,color:N.textDim,display:"block",marginBottom:6}} htmlFor={camId + "q"}>No QR? Search the guest by name</label>
             <div style={{display:"flex",gap:8}}>
-              <input id={camId + "q"} className="sp-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Type at least 2 letters" disabled={disabled} />
+              <input id={camId + "q"} className="sp-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Start typing a name — results appear as you type" disabled={disabled} />
               <button className="sp-btn" type="submit" disabled={disabled || busy} aria-label="Search guests"><Icon n="search" /></button>
             </div>
             <div style={{marginTop:10}}>
-              {hits.map(c => {
+              {shownHits.map(c => {
                 const st = scanStatus(c.scan_count, c.max_scans);
                 return (
                   <div key={c.id} className="sp-row">
@@ -206,11 +219,13 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
                   </div>
                 );
               })}
-              {q.trim().length >= 2 && !busy && !hits.length && <div style={{fontSize:12,color:N.textDim}}>Press search to look up “{q.trim()}”.</div>}
+              {q.trim().length >= 2 && searching && !shownHits.length && <div style={{fontSize:12,color:N.textDim}}><Icon n="loader" /> Searching…</div>}
+              {q.trim().length >= 2 && !searching && !shownHits.length && <div style={{fontSize:12,color:N.textDim}}>No guest matches “{q.trim()}”.</div>}
             </div>
           </form>
         </div>
       </div>
+      {renderBelow && renderBelow({ begin, busy })}
 
       {ask && (
         <div className="nk-overlay nk-top" style={{position:"fixed",inset:0,zIndex:700,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
