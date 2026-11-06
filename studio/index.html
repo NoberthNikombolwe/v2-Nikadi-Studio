@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
     <!-- Page title + description (browser tab, search results) -->
@@ -14,23 +16,24 @@
 
     <!-- Link previews (WhatsApp, Facebook, LinkedIn, X). Crawlers need absolute URLs:
          %SITE_URL% is filled in at build time (vite.config.js; the Pages workflow sets it).
-         og-image.jpg's QR code opens https://www.nikadi.co.tz -->
+         og-image.jpg: 1200x630, logo kept in the centre square for square crops -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Nikadi" />
     <meta property="og:title" content="Nikadi Studio — Event Card Design &amp; Dispatch" />
     <meta property="og:description" content="Design personalised event invitation cards with QR codes and send them to every guest by WhatsApp and SMS." />
     <meta property="og:url" content="%SITE_URL%" />
     <meta property="og:image" content="%SITE_URL%og-image.jpg" />
+    <meta property="og:image:secure_url" content="%SITE_URL%og-image.jpg" />
     <meta property="og:image:type" content="image/jpeg" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Nikadi Studio — personalised event cards delivered by WhatsApp and SMS, with a QR code to www.nikadi.co.tz" />
+    <meta property="og:image:alt" content="Nikadi Studio logo over a lit event stage — event invitation cards by WhatsApp and SMS, www.nikadi.co.tz" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Nikadi Studio — Event Card Design &amp; Dispatch" />
     <meta name="twitter:description" content="Design personalised event invitation cards with QR codes and send them to every guest by WhatsApp and SMS." />
     <meta name="twitter:image" content="%SITE_URL%og-image.jpg" />
-    <meta name="twitter:image:alt" content="Nikadi Studio — personalised event cards delivered by WhatsApp and SMS, with a QR code to www.nikadi.co.tz" />
+    <meta name="twitter:image:alt" content="Nikadi Studio logo over a lit event stage — event invitation cards by WhatsApp and SMS, www.nikadi.co.tz" />
   </head>
   <body>
     <div id="root"></div>
