@@ -3220,6 +3220,83 @@ function TemplatePicker({ templates = [], currentUrl, currentImage, hasDesign, o
   );
 }
 
+// WhatsApp tab: how much the wa-cards bucket holds (wa_cards_usage RPC) and, for Super
+// Admins, clearing every stored card image (names via wa_cards_names, removed through the
+// Storage API in batches of 100). Cards must be uploaded again before the next send.
+const fmtBytes = (b) => !b ? "0 B" : b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
+function CardStoragePanel({ canClear, askDialog, showToast, onCleared }) {
+  const [usage, setUsage] = useState(null);     // { files, bytes, oldest, newest } | null = loading
+  const [error, setError] = useState(null);
+  const [clearing, setClearing] = useState(null); // { done, total } while clearing
+  const load = async () => {
+    if (!supabase) return;
+    setError(null);
+    const { data, error: e } = await supabase.rpc("wa_cards_usage");
+    if (e) { setUsage({}); setError(/wa_cards_usage|schema cache/i.test(e.message) ? "Run the latest supabase-schema.sql to see storage use." : e.message); return; }
+    const r = data?.[0] || {};
+    setUsage({ files: Number(r.files) || 0, bytes: Number(r.bytes) || 0, oldest: r.oldest, newest: r.newest });
+  };
+  useEffect(() => { load(); }, []);
+  const clearAll = async () => {
+    const ok = await askDialog({
+      title: "Clear all WhatsApp card images?",
+      body: `This deletes all ${usage.files} stored card image${usage.files === 1 ? "" : "s"} (${fmtBytes(usage.bytes)}) for every event. Messages already delivered are not affected, but cards must be uploaded again before sending more — and any message still waiting to be delivered may arrive without its image.`,
+      actions: [{ value: "yes", label: "Clear all images", kind: "danger" }],
+    });
+    if (ok !== "yes") return;
+    let done = 0;
+    setClearing({ done, total: usage.files });
+    try {
+      for (let guard = 0; guard < 500; guard++) {
+        const { data, error: e } = await supabase.rpc("wa_cards_names", { p_limit: 1000 });
+        if (e) throw e;
+        const names = (data || []).map(r => r.name);
+        if (!names.length) break;
+        for (let i = 0; i < names.length; i += 100) {
+          const { error: re } = await supabase.storage.from("wa-cards").remove(names.slice(i, i + 100));
+          if (re) throw re;
+          done += Math.min(100, names.length - i);
+          setClearing({ done, total: usage.files });
+        }
+      }
+      showToast(`Cleared ${done} card image${done === 1 ? "" : "s"}`, "success");
+      onCleared?.();
+    } catch (e) {
+      showToast(`Clearing stopped after ${done} file${done === 1 ? "" : "s"}: ${e.message}`, "warn");
+    } finally { setClearing(null); load(); }
+  };
+  return (
+    <div className="nk-chip" style={{marginTop:20,fontSize:12,lineHeight:1.7}}>
+      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+        <strong style={{color:N.text,flex:1}}><Icon n="database" /> Card image storage</strong>
+        <button className="nk-btn-sm icon-only" onClick={load} disabled={!!clearing} aria-label="Refresh storage size" title="Refresh storage size"
+          style={{background:"transparent",color:N.sky,border:`1px solid ${N.border}`,width:26,height:26,padding:0,justifyContent:"center",borderRadius:6,cursor:"pointer"}}><Icon n="refresh" /></button>
+      </div>
+      {usage === null ? <div style={{color:N.textDim}}><Icon n="loader" /> Checking…</div>
+        : error ? <div style={{color:N.amber}}>{error}</div>
+        : <>
+            <div style={{fontSize:20,fontWeight:800,color:N.text}}>{fmtBytes(usage.bytes)}</div>
+            <div style={{color:N.textDim}}>{usage.files.toLocaleString()} image{usage.files === 1 ? "" : "s"} in Supabase (wa-cards)</div>
+            {usage.oldest && <div style={{color:N.textDim,fontSize:11}}>Oldest {fmtWhen(usage.oldest)} · newest {fmtWhen(usage.newest)}</div>}
+          </>}
+      {clearing && (
+        <div style={{marginTop:8}} role="status">
+          <div style={{height:6,borderRadius:3,background:N.navy900,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${clearing.total ? Math.min(100, clearing.done / clearing.total * 100) : 100}%`,background:N.red,transition:"width .3s"}} />
+          </div>
+          <div style={{fontSize:11,color:N.textDim,marginTop:4}}><Icon n="loader" /> Deleting {clearing.done} / {clearing.total}…</div>
+        </div>
+      )}
+      {canClear && usage?.files > 0 && !clearing && (
+        <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:12,marginTop:8,color:N.red,borderColor:alpha(N.red,"55")}} onClick={clearAll}>
+          <Icon n="trash" /> Clear all card images
+        </button>
+      )}
+      {!canClear && usage?.files > 0 && <div style={{fontSize:11,color:N.textDim,marginTop:6}}>Only a Super Admin can clear stored images.</div>}
+    </div>
+  );
+}
+
 // Turns the public, view-only report link (#/view/<id>: guests, calls + comments, card
 // history; phones masked) on/off. Uses set_view_code() so Tele Sales etc. can share too.
 function ShareViewModal({ eventRow, showToast, onClose, reloadEvents }) {
@@ -6934,6 +7011,9 @@ export default function App() {
                       onClick={uploadAllCards} disabled={uploadingCards}>
                       {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
                     </button>
+                    <CardStoragePanel key={uploadingCards ? "busy" : "idle"} canClear={canDeleteData} askDialog={askDialog} showToast={showToast}
+                      onCleared={() => setRecords(rs => rs.map(r => r.cardUrl || r.uploadStatus === "uploaded" ? { ...r, cardUrl: null, uploadStatus: "idle" } : r))} />
+                    <div style={{height:20}} />
 
                     {/* Template */}
                     <div className="nk-sec" style={{color:N.amber}}>WhatsApp Template</div>
