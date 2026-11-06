@@ -3170,6 +3170,56 @@ function GuestList({ cards = [], canScan, busy, onCheckIn, onComment }) {
   );
 }
 
+// "Change template" pop-up: saved card templates as thumbnails, or upload a new image.
+// "Keep my element positions" reuses the current layout instead of the template's own.
+function TemplatePicker({ templates = [], currentUrl, currentImage, hasDesign, onPick, onClose }) {
+  const [keepLayout, setKeepLayout] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const pick = async (choice) => { setBusy(true); const done = await onPick(choice, { keepLayout }); if (!done) setBusy(false); };
+  return (
+    <DetailModal label="Change card template" onClose={onClose} width={760}>
+      <div style={{fontSize:18,fontWeight:800,color:N.text,marginBottom:4}}>{hasDesign ? "Change card template" : "Choose a card template"}</div>
+      <p style={{fontSize:12,color:N.textDim,marginBottom:14}}>Pick a saved design or upload a new background. The guest list, messages and statuses are not changed.</p>
+      {hasDesign && (
+        <label style={{display:"flex",gap:8,alignItems:"center",fontSize:13,color:N.textMid,marginBottom:14,cursor:"pointer"}}>
+          <input type="checkbox" checked={keepLayout} onChange={e => setKeepLayout(e.target.checked)} />
+          Keep my current element positions (name, QR, date…) instead of the template's own
+        </label>
+      )}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(150px, 1fr))",gap:12}}>
+        <label className="nk-upload" style={{margin:0,minHeight:180,justifyContent:"center",cursor:busy ? "wait" : "pointer"}}>
+          <input type="file" accept="image/*" style={{display:"none"}} disabled={busy} onChange={e => { const f = e.target.files?.[0]; if (f) pick({ file: f }); }} />
+          <span className="nk-upload-icon"><Icon n="upload" /></span>
+          <span className="nk-upload-label">Upload new image</span>
+          <span className="nk-upload-sub">PNG · JPG · SVG</span>
+        </label>
+        {templates.map(t => {
+          const current = !!currentUrl && t.cover_image_url === currentUrl;
+          return (
+            <button key={t.id} type="button" disabled={busy || current} onClick={() => pick({ tpl: t })}
+              title={current ? "This is the current template" : `Use "${t.name}"`}
+              style={{display:"flex",flexDirection:"column",gap:6,padding:8,borderRadius:12,cursor:busy ? "wait" : current ? "default" : "pointer",textAlign:"left",fontFamily:"inherit",
+                background:N.navy700,border:`2px solid ${current ? N.green : N.border}`,color:N.text}}>
+              <div style={{width:"100%",aspectRatio:"3 / 4",borderRadius:8,overflow:"hidden",background:N.navy900,display:"grid",placeItems:"center"}}>
+                {t.cover_image_url ? <img src={t.cover_image_url} alt="" loading="lazy" style={{width:"100%",height:"100%",objectFit:"cover"}} />
+                  : <Icon n="image" size="28px" />}
+              </div>
+              <div style={{fontSize:12,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",width:"100%"}}>{t.name}</div>
+              {current && <span style={{fontSize:10,fontWeight:700,color:N.green}}><Icon n="check" /> Current</span>}
+            </button>
+          );
+        })}
+      </div>
+      {!templates.length && <p style={{fontSize:12,color:N.textDim,marginTop:12}}>No saved templates yet — upload an image, then use "Save as Template" to reuse it on other events.</p>}
+      {currentImage && !currentUrl && <p style={{fontSize:11,color:N.textDim,marginTop:12}}>The current design isn't saved as a template. Save it first if you may want it back.</p>}
+      {busy && <div style={{fontSize:12,color:N.textDim,marginTop:12}} role="status"><Icon n="loader" /> Loading template…</div>}
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}>
+        <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
+      </div>
+    </DetailModal>
+  );
+}
+
 // Turns the public, view-only report link (#/view/<id>: guests, calls + comments, card
 // history; phones masked) on/off. Uses set_view_code() so Tele Sales etc. can share too.
 function ShareViewModal({ eventRow, showToast, onClose, reloadEvents }) {
@@ -4031,6 +4081,7 @@ export default function App() {
 
   /* ── Saved templates ── */
   const [savedTemplates,    setSavedTemplates]    = useState([]);
+  const [pickingTemplate,   setPickingTemplate]   = useState(false);   // "Change template" pop-up
   const [showSaveTemplate,  setShowSaveTemplate]  = useState(false);
   const [templateSaveName,  setTemplateSaveName]  = useState("");
 
@@ -4543,8 +4594,9 @@ export default function App() {
 
   // Loads a saved template's background image + element layout onto the canvas.
   // If the template has no image, only its layout is applied (over the current bg).
-  const applySavedTemplate = async (tpl) => {
+  const applySavedTemplate = async (tpl, { keepLayout = false } = {}) => {
     if (!tpl.cover_image_url) {
+      if (keepLayout) return;
       if (tpl.elements_layout?.length) {
         setElements(tpl.elements_layout);
         setLayoutRestored(true);
@@ -4565,7 +4617,8 @@ export default function App() {
           img.onload = () => {
             setBgImage(dataUrl);
             setBgSize({ w:img.naturalWidth, h:img.naturalHeight });
-            if (Array.isArray(tpl.elements_layout) && tpl.elements_layout.length) {
+            if (keepLayout) pendingDbLayout.current = elements;
+            else if (Array.isArray(tpl.elements_layout) && tpl.elements_layout.length) {
               pendingDbLayout.current = tpl.elements_layout;
             }
             setTemplateKey(fp);
@@ -4594,7 +4647,7 @@ export default function App() {
   // File-input handler for manually picking a background image: loads it onto the
   // canvas (which triggers the layout-restore effect via templateKey), and — if no
   // template is attached to the current event yet — also uploads it to Storage
-  const onBgUpload = (e) => {
+  const onBgUpload = (e, { keepLayout = false } = {}) => {
     const f = e.target.files[0]; if (!f) return;
     const reader = new FileReader();
     reader.onload = async (ev) => {
@@ -4604,9 +4657,10 @@ export default function App() {
       probe.onload = async () => {
         setBgImage(dataUrl);
         setBgSize({ w:probe.naturalWidth, h:probe.naturalHeight });
+        if (keepLayout) pendingDbLayout.current = elements;
         setTemplateKey(fp); // triggers the layout-restore effect
         showToast(`Template loaded — ${probe.naturalWidth}×${probe.naturalHeight}px`, "success");
-        if (supabase && !coverUrl) {
+        if (supabase) {   // always store the new image so the event points at it
           const url = await uploadTemplateToStorage(dataUrl);
           if (url) { setCoverUrl(url); showToast("Template saved to cloud storage", "success"); }
         }
@@ -4614,6 +4668,25 @@ export default function App() {
       probe.src = dataUrl;
     };
     reader.readAsDataURL(f);
+  };
+
+  // "Change template" pop-up → swap the card design for the open event. Guests, SMS and
+  // statuses stay; cards already uploaded/sent used the old design, so warn first.
+  const changeTemplate = async (choice, { keepLayout }) => {
+    const made = records.filter(r => !r.sample && (r.uploadStatus === "uploaded" || r.waStatus === WA.sent)).length;
+    if (made) {
+      const ok = await askDialog({
+        title: "Change the card template?",
+        body: `${made} card${made === 1 ? " was" : "s were"} already uploaded or sent with the current design. Guests who already got a card keep the old one; upload the cards again before sending more so new cards use the new design.`,
+        actions: [{ value: "yes", label: "Change template", kind: "primary" }],
+      });
+      if (ok !== "yes") return false;
+    }
+    setPickingTemplate(false);
+    if (choice.file) { onBgUpload({ target: { files: [choice.file] } }, { keepLayout }); }
+    else await applySavedTemplate(choice.tpl, { keepLayout });
+    if (savedEventId) showToast("New template on the canvas — press Save Event to keep it for this event", "info");
+    return true;
   };
 
   // Clears the canvas entirely: no background image, default element layout
@@ -6115,6 +6188,11 @@ export default function App() {
                     {layoutRestored && <><br/><span className="nk-chip-ok"><Icon n="repeat" /> Layout restored</span></>}
                   </div>
                 )}
+                {(bgImage || savedTemplates.length > 0) && (
+                  <button className="nk-btn nk-btn-primary nk-btn-full" style={{fontSize:12,marginBottom:6}} onClick={() => setPickingTemplate(true)}>
+                    <Icon n="repeat" /> {bgImage ? "Change template" : "Choose a saved template"}
+                  </button>
+                )}
                 {bgImage && (
                   <div style={{display:"flex",gap:6}}>
                     <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11}} onClick={resetTemplate}><Icon n="x" /> Remove</button>
@@ -6370,6 +6448,8 @@ export default function App() {
                 onOpenEvent={setOverviewId} onOpenLead={openLead} onNewEvent={newEventForCustomer} />
             )}
 
+            {pickingTemplate && <TemplatePicker templates={savedTemplates} currentUrl={coverUrl} currentImage={bgImage} hasDesign={!!bgImage}
+              onClose={() => setPickingTemplate(false)} onPick={changeTemplate} />}
             {shareView && openEventRow && <ShareViewModal eventRow={openEventRow} showToast={showToast} onClose={() => setShareView(false)} reloadEvents={loadSavedEvents} />}
 
             {/* ─── SETTINGS / SCANNER / CALLS ─── */}
