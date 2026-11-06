@@ -1,0 +1,44 @@
+# Checks every push and pull request: lint, unit tests, Edge Function tests and a
+# production build. Deployment is done by Heroku (GitHub integration, branch main) —
+# in Heroku turn on "Wait for CI to pass before deploy" so a red build never ships.
+# The build here uses placeholder Supabase values; Heroku builds with its own config vars.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: studio/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run test:functions
+      - name: Build
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder
+          VITE_SITE_URL: https://example.herokuapp.com/
+      - name: Server starts and serves the build
+        working-directory: .
+        run: |
+          PORT=3010 node server.js & sleep 2
+          curl -fsS http://localhost:3010/healthz
+          curl -fsS http://localhost:3010/ | grep -q '<div id="root">'

@@ -215,37 +215,6 @@ npm run build
 
 The compiled output goes to `dist/`. Serve it with any static host (Netlify, Vercel, Nginx, etc.).
 
-### Deploy to GitHub Pages
-
-[`.github/workflows/deploy-pages.yml`](../.github/workflows/deploy-pages.yml) lints, tests, builds and publishes the app on every push to `main` (or by hand: **Actions → Deploy to GitHub Pages → Run workflow**). The site is served at `https://<user>.github.io/<repo>/`.
-
-One-time setup:
-
-1. **Plan:** GitHub Pages on a *private* repository needs GitHub Pro, Team or Enterprise. On the free plan the repository must be public.
-2. **Settings → Pages → Build and deployment → Source:** choose **GitHub Actions**.
-3. **Settings → Secrets and variables → Actions → Variables** (variables, not secrets — these values are public and end up in the browser bundle):
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_ANON_KEY`
-   - `VITE_SMS_SENDER_ID` (optional, defaults to `NIKADI`)
-   - `PAGES_BASE_PATH` (optional — set to `/` only if you use a custom domain)
-   - `SITE_URL` (optional — the full address, e.g. `https://studio.nikadi.co.tz/`, only for a custom domain; used by the link-preview tags)
-
-   Never add the SMS/WhatsApp provider tokens here; production sends go through the Edge Functions (Step 8).
-4. **Supabase → Authentication → URL Configuration:** set the Site URL to the Pages address (e.g. `https://<user>.github.io/<repo>/`) and add it to Redirect URLs, or Google sign-in will return to the wrong page.
-5. If you set the `ALLOWED_ORIGINS` Edge Function secret, add `https://<user>.github.io` to it (an origin has no path).
-
-**Link previews:** `index.html` has title, description, Open Graph and Twitter tags; the preview image is [`public/og-image.jpg`](public/og-image.jpg) (1200×630, with a QR code to www.nikadi.co.tz). Crawlers need absolute URLs, so `index.html` uses a `%SITE_URL%` placeholder that `vite.config.js` fills from `VITE_SITE_URL` (set by the workflow). After deploying, check a preview with the [Facebook Sharing Debugger](https://developers.facebook.com/tools/debug/) — it also refreshes cached previews.
-
-To preview the production build locally:
-
-```bash
-npm run preview
-```
-
-> In a production build, SMS and WhatsApp calls are routed through the `send-sms` / `send-wa` Supabase Edge Functions. Make sure you have completed Step 8 before deploying, and that `npm run build` was not run with provider tokens in `.env.local`.
-
----
-
 ### Deploy to Heroku (from the GitHub repository)
 
 The repository root holds what Heroku needs: `package.json` (builds `studio/` in `heroku-postbuild`), `Procfile` (`web: node server.js`), `server.js` (a dependency-free static server for `studio/dist` with gzip, caching, HTTPS redirect and single-page-app fallback) and `app.json`.
@@ -271,7 +240,7 @@ The repository root holds what Heroku needs: `package.json` (builds `studio/` in
 
 Notes
 - After changing any `VITE_*` config var, redeploy (Deploy → **Deploy Branch**) — the values are fixed at build time.
-- The GitHub Pages workflow still runs on every push to `main`. If Heroku replaces Pages, disable it in GitHub → Settings → Pages (or delete `.github/workflows/deploy-pages.yml`).
+- GitHub Pages is no longer used. `.github/workflows/ci.yml` only checks the code (lint, tests, build); in Heroku tick **Wait for CI to pass before deploy**. If Pages was turned on earlier, set GitHub → Settings → Pages → Source to **None** (or unpublish) so the old site stops serving.
 - Run the same build locally with `npm run build && npm start` from the repository root (serves on port 3000).
 - Link previews use `VITE_SITE_URL`; after the first deploy refresh them in Facebook's Sharing Debugger.
 
