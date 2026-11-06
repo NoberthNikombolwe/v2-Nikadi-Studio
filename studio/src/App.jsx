@@ -4884,11 +4884,37 @@ export default function App() {
       const ws   = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
       const { rows, columns } = normaliseSheetRows(data);
-      const norm = rows.map(r => ({ waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle", ...r }));
+      let norm = rows.map(r => ({ waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle", ...r }));
+      // An event that already has guests: merge the sheet onto them instead of replacing
+      // them, so send statuses, calls and check-ins (Reports, Calls, Scanner, the view-only
+      // report) are not reset. Each row is matched to its saved card (phone + name, phone,
+      // name); guests missing from the sheet but with call/check-in history stay on the list.
+      let kept = 0, matched = 0;
+      if (supabase && savedEventId) {
+        const { data: saved, error } = await supabase.from("event_cards")
+          .select("id,name,card_type,phone,wa_status,sms_status,call_status,call_comment,scan_count").eq("event_id", savedEventId);
+        if (error) showToast("Could not compare with the saved guest list: " + error.message, "warn");
+        else if (saved?.length) {
+          const plan = planCardSave(norm.map((r, i) => ({ r, i })), saved);
+          const byIdx = new Map(plan.keep.map(k => [k.i, k.old]));
+          matched = byIdx.size;
+          norm = norm.map((r, i) => {
+            const o = byIdx.get(i); if (!o) return r;
+            return { ...r, dbId: o.id, waStatus: o.wa_status || r.waStatus, smsStatus: o.sms_status || r.smsStatus };
+          });
+          kept = plan.retained.length;
+          norm = [...norm, ...plan.retained.map(c => ({
+            dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
+            waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
+          }))];
+        }
+      }
       // Ordered column list for the SMS variable chips: standard columns first, then any extras
       setCsvColumns(columns);
       setRecords(norm); setActiveIdx(0);
-      showToast(`Loaded ${norm.length} records`, "success");
+      showToast(matched || kept
+        ? `Loaded ${rows.length} records — ${matched} matched saved guests (statuses, calls and check-ins kept)${kept ? `, ${kept} kept for their call/check-in history` : ""}. Press Save Cards to store the changes.`
+        : `Loaded ${norm.length} records`, "success");
     };
     r.readAsArrayBuffer(f);
   };
