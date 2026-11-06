@@ -18,12 +18,14 @@ A web application for designing, managing, and distributing personalised event i
 10. [Step 6 — Run in Development](#step-6--run-in-development)
 11. [Step 7 — Build for Production](#step-7--build-for-production)
 12. [Step 8 — Deploy the Messaging Edge Functions (Production Only)](#step-8--deploy-the-messaging-edge-functions-production-only)
-13. [Features](#features)
-14. [SMS Integration](#sms-integration)
-15. [WhatsApp Integration](#whatsapp-integration)
-16. [Card Design System](#card-design-system)
-17. [Database Tables](#database-tables)
-18. [Known Limitations](#known-limitations)
+13. [Step 9 — Turn On Scheduled Sends](#step-9--turn-on-scheduled-sends)
+14. [Features](#features)
+15. [SMS Integration](#sms-integration)
+16. [WhatsApp Integration](#whatsapp-integration)
+17. [Scheduled Sends](#scheduled-sends)
+18. [Card Design System](#card-design-system)
+19. [Database Tables](#database-tables)
+20. [Known Limitations](#known-limitations)
 
 ---
 
@@ -303,6 +305,58 @@ npm run test:functions   # needs Node 22.18+; mocks Deno and fetch, no Supabase 
 
 ---
 
+## Step 9 — Turn On Scheduled Sends
+
+Scheduled SMS / WhatsApp sends (see [Scheduled Sends](#scheduled-sends)) are sent by the Supabase server, not the browser: every minute, while a send is due, the `pg_cron` extension calls the `run-schedules` Edge Function through `pg_net`. This is a one-time setup. Run the commands from the `studio` folder and use your project ref (`cixtbtzxlnohxgeewtqc` for the live project).
+
+### 9.1 — Run the schema
+
+Run the latest `supabase-schema.sql` (Step 5). It creates the schedule tables and functions, switches on `pg_cron` and `pg_net` when your plan allows it, and registers the job `nikadi-run-schedules`. If you see the notice *"Scheduled sends: could not set up pg_cron / pg_net"*, turn both on under **Database → Extensions** and run the file again.
+
+### 9.2 — Create the shared secret
+
+The job proves itself to the function with a long random secret. Make one, for example in PowerShell:
+
+```powershell
+[guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+```
+
+Give the same value to the function and to the database:
+
+```bash
+npx supabase secrets set CRON_SECRET=<the-secret> --project-ref <your-project-ref>
+```
+
+Then, in the Supabase **SQL Editor** (run it once and don't save it in a file, because it holds the secret):
+
+```sql
+select vault.create_secret('https://<your-project-ref>.supabase.co', 'nikadi_project_url');
+select vault.create_secret('<the-secret>', 'nikadi_cron_secret');
+```
+
+To change the secret later, run `select vault.update_secret((select id from vault.secrets where name = 'nikadi_cron_secret'), '<new-secret>');` and set `CRON_SECRET` to the same value.
+
+### 9.3 — Deploy the function
+
+```bash
+npx supabase functions deploy run-schedules --project-ref <your-project-ref> --no-verify-jwt
+```
+
+It uses the same `SMS_BEARER_TOKEN` (and optional `WA_BEARER_TOKEN`) as Step 8. `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided by Supabase automatically. `--no-verify-jwt` is needed because the caller is the database, not a signed-in user. The function checks `x-cron-secret` instead and refuses everything else.
+
+### 9.4 — Check it works
+
+Schedule a one-time SMS to your own number a few minutes ahead (SMS tab → **Scheduled SMS → New schedule**). After the time has passed:
+
+```sql
+select status, return_message, start_time from cron.job_run_details order by start_time desc limit 5;
+select status_code, content from net._http_response order by created desc limit 5;
+```
+
+`status_code` 200 with `"state":"done"` means it was sent. A 401 means the two secrets differ, and a 404 means the function isn't deployed. The job only calls the function while a send is due, so these tables stay quiet the rest of the time.
+
+---
+
 ## Features
 
 ### Events
@@ -428,7 +482,30 @@ Progress for uploads, WhatsApp sends and SMS sends appears in a floating log pan
 - If several contacts share a phone number, that window lists them and lets you choose **Send without duplicates** (each number once) or **Send duplicates too** (every record).
 - Sending to a contact that was already sent asks first.
 - A card is never rendered without its QR code: if the QR image or template can't be loaded the export fails with a clear message instead of producing an incomplete card.
-- Uploaded card URLs are not persisted — after reloading or reopening an event, upload the cards again before sending.
+- Uploaded card URLs are saved with the guest (`event_cards.card_url`), so they survive a reload. They are cleared when the card template changes or when Settings → Storage clears the images, and the cards must then be uploaded again.
+
+---
+
+## Scheduled Sends
+
+The SMS and WhatsApp tabs each have a **Scheduled** panel. Use it to plan sends ahead:
+
+- **Pick dates**: one or more exact dates and times.
+- **Repeat weekly**: choose days (e.g. Mon, Wed, Fri) and a time, repeat every 1–8 weeks, and stop after a number of sends (e.g. 30) or on a date (the event date by default). "3 a week, 30 times" is Mon/Wed/Fri with 30 sends; "3 times, every two weeks" is one day with *every 2 weeks* and 3 sends.
+- **Who gets it**:
+  - everyone
+  - not sent yet (main SMS / WhatsApp card only)
+  - guests who said Yes on calls
+  - everyone except No
+
+  Each send uses the guest list as it is at that moment, so guests added later are included.
+- **What**:
+  - SMS: the main message, an extra message or custom text, with `{name}`, `{cardType}` and `{phone}`.
+  - WhatsApp: a template. A template with an image header sends each guest's uploaded card, and guests without one are skipped. A text-only template sends a plain reminder.
+
+The form refuses dates and times that have already passed (the server checks again). It allows at most 100 sends per schedule, and it previews every send time, the number of guests and the SMS cost. The **Edit**, **Pause**, **Resume** and **Cancel** controls are in the schedule's window, next to the result of every send. Sends that came due while a schedule was paused, or more than 2 hours late, are skipped instead of sent late. Main-SMS and card schedules update the guests' statuses like **Send All**. Every send is also written to the event History.
+
+The schedules live in `message_schedules` / `message_schedule_runs`. The browser works out every send time and saves them through `save_message_schedule()`. The `run-schedules` Edge Function sends what is due: SMS in batches of 100, WhatsApp one at a time, about 25–30 per minute. Larger WhatsApp sends continue over the next minutes. Setup: [Step 9](#step-9--turn-on-scheduled-sends).
 
 ---
 
@@ -505,6 +582,7 @@ Append-only history (signed-in users can add and read rows, never edit or delete
 | `phone` | TEXT | Phone number |
 | `wa_status` | TEXT | `idle`, `testing`, `yes`, `no` |
 | `sms_status` | TEXT | `pending`, `sent`, `delivered`, `failed` |
+| `card_url` | TEXT | Public URL of the guest's uploaded card image (`wa-cards` bucket); used by WhatsApp sends, including scheduled ones |
 | `sent_at` | TIMESTAMPTZ | When the card was sent |
 
 ### `saved_templates`
@@ -523,7 +601,7 @@ Append-only history (signed-in users can add and read rows, never edit or delete
 - **Single-file architecture** — the UI and state live in `src/App.jsx` (pure logic is being moved to `src/lib/`). This works for a focused internal tool but will need splitting if the codebase grows.
 - **No per-user data ownership** — authentication is Google sign-in via Supabase and RLS requires a signed-in user, but every signed-in user can see every event. Restrict who can sign in (Step 5) until ownership is added.
 - **QR codes are not signed** — a card's QR encodes only `Name=…;TypeCard=…`, so it can be reproduced by anyone and must not be treated as proof of entitlement. QR images are generated by `api.qrserver.com`, which therefore receives each guest's name and card type.
-- **Uploaded card URLs aren't persisted** — only name, card type, phone and send statuses are saved to `event_cards`.
+- **Scheduled WhatsApp sends are paced** — about 25–30 cards a minute (1 s between messages, as in the app), so a 500-guest send takes around 20 minutes. Late delivery reports aren't polled for scheduled sends.
 - **Delivery status is best-effort** — SMS `Delivered` comes from the API's synchronous response; for asynchronous delivery reports you would need a webhook. WhatsApp rejections are polled for about 40 s after sending.
 - **Card images are kept forever** — files in `wa-cards` are never cleaned up; they are public by URL so the WhatsApp provider can fetch them.
 - **No rate limiting on the Edge Functions** — they require sign-in and an allowlisted endpoint, but a signed-in user can still send as many messages as the provider account allows.

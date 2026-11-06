@@ -15,7 +15,7 @@ npm run dev             # Vite dev server on :5173 (with /sms-proxy and /wa-prox
 npm run build           # production build to dist/
 npm run lint            # eslint .
 npm test                # unit tests for src/lib (node:test, no extra deps)
-npm run test:functions  # Edge Function proxy tests (needs Node ≥ 22.18; mocks Deno + fetch)
+npm run test:functions  # Edge Function tests: proxy + run-schedules (needs Node ≥ 22.18; mocks Deno + fetch)
 npm run preview         # serve the production build
 ```
 
@@ -28,7 +28,7 @@ Before finishing a change run `npm run lint`, `npm test`, `npm run test:function
 ## Architecture
 
 - **Single-file UI.** The UI and state are in [src/App.jsx](src/App.jsx) (~2.8k lines): CSS-in-JS string, `<CardCanvas>`, `exportCard()`, `<EventModal>`, row components, and the default-exported `<App>` which owns all state and renders every tab. The header comment lists the file's sections top to bottom. Don't split it up unless asked.
-- **Pure logic lives in `src/lib/` and is unit-tested:** [phone.js](src/lib/phone.js) (`normalisePhone`, `isValidPhone`), [recipients.js](src/lib/recipients.js) (`selectRecipients`, `describeSkipped` — who a bulk send goes to), [messages.js](src/lib/messages.js) (`fillTemplate`, `normaliseSheetRows`, per-message SMS status helpers), [supabase.js](src/lib/supabase.js) (client; exports `null` when env vars are missing, so guard with `if (!supabase)`). New non-UI logic belongs here with a test in `lib.test.js`.
+- **Pure logic lives in `src/lib/` and is unit-tested:** [phone.js](src/lib/phone.js) (`normalisePhone`, `isValidPhone`), [recipients.js](src/lib/recipients.js) (`selectRecipients`, `describeSkipped` — who a bulk send goes to), [messages.js](src/lib/messages.js) (`fillTemplate`, `normaliseSheetRows`, per-message SMS status helpers), [supabase.js](src/lib/supabase.js) (client; exports `null` when env vars are missing, so guard with `if (!supabase)`). New non-UI logic belongs here with a test in `lib.test.js`. **Code shared with the Edge Functions** lives in [supabase/functions/_shared/messaging.js](supabase/functions/_shared/messaging.js) (plain JS, no browser/Deno APIs): `normalisePhone` / `isValidPhone` / `fillTemplate`, the provider-result readers (`smsStatusFromGroup`, `matchSmsResults`, `classifyWaSend`) and `scheduleTargets`; `phone.js`, `messages.js` and `schedule.js` re-export it — change it there, never copy it.
 - Other files: [src/LoginPage.jsx](src/LoginPage.jsx) (Google sign-in gate shown until a session resolves), [src/main.jsx](src/main.jsx).
 - **Tabs** (`tab` state, rendered in `<nav className="nk-tabs">`): `events`, `leads`, `customers`, `design`, `vcard`, `sms`, `whatsapp`, `batch` ("Batch & Send"), `reports`, `history`, `finance`, `guide`. Nav order/groups come from `NAV_GROUPS`. The Guide (`<GuideTab>`, `<WelcomeModal>` on first sign-in, `nikadi_guide_seen` in localStorage) renders steps and progress from [src/lib/guide.js](src/lib/guide.js) — update its `GUIDE_STEPS` when a workflow changes. Each tab body is a `{tab === "..." && (...)}` block in `<App>`'s JSX. `selectEvent(ev, targetTab = "design")` loads an event and then switches to `targetTab` (pass `"reports"` for the Report shortcut, `null` to stay put); clicking an Events-table row opens it in Design.
 - **Records** — the contact list is the `records` array in `<App>` state: `{ dbId?, name, cardType, phone, waStatus, smsStatus, cardUrl, uploadStatus, sample?, ...extra spreadsheet columns }`. `dbId` is the row's `event_cards.id` (set by `saveCards`/`selectEvent`); `autoSaveCard(dbId, wa, sms)` uses it to persist a single card's status right after each send. Status values come from the `WA` / `SMS` constants near the top of the file. `uploadStatus` is `"idle" | "uploading" | "uploaded" | "failed"`. `sample: true` marks placeholder rows from `sampleRecords()` (no phone; never saved).
@@ -41,7 +41,8 @@ Before finishing a change run `npm run lint`, `npm test`, `npm run test:function
 | Thing | Name | Used for |
 |---|---|---|
 | Table | `events` | event details, `elements_layout` JSON, `sms_message`/`sms_draft` (main SMS), `sms_messages` JSON (extra SMS messages) |
-| Table | `event_cards` | one row per contact (`name, card_type, phone, wa_status, sms_status`) |
+| Table | `event_cards` | one row per contact (`name, card_type, phone, wa_status, sms_status`, `card_url` = uploaded card image) |
+| Table | `message_schedules` / `message_schedule_runs` / `message_run_targets` | scheduled SMS/WhatsApp sends: the schedule, one row per send time (status, counts), and the recipient list fixed when a send starts (server only) |
 | Table | `saved_templates` | reusable background + layout |
 | Table | `leads` | enquiries: name, phone, event type/date, `package_price` (TZS), region, venue, description, `status` (new → contacted → qualified / lost), `next_followup_date`, links to the `customer_id` / `event_id` it became |
 | Table | `lead_followups` | contact notes per lead (method, note, next follow-up date, `created_by`) |
@@ -71,6 +72,15 @@ Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) 
 - **Event teams**: `event_assignments` (event, email, task). Non-"sees all events" roles (flag `app_roles.sees_all_events`, toggled in Settings → Roles & permissions; default Superuser, Admin, Finance Officer) only see events they are assigned to or created (`events.created_by`) — enforced by `can_see_event()` in every event-scoped policy and in `scan_card()`. The creator is auto-assigned as Owner (trigger). `<TeamPanel>` in `<EventOverview>` adds/removes people (picker uses the `assignable_users()` RPC); `<TeamAvatars>` shows the team in the Events table.
 - **View-only share link**: `#/view/<eventId>` → `<PublicViewPage>` ([src/PublicViewPage.jsx](src/PublicViewPage.jsx), routed in main.jsx, no login). Code in `events.view_code`, set via the `set_view_code()` RPC (`<ShareViewModal>` on the Calls and History tabs). Data only through `public_view_event` / `public_view_guests` / `public_view_history` (phones masked by `mask_phone()`); read-only.
 - **Guest comments** (`event_cards.call_comment`) can be added from the Calls tab and the Scanner guest list (`<GuestList onComment>`); both log to history (channel `calls`).
+- **Scheduled sends** (SQL §9, [src/lib/schedule.js](src/lib/schedule.js), [_shared/scheduler.ts](supabase/functions/_shared/scheduler.ts)):
+  - **In the app:** `<ScheduledSends channel>` sits in the left column of the SMS and WhatsApp tabs. It uses `useSchedules` (realtime) and opens `<ScheduleModal>` (new / edit) and `<ScheduleDetail>` (runs, pause / resume / cancel, Super Admin delete).
+  - **Send times are fixed when saving:** the browser works out every time in local time (`buildRunTimes` / `validateSchedule`: no past times, at most 100) and saves the list with the `save_message_schedule()` RPC. That RPC re-checks role, event and that no time is in the past; editing replaces only the pending runs. Users never write these tables directly: pause, resume and cancel go through `set_message_schedule_status()`.
+  - **Sending:** pg_cron job `nikadi-run-schedules` posts to the `run-schedules` Edge Function every minute while a run is due. The project URL and `x-cron-secret` come from Vault, and the function checks `CRON_SECRET`.
+    - The function works with the service role (`claim_schedule_run` lease → `save_run_progress` → `finish_schedule_run`) in about 35 s slices: SMS go out 100 per `/text/multi`, WhatsApp one by one with a 1 s gap.
+    - It writes `event_logs` itself, with `user_email` = the schedule's creator.
+    - Only main-SMS (`message_key = 'main'`) and card-image (`wa_image`) schedules change guest statuses (`set_card_send_statuses`).
+  - **Late or paused runs:** a run more than 2 h late is skipped, not sent, and so are runs that came due while the schedule was paused.
+  - **Placeholders:** scheduled SMS can only use `{name}` / `{cardType}` / `{phone}`, because extra spreadsheet columns aren't stored.
 - **Calls**: `<CallsTab>` updates `event_cards.call_status` (`picked|busy|yes|no`, flow in [src/lib/calls.js](src/lib/calls.js)) and logs each change to history (channel `calls`).
 
 ### localStorage keys
@@ -106,7 +116,13 @@ Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) 
 ## Gotchas
 
 - **Stale closures in bulk flows.** `async` handlers see `records` as it was when they started. `saveCards(eventId, recs)` therefore takes the list to save; bulk-send flows pass `recordsRef.current` (kept current by an effect) or a locally computed next list. Don't call `saveCards(id)` after a long async loop and expect fresh statuses.
-- **Upload state is in-memory only.** `saveCards()` writes `name/card_type/phone/wa_status/sms_status` and nothing else; `cardUrl` and `uploadStatus` are lost on reload or when reopening an event. A card must be uploaded again before it can be sent on WhatsApp (`sendWaSingle` bails with "Upload card first").
+- **Uploaded cards are saved as `event_cards.card_url`.**
+  - **Saving:** `uploadCardSingle` saves it via `saveCardUrl` once the row has a `dbId`, and `saveCards` stores it too.
+    - `saveCards` writes the column only when the saved rows have it, so it can't fail on a database without the schedules SQL.
+    - A row matched from a new sheet keeps the old image only if its name and card type are unchanged (`sameCardFace`).
+  - **Loading:** `selectEvent` and the merge on spreadsheet upload restore `cardUrl` / `uploadStatus` with `cardFromRow`.
+  - **Clearing:** `changeTemplate` and Settings → Storage → Clear set it back to null in the database too.
+  - **No URL:** without one, a card must be uploaded again before it can be sent on WhatsApp (`sendWaSingle` bails with "Upload card first").
 - `saveCards()` inserts the new rows first and only then deletes the pre-existing ones, so a failed insert can't wipe an event's contacts. It skips `sample` rows.
 - `selectEvent()` is guarded by `selectSeq` — a slower, superseded load bails out instead of overwriting the newer event. It resets `records` to `sampleRecords()` when the event has no saved cards (never carry another event's contacts over).
 - Startup data effects depend on `userId` (not the `user` object, which changes identity on every token refresh and would reload the open event over unsaved edits).
@@ -117,7 +133,7 @@ Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) 
 
 - Public config lives in `.env.local` (git-ignored via `*.local`): `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_SMS_SENDER_ID`. See [.env.example](.env.example).
 - Provider tokens (`VITE_SMS_BEARER_TOKEN`, `VITE_WA_BEARER_TOKEN`) go **only** in `.env.development.local`, which Vite loads for `npm run dev` and never for `npm run build`. Anything prefixed `VITE_` that is present at build time is baked into the public bundle — never put a secret in `.env.local`/`.env.production`. After a build, `grep` `dist/` for the token prefix to be sure.
-- In production the provider tokens are Supabase secrets (`SMS_BEARER_TOKEN`, optional `WA_BEARER_TOKEN`, optional `ALLOWED_ORIGINS`) read by the Edge Functions.
+- In production the provider tokens are Supabase secrets (`SMS_BEARER_TOKEN`, optional `WA_BEARER_TOKEN`, optional `ALLOWED_ORIGINS`) read by the Edge Functions. `run-schedules` also needs `CRON_SECRET`, equal to the Vault secret `nikadi_cron_secret` (README Step 9). Never put either value in a committed file.
 - Never commit real tokens or paste them into `.claude/settings.local.json` allow-rules (that file is now git-ignored, but history still contains an old token that must be treated as compromised and rotated).
 
 ## Git

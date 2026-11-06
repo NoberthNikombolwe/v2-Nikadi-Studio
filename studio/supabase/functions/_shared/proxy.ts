@@ -15,7 +15,7 @@
 // Deploy with --no-verify-jwt (the project uses non-JWT publishable keys, which the
 // gateway's legacy JWT check rejects); the check in this file replaces it.
 
-const UPSTREAM = "https://messaging-service.co.tz";
+export const UPSTREAM = "https://messaging-service.co.tz";
 const MAX_BODY_BYTES = 1_000_000;   // a bulk SMS batch is well under this
 const UPSTREAM_TIMEOUT_MS = 25_000;
 
