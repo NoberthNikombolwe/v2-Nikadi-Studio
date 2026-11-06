@@ -175,3 +175,12 @@ test("role check: fails closed when the permission lookup errors", async () => {
   const res = await guarded(req("/api/sms/v2/text/single", { method: "POST", body: "{}" }));
   assert.equal(res.status, 403);
 });
+
+test("provider token is cleaned of a Bearer prefix, quotes and spaces", async () => {
+  const { cleanToken } = await import("./proxy.ts");
+  assert.equal(cleanToken("abc123"), "abc123");
+  assert.equal(cleanToken("Bearer abc123"), "abc123");
+  assert.equal(cleanToken('  "Bearer abc123"\n'), "abc123");
+  assert.equal(cleanToken("'abc123'"), "abc123");
+  assert.equal(cleanToken(undefined), "");
+});

@@ -88,6 +88,11 @@ const roleAllows = async (req: Request, module: string, edit: boolean): Promise<
   }
 };
 
+// Secrets are often pasted as "Bearer abc", with quotes or a trailing newline; the provider
+// then rejects "Bearer Bearer abc" with 401. Keep only the token itself.
+export const cleanToken = (v?: string | null): string =>
+  String(v ?? "").trim().replace(/^["']+|["']+$/g, "").trim().replace(/^bearer\s+/i, "").trim();
+
 export const createProxy = ({ name, tokenEnv, routes, module }: ProxyOptions) =>
   async (req: Request): Promise<Response> => {
     if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders(req) });
@@ -106,7 +111,7 @@ export const createProxy = ({ name, tokenEnv, routes, module }: ProxyOptions) =>
       return json(req, 403, { error: "Your role is not allowed to do this" });
     }
 
-    const token = tokenEnv.map((k) => Deno.env.get(k)).find(Boolean);
+    const token = tokenEnv.map((k) => cleanToken(Deno.env.get(k))).find(Boolean);
     if (!token) return json(req, 500, { error: "Server is not configured" });
 
     let body: string | undefined;
