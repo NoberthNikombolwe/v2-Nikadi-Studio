@@ -666,3 +666,162 @@ test("schedule helpers: dates, edit form, pattern, cost, audiences", () => {
   assert.equal(nextRun([{ status: "done", run_at: "2026-11-01" }, { status: "pending", run_at: "2026-11-20" }, { status: "pending", run_at: "2026-11-10" }]).run_at, "2026-11-10");
   assert.equal(nextRun([]), null);
 });
+
+/* ── Schedules page + feedback ── */
+import { filterSchedules, summariseSchedules } from "./schedule.js";
+import { validateFeedback, deviceSummary, feedbackToRow, filterFeedback, summariseFeedback, feedbackExportRows } from "./feedback.js";
+
+test("filterSchedules and summariseSchedules for the Schedules page", () => {
+  const list = [
+    { id: "a", channel: "sms", status: "active", title: "Reminder", event_id: "e1", event_name: "Harusi ya Asha", body: "Karibu {name}" },
+    { id: "b", channel: "whatsapp", status: "paused", title: "Cards", event_id: "e2", event_name: "Send-off", wa_template: "Mwaliko" },
+    { id: "c", channel: "sms", status: "done", title: "Thank you", event_id: "e1", event_name: "Harusi ya Asha" },
+    { id: "d", channel: "sms", status: "cancelled", title: "Old", event_id: "e2", event_name: "Send-off" },
+  ];
+  assert.deepEqual(filterSchedules(list).map(s => s.id), ["a", "b"]);                       // default: active + paused
+  assert.deepEqual(filterSchedules(list, { status: "all", channel: "sms" }).map(s => s.id), ["a", "c", "d"]);
+  assert.deepEqual(filterSchedules(list, { status: "all", eventId: "e2" }).map(s => s.id), ["b", "d"]);
+  assert.deepEqual(filterSchedules(list, { status: "all", q: "mwaliko" }).map(s => s.id), ["b"]);
+  assert.deepEqual(filterSchedules(list, { status: "all", q: "asha" }).map(s => s.id), ["a", "c"]);
+  const now = new Date(2026, 10, 6, 12, 0);
+  const waiting = [
+    { schedule_id: "a", run_at: new Date(2026, 10, 6, 18, 0).toISOString(), status: "pending" },
+    { schedule_id: "a", run_at: new Date(2026, 10, 9, 9, 0).toISOString(), status: "pending" },
+    { schedule_id: "a", run_at: new Date(2026, 11, 1, 9, 0).toISOString(), status: "pending" },
+    { schedule_id: "b", run_at: new Date(2026, 10, 6, 18, 0).toISOString(), status: "pending" },   // paused: not counted
+  ];
+  assert.deepEqual(summariseSchedules(list, waiting, now), { active: 1, paused: 1, done: 1, cancelled: 1, dueToday: 1, dueWeek: 2 });
+});
+
+test("validateFeedback, feedbackToRow and deviceSummary", () => {
+  assert.deepEqual(validateFeedback({ kind: "idea", rating: 0, message: "Add dark mode" }), {});
+  assert.deepEqual(validateFeedback({ kind: "problem", rating: 5, message: "Camera" }), {});
+  assert.equal(validateFeedback({ kind: "rant", message: "hello" }).kind, "Choose what kind of feedback this is");
+  assert.equal(validateFeedback({ kind: "idea", message: " a " }).message, "Tell us a little more (at least 3 characters)");
+  assert.match(validateFeedback({ kind: "idea", message: "x".repeat(4001) }).message, /under 4,000/);
+  assert.equal(validateFeedback({ kind: "idea", rating: 6, message: "hello" }).rating, "Rate from 1 to 5 stars, or leave it empty");
+  assert.deepEqual(feedbackToRow({ kind: "problem", rating: 0, message: "  Camera stuck  " }, { page: "Scanner", eventId: "e1", device: "Chrome · Android" }),
+    { kind: "problem", rating: null, message: "Camera stuck", page: "Scanner", event_id: "e1", device: "Chrome · Android" });
+  assert.equal(deviceSummary({ userAgent: "Mozilla/5.0 (Linux; Android 14; SM-A156E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36", width: 412, height: 915 }), "Chrome · Android · 412×915");
+  assert.equal(deviceSummary({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1" }), "Safari · iOS");
+  assert.equal(deviceSummary({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 Edg/130.0" }), "Edge · Windows");
+  assert.equal(deviceSummary(), "Browser");
+});
+
+test("filterFeedback, summariseFeedback and the export rows", () => {
+  const list = [
+    { id: 1, kind: "problem", status: "new", rating: 2, message: "Camera does not open", created_by: "help@x.com", page: "Scanner" },
+    { id: 2, kind: "idea", status: "planned", rating: 5, message: "Dark scanner", created_by: "boss@x.com", page: "Scanner", reply: "Coming soon" },
+    { id: 3, kind: "praise", status: "done", rating: null, message: "Love the schedules", created_by: "help@x.com", page: "SMS" },
+  ];
+  assert.deepEqual(filterFeedback(list).map(f => f.id), [1, 2, 3]);
+  assert.deepEqual(filterFeedback(list, { status: "open" }).map(f => f.id), [1, 2]);
+  assert.deepEqual(filterFeedback(list, { status: "done" }).map(f => f.id), [3]);
+  assert.deepEqual(filterFeedback(list, { kind: "idea" }).map(f => f.id), [2]);
+  assert.deepEqual(filterFeedback(list, { q: "coming" }).map(f => f.id), [2]);
+  assert.deepEqual(filterFeedback(list, { q: "HELP@" }).map(f => f.id), [1, 3]);
+  const s = summariseFeedback(list);
+  assert.equal(s.total, 3); assert.equal(s.open, 2); assert.equal(s.byStatus.new, 1); assert.equal(s.byKind.problem, 1);
+  assert.equal(s.avgRating, 3.5); assert.equal(s.rated, 2);
+  assert.equal(summariseFeedback([]).avgRating, null);
+  const [row] = feedbackExportRows([{ ...list[1], created_at: "2026-11-06T09:30:00Z", replied_by: "boss@x.com" }]);
+  assert.deepEqual([row.Date, row.Kind, row.Rating, row.Status, row.Reply], ["2026-11-06 09:30", "Idea", 5, "Planned", "Coming soon"]);
+});
+
+test("Schedules and Feedback pages follow the permissions", () => {
+  assert.equal(canSeeTab(null, "graphics_designer", "schedules"), true);   // WhatsApp only
+  assert.equal(canSeeTab(null, "help_desk", "schedules"), true);           // SMS only
+  assert.equal(canSeeTab(null, "finance_officer", "schedules"), false);
+  assert.equal(canSeeTab(null, "admin", "feedback"), true);
+  assert.equal(canSeeTab(null, "sales_officer", "feedback"), false);
+  assert.equal(can(null, "superuser", "feedback", "edit"), true);
+  assert.ok(MODULES.some(m => m.key === "feedback"));
+});
+
+/* ── Door scanner camera: always really released ── */
+import { createCamera } from "./camera.js";
+
+// A fake phone camera: only one start can hold it (like a real phone), stop() fails unless the
+// scanner is running, and the camera can be made to read a code before start() has finished.
+const fakePhone = ({ loadMs = 0 } = {}) => {
+  const dev = { holder: null, opened: 0, released: 0, readDuringStart: null };
+  const create = async () => {
+    if (loadMs) await new Promise(r => setTimeout(r, loadMs));
+    let state = 1;
+    const cam = {
+      start: (constraints, config, onCode) => new Promise((resolve, reject) => {
+        if (dev.holder) { reject(Object.assign(new Error("Could not start video source"), { name: "NotReadableError" })); return; }
+        dev.holder = cam; dev.opened++;
+        cam.emit = (text) => onCode(text);
+        if (dev.readDuringStart) { const t = dev.readDuringStart; dev.readDuringStart = null; onCode(t); onCode(t); }
+        setTimeout(() => { state = 2; resolve(); }, 5);
+      }),
+      stop: async () => { if (state !== 2 && state !== 3) throw new Error("Cannot stop, scanner is not running or paused."); state = 1; if (dev.holder === cam) dev.holder = null; },
+      clear: () => { if (state === 2) throw new Error("Cannot clear while scan is ongoing"); },
+      getState: () => state,
+    };
+    dev.last = cam;
+    return cam;
+  };
+  return { dev, camera: createCamera({ create, release: () => { dev.released++; } }) };
+};
+const tick = (ms = 20) => new Promise(r => setTimeout(r, ms));
+
+test("camera: a normal read counts once and the camera is free for the next card", async () => {
+  const { dev, camera } = fakePhone();
+  const codes = [];
+  assert.equal(await camera.start({ onCode: t => codes.push(t) }), "started");
+  dev.last.emit("ID=1"); dev.last.emit("ID=1"); dev.last.emit("ID=1");   // several frames read the same card
+  await tick();
+  assert.deepEqual(codes, ["ID=1"]);
+  assert.equal(dev.holder, null);
+  assert.equal(await camera.start({ onCode: t => codes.push(t) }), "started");   // "Scan next card" opens
+  assert.equal(dev.opened, 2);
+  await camera.stop();
+  assert.equal(dev.holder, null);
+});
+
+test("camera: a card read before the camera finished starting still releases it (the screen-lock bug)", async () => {
+  const { dev, camera } = fakePhone();
+  const codes = [];
+  dev.readDuringStart = "ID=7";
+  assert.equal(await camera.start({ onCode: t => codes.push(t) }), "cancelled");   // it stopped itself after the read
+  await tick();
+  assert.deepEqual(codes, ["ID=7"]);
+  assert.equal(dev.holder, null, "the camera must not keep running in the background");
+  assert.equal(await camera.start({ onCode: () => {} }), "started");
+});
+
+test("camera: stopping while it is loading or starting cancels the start and leaves nothing on", async () => {
+  const slow = fakePhone({ loadMs: 15 });
+  const p = slow.camera.start({ onCode: () => {} });
+  await slow.camera.stop();
+  assert.equal(await p, "cancelled");
+  assert.equal(slow.dev.opened, 0);
+
+  const { dev, camera } = fakePhone();
+  const q = camera.start({ onCode: () => {} });
+  await tick(1);                       // start() has asked for the camera but not finished
+  const stopped = camera.stop();
+  assert.equal(await q, "cancelled");
+  await stopped;
+  assert.equal(dev.holder, null);
+});
+
+test("camera: a camera that can't start throws, and the next try works once it is free", async () => {
+  const { dev, camera } = fakePhone();
+  dev.holder = { otherApp: true };
+  await assert.rejects(camera.start({ onCode: () => {} }), { name: "NotReadableError" });
+  assert.ok(dev.released >= 1);
+  dev.holder = null;
+  assert.equal(await camera.start({ onCode: () => {} }), "started");
+});
+
+test("camera: a quick double tap opens one camera", async () => {
+  const { dev, camera } = fakePhone();
+  const [a, b] = await Promise.all([camera.start({ onCode: () => {} }), camera.start({ onCode: () => {} })]);
+  assert.deepEqual([a, b], ["cancelled", "started"]);
+  assert.equal(dev.opened, 1);
+  await camera.stop();
+  assert.equal(dev.holder, null);
+});

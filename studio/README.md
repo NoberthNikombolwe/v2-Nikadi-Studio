@@ -366,6 +366,12 @@ select status_code, content from net._http_response order by created desc limit 
 - Upload a cover image for the card background
 - Save the event to Supabase and reopen it later from the Events list
 
+### Feedback
+
+Everyone can press **Feedback** in the header (or *Send feedback* in the phone menu) to report a problem, share an idea, ask a question or give praise, with an optional 1–5 star rating. The page they were on, the open event and their device are attached, so the team can follow up. **My feedback** shows what they sent and the team's reply; they can edit it until the team has seen it.
+
+The **Feedback** page (Admin by default; set it per role under Settings → Roles & permissions) lists everything with counts and filters. The team can set each item to New, Seen, Planned, Done or Won't do, reply, and export to Excel. Only Super Admins can delete feedback.
+
 ### Card Design
 
 - Background image uploaded from your computer or URL
@@ -488,7 +494,7 @@ Progress for uploads, WhatsApp sends and SMS sends appears in a floating log pan
 
 ## Scheduled Sends
 
-The SMS and WhatsApp tabs each have a **Scheduled** panel. Use it to plan sends ahead:
+The **Schedules** page lists every schedule of every event you can see. It has filters (search, SMS / WhatsApp, status, event), counts (active, paused, sends today and in the next 7 days, finished), and buttons to **create, view, edit, pause, resume, cancel** and, for Super Admins, **delete**. The SMS and WhatsApp tabs also each have a **Scheduled** panel for the open event. Use it to plan sends ahead:
 
 - **Pick dates**: one or more exact dates and times.
 - **Repeat weekly**: choose days (e.g. Mon, Wed, Fri) and a time, repeat every 1–8 weeks, and stop after a number of sends (e.g. 30) or on a date (the event date by default). "3 a week, 30 times" is Mon/Wed/Fri with 30 sends; "3 times, every two weeks" is one day with *every 2 weeks* and 3 sends.

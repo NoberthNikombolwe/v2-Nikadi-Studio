@@ -21,7 +21,9 @@ import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
 import { PACKAGE_OPTIONS, EVENT_TYPES, TZ_REGIONS, LEAD_STATUSES, OPEN_STATUSES, FOLLOWUP_METHODS, parsePrice, formatTsh, validateLead, validateCustomer,
          leadToRow, eventFromLead, matchCustomer, localDate, followupDue, filterLeads, sortLeads, summariseLeads } from "./lib/crm";
 import { MAX_SCHEDULE_RUNS, MAX_EVERY_WEEKS, WEEKDAYS, CARD_PLACEHOLDERS, AUDIENCE_LABEL, SCHEDULE_STATUS, RUN_STATUS, scheduleTargets, describeTargetSkips,
-  validateSchedule, describeSchedule, defaultScheduleForm, formForEdit, patternOf, parseLocal, fmtRun, ymd, smsParts, estimateSms, audienceOptions, nextRun } from "./lib/schedule";
+  validateSchedule, describeSchedule, defaultScheduleForm, formForEdit, patternOf, parseLocal, fmtRun, ymd, smsParts, estimateSms, audienceOptions, nextRun,
+  filterSchedules, summariseSchedules } from "./lib/schedule";
+import { FEEDBACK_KINDS, FEEDBACK_STATUSES, FEEDBACK_MAX, validateFeedback, deviceSummary, feedbackToRow, filterFeedback, summariseFeedback, feedbackExportRows } from "./lib/feedback";
 import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory, HISTORY_CHANNELS, HISTORY_ACTIONS, HISTORY_STATUSES } from "./lib/history";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1130,8 +1132,9 @@ const NAV_GROUPS = [
                             { id:"whatsapp", label:"WhatsApp", icon:"whatsapp" }, { id:"batch", label:"Batch & Send", icon:"table" }] },
   { label:"Insight", icon:"chart", eventOnly:true, items:[{ id:"reports", label:"Reports", icon:"report" }, { id:"history", label:"History", icon:"history" }] },
   { label:"Guests",  icon:"users", eventOnly:true, items:[{ id:"calls", label:"Calls", icon:"phone" }, { id:"scanner", label:"Scanner", icon:"scan" }] },
+  { label:"Schedules", items:[{ id:"schedules", label:"Schedules", icon:"clock" }] },
   { label:"Money",   items:[{ id:"finance", label:"Finance", icon:"wallet" }] },
-  { label:"Admin",   items:[{ id:"settings", label:"Settings", icon:"settings" }] },
+  { label:"Admin",   icon:"settings", items:[{ id:"settings", label:"Settings", icon:"settings" }, { id:"feedback", label:"Feedback", icon:"message" }] },
   { label:"Help",    items:[{ id:"guide", label:"Guide", icon:"map" }] },
 ];
 const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
@@ -2223,7 +2226,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
    connect) and <WelcomeModal> (first sign-in). Content lives in src/lib/guide.js.
 ══════════════════════════════════════════════════════════════════════════ */
 const TAB_LABEL = { events:"Events", leads:"Leads", customers:"Customers", design:"Design", vcard:"VCard", sms:"SMS",
-  whatsapp:"WhatsApp", batch:"Batch & Send", reports:"Reports", history:"History", finance:"Finance", guide:"Guide", calls:"Calls", scanner:"Scanner", settings:"Settings" };
+  whatsapp:"WhatsApp", batch:"Batch & Send", reports:"Reports", history:"History", finance:"Finance", guide:"Guide", calls:"Calls", scanner:"Scanner", settings:"Settings", schedules:"Schedules", feedback:"Feedback" };
 const stepNo = Object.fromEntries(GUIDE_STEPS.map((st, i) => [st.id, i + 1]));
 
 // One step of the flow map: number (or tick when the open event has done it), icon, title
@@ -3091,6 +3094,36 @@ const CHANNEL_WORD = { sms: "SMS", whatsapp: "WhatsApp" };
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const SchedBadge = ({ map, status }) => <span className={`nk-badge ${map[status]?.badge || "badge-idle"}`}>{map[status]?.label || status}</span>;
 
+// Pause / resume / cancel (save through the RPC, which checks the role and the event) and
+// delete (Super Admin only — RLS refuses anyone else). Shared by the SMS / WhatsApp panels
+// and the Schedules page; every change is written to that event's History.
+function useScheduleActions({ askDialog, showToast, logHistory, reload }) {
+  const setStatus = async (s, status) => {
+    if (status === "cancelled") {
+      const ok = await askDialog({ title: `Cancel "${s.title}"?`, body: "Sends still waiting won't go out, and a send in progress stops before its next batch. Sends already made stay in the history. This can't be undone — make a new schedule to start again.",
+        actions: [{ value: "yes", label: "Cancel schedule", kind: "danger" }] });
+      if (ok !== "yes") return false;
+    }
+    const { error: e } = await supabase.rpc("set_message_schedule_status", { p_id: s.id, p_status: status });
+    if (e) { showToast(`Could not change the schedule: ${e.message}`, "warn"); return false; }
+    const verb = { paused: "paused", active: "resumed", cancelled: "cancelled" }[status];
+    logHistory({ channel: s.channel, action: "schedule", title: s.title, detail: `Schedule ${verb}` }, s.event_id);
+    showToast(`"${s.title}" ${verb}${status === "active" ? " — sends that came due while paused are skipped" : ""}`, status === "cancelled" ? "info" : "success");
+    reload();
+    return true;
+  };
+  const remove = async (s) => {
+    if (!(await confirmDelete(askDialog, `schedule "${s.title}"`))) return false;
+    const { data, error: e } = await supabase.from("message_schedules").delete().eq("id", s.id).select("id");
+    if (e || !data?.length) { showToast(`Could not delete the schedule${e ? `: ${e.message}` : ""}`, "warn"); return false; }
+    logHistory({ channel: s.channel, action: "schedule", title: s.title, detail: "Schedule deleted" }, s.event_id);
+    showToast(`Deleted "${s.title}"`, "success");
+    reload();
+    return true;
+  };
+  return { setStatus, remove };
+}
+
 // Panel in the SMS / WhatsApp tab: the event's schedules for that channel and "New schedule".
 //   smsMessages: [{ key, title, body }] (main + extra "contacts" messages) — SMS only
 //   waTemplates: active wa_templates rows — WhatsApp only
@@ -3107,28 +3140,8 @@ function ScheduledSends({ channel, eventId, eventDate, canEdit, askDialog, showT
   const open = (schedules || []).find(s => s.id === openId) || null;
   const word = CHANNEL_WORD[channel];
 
-  // Pause / resume / cancel through the RPC (it checks the role and the event)
-  const setStatus = async (s, status) => {
-    if (status === "cancelled") {
-      const ok = await askDialog({ title: `Cancel "${s.title}"?`, body: "Sends still waiting won't go out, and a send in progress stops before its next batch. Sends already made stay in the history. This can't be undone — make a new schedule to start again.",
-        actions: [{ value: "yes", label: "Cancel schedule", kind: "danger" }] });
-      if (ok !== "yes") return;
-    }
-    const { error: e } = await supabase.rpc("set_message_schedule_status", { p_id: s.id, p_status: status });
-    if (e) { showToast(`Could not change the schedule: ${e.message}`, "warn"); return; }
-    const verb = { paused: "paused", active: "resumed", cancelled: "cancelled" }[status];
-    logHistory({ channel, action: "schedule", title: s.title, detail: `Schedule ${verb}` }, eventId);
-    showToast(`"${s.title}" ${verb}${status === "active" ? " — sends that came due while paused are skipped" : ""}`, status === "cancelled" ? "info" : "success");
-    load();
-  };
-  // Super Admin only (RLS refuses anyone else)
-  const remove = async (s) => {
-    if (!(await confirmDelete(askDialog, `schedule "${s.title}"`))) return;
-    const { data, error: e } = await supabase.from("message_schedules").delete().eq("id", s.id).select("id");
-    if (e || !data?.length) { showToast(`Could not delete the schedule${e ? `: ${e.message}` : ""}`, "warn"); return; }
-    logHistory({ channel, action: "schedule", title: s.title, detail: "Schedule deleted" }, eventId);
-    setOpenId(null); showToast(`Deleted "${s.title}"`, "success"); load();
-  };
+  const { setStatus, remove: removeSchedule } = useScheduleActions({ askDialog, showToast, logHistory, reload: load });
+  const remove = async (s) => { if (await removeSchedule(s)) setOpenId(null); };
 
   const row = (s) => {
     const rs = runsOf(s.id);
@@ -3203,9 +3216,10 @@ function ScheduledSends({ channel, eventId, eventDate, canEdit, askDialog, showT
 }
 
 // One schedule: what it sends, to whom, and every send with its result
-function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit, onStatus, onDelete }) {
+function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit, onStatus, onDelete, eventName, onOpenEvent }) {
   const live = s.status === "active" || s.status === "paused";
   const info = [
+    ...(eventName ? [["Event", eventName]] : []),
     ["When", describeSchedule(s.pattern || {})],
     ["Who", AUDIENCE_LABEL[s.audience] || s.audience],
     ...(s.channel === "sms"
@@ -3236,6 +3250,7 @@ function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit
         {s.status === "paused" && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("active")}><Icon n="play" /> Resume</button>}
         {live && canEdit && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => onStatus("cancelled")}><Icon n="ban" /> Cancel schedule</button>}
         {canDelete && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={onDelete}><Icon n="trash" /> Delete</button>}
+        {onOpenEvent && <button className="nk-btn nk-btn-ghost" onClick={onOpenEvent}><Icon n="arrowRight" /> Open event in {CHANNEL_WORD[s.channel]}</button>}
         {!canEdit && <span style={{fontSize:12,color:N.textDim,alignSelf:"center"}}><Icon n="lock" /> Your role can view but not change this schedule</span>}
       </div>
       <div className="nk-table-wrap">
@@ -3529,6 +3544,593 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// What <ScheduleModal> needs to know about one event: its SMS messages (main + extra
+// "contacts" messages), its sender ID and WhatsApp template (the event's own, else the default)
+const scheduleInputsFor = (ev, access, fallbackSender) => ({
+  eventId: ev.id,
+  eventDate: ev.start_datetime || null,
+  smsMessages: [
+    { key: MAIN_MSG, title: "Main SMS", body: ev.sms_draft || ev.sms_message || DEFAULT_SMS_MESSAGE },
+    ...sanitiseMessages(ev.sms_messages).filter(m => m.source === "contacts").map(m => ({ key: m.id, title: m.title, body: m.body })),
+  ],
+  defaultSender: resolveChoice(access.senderIds, ev.sms_sender_id, "sender_id")?.sender_id || fallbackSender || "NIKADI",
+  senderIds: access.senderIds.filter(x => x.active).map(x => x.sender_id),
+  waTemplates: access.waTemplates.filter(t => t.active),
+  defaultTemplate: resolveChoice(access.waTemplates, ev.wa_template, "name")?.name || "Mwaliko",
+  defaultAccount: access.settings.wa_account || "Nikadi",
+});
+
+// Step before a new schedule on the Schedules page: which event, and SMS or WhatsApp
+function ScheduleTargetPicker({ events, canSms, canWa, onPick, onClose }) {
+  const sorted = [...events].sort((a, b) => String(b.start_datetime || "").localeCompare(String(a.start_datetime || "")));
+  const [eventId, setEventId] = useState(sorted[0]?.id || "");
+  const [channel, setChannel] = useState(canSms ? "sms" : "whatsapp");
+  const ev = sorted.find(e => e.id === eventId);
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:460}} role="dialog" aria-modal="true" aria-label="New schedule">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title"><Icon n="clock" /> New schedule</div>
+          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body">
+          {!sorted.length ? <EmptyState compact icon="folder" title="No events yet" text="Create an event first, then schedule its messages." /> : (
+            <>
+              <Field label="Event">
+                <select className="nk-select" value={eventId} onChange={e => setEventId(e.target.value)}>
+                  {sorted.map(e => <option key={e.id} value={e.id}>{e.username || "Event"}{e.start_datetime ? ` · ${fmtDay(e.start_datetime)}` : ""}</option>)}
+                </select>
+              </Field>
+              <label className="nk-label">Send by</label>
+              <div style={{display:"flex",gap:6}} role="radiogroup" aria-label="Send by">
+                {[["sms", "SMS", canSms], ["whatsapp", "WhatsApp", canWa]].map(([k, l, ok]) => (
+                  <button key={k} type="button" role="radio" aria-checked={channel === k} disabled={!ok}
+                    title={ok ? "" : `Your role cannot schedule ${l}`} style={{...segStyle(channel === k), flex:1, padding:"10px 12px", opacity: ok ? 1 : .5}}
+                    onClick={() => setChannel(k)}><Icon n={k} /> {l}</button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" disabled={!ev || !(channel === "sms" ? canSms : canWa)} onClick={() => onPick(ev, channel)}>
+            Next <Icon n="arrowRight" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Schedules page: every scheduled SMS / WhatsApp send across the events you can see —
+// create, view (each send and its result), edit, pause / resume, cancel and (Super Admin)
+// delete. Each schedule obeys its own channel's permission (SMS or WhatsApp edit).
+function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallbackSender, unsavedFor, onOpenEvent }) {
+  const canDelete = useCanDelete();
+  const canSms = access.can("sms", "edit"), canWa = access.can("whatsapp", "edit");
+  const canEditOf = (s) => s.channel === "sms" ? canSms : canWa;
+  const [list, setList] = useState(null);
+  const [waiting, setWaiting] = useState([]);
+  const [error, setError] = useState(null);
+  const [missing, setMissing] = useState(false);
+  const [filters, setFilters] = useState({ q: "", channel: "all", status: "live", eventId: "all" });
+  const [openId, setOpenId] = useState(null);
+  const [openRuns, setOpenRuns] = useState([]);
+  const [picking, setPicking] = useState(false);
+  const [editing, setEditing] = useState(null);       // { initial, channel, inputs }
+  const [now, setNow] = useState(() => new Date());
+  const openRef = useRef(null);                      // the open schedule, for loads that finish later
+  const show = (id) => { openRef.current = id; setOpenId(id); };
+
+  const load = async () => {
+    if (!supabase) return;
+    const { data, error: e } = await supabase.from("message_schedules").select("*, events(username, start_datetime)")
+      .order("created_at", { ascending: false }).limit(500);
+    if (e) {
+      const notSetUp = /message_schedules|schema cache|does not exist/i.test(e.message);
+      setMissing(notSetUp); setError(notSetUp ? null : e.message); setList([]); return;
+    }
+    setMissing(false); setError(null);
+    setList((data || []).map(s => ({ ...s, event_name: s.events?.username || "", event_date: s.events?.start_datetime || null })));
+    const { data: rs } = await supabase.from("message_schedule_runs").select("id,schedule_id,run_at,status")
+      .in("status", ["pending", "sending"]).order("run_at").limit(5000);
+    setWaiting(rs || []);
+    setNow(new Date());
+    if (openRef.current) loadRuns(openRef.current);
+  };
+  const loadRuns = async (id) => {
+    const { data } = await supabase.from("message_schedule_runs")
+      .select("id,schedule_id,run_at,status,sent,failed,skipped,detail,started_at,finished_at").eq("schedule_id", id).order("run_at");
+    if (openRef.current === id) setOpenRuns(data || []);
+  };
+  useEffect(() => {
+    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
+    if (!supabase) return;
+    let t = null;
+    const soon = () => { clearTimeout(t); t = setTimeout(load, 800); };   // sends in progress update often
+    const ch = supabase.channel("schedules-all")
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedules" }, soon)
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedule_runs" }, soon)
+      .subscribe();
+    return () => { clearTimeout(t); supabase.removeChannel(ch); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const { setStatus, remove } = useScheduleActions({ askDialog, showToast, logHistory, reload: load });
+  const nextOf = (id) => waiting.find(r => r.schedule_id === id) || null;
+  const shown = filterSchedules(list || [], filters);
+  const stats = summariseSchedules(list || [], waiting, now);
+  const open = (list || []).find(s => s.id === openId) || null;
+  const eventOptions = [...new Map((list || []).map(s => [s.event_id, s.event_name || "Event"])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const setF = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+
+  const view = (s) => { show(s.id); setOpenRuns([]); loadRuns(s.id); };
+  // The event row for a schedule (from the loaded events, else read it)
+  const eventRow = async (id) => {
+    const known = events.find(e => e.id === id);
+    if (known) return known;
+    const { data } = await supabase.from("events").select("*").eq("id", id).maybeSingle();
+    return data;
+  };
+  const edit = async (s) => {
+    const ev = await eventRow(s.event_id);
+    if (!ev) { showToast("Could not open this schedule's event", "warn"); return; }
+    setEditing({ initial: s, channel: s.channel, inputs: scheduleInputsFor(ev, access, fallbackSender),
+      doneRuns: s.done_runs || 0 });
+  };
+
+  return (
+    <div className="nk-page">
+      <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
+        <div style={{flex:1,minWidth:220}}>
+          <div style={{fontSize:20,fontWeight:800,color:N.text}}><Icon n="clock" /> Schedules</div>
+          <div style={{fontSize:13,color:N.textDim}}>Every scheduled SMS and WhatsApp send across your events. They go out from the server, even with the app closed.</div>
+        </div>
+        <button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Refresh</button>
+        <button className="nk-btn nk-btn-primary" onClick={() => setPicking(true)} disabled={missing || !(canSms || canWa)}
+          title={canSms || canWa ? "Schedule SMS or WhatsApp sends" : "Your role can view but not change schedules"}>
+          <Icon n="plus" /> New schedule
+        </button>
+      </div>
+
+      {missing ? (
+        <EmptyState icon="database" title="Schedules aren't set up yet" text="Run supabase-schema.sql in Supabase and deploy run-schedules (README → Step 9)." />
+      ) : error ? (
+        <EmptyState tone="warn" icon="alert" title="Could not load schedules" text={error} action={<button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Try again</button>} />
+      ) : list === null ? (
+        <EmptyState loading title="Loading schedules…" />
+      ) : (
+        <>
+          <div className="nk-stats">
+            <MoneyTile label="Active" value={stats.active} tone="info" />
+            <MoneyTile label="Paused" value={stats.paused} tone="warn" />
+            <MoneyTile label="Sends today" value={stats.dueToday} tone="good" />
+            <MoneyTile label="Next 7 days" value={stats.dueWeek} tone="good" />
+            <MoneyTile label="Finished" value={stats.done} tone="info" sub={stats.cancelled ? `${stats.cancelled} cancelled` : undefined} />
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+            <input className="nk-input" style={{marginBottom:0,flex:"1 1 200px",maxWidth:320}} placeholder="Search name, event or message…"
+              value={filters.q} onChange={e => setF("q", e.target.value)} aria-label="Search schedules" />
+            <div style={{display:"flex",gap:4}} role="radiogroup" aria-label="Channel">
+              {[["all", "All"], ["sms", "SMS"], ["whatsapp", "WhatsApp"]].map(([k, l]) => (
+                <button key={k} type="button" role="radio" aria-checked={filters.channel === k} style={segStyle(filters.channel === k)} onClick={() => setF("channel", k)}>{l}</button>
+              ))}
+            </div>
+            <select className="nk-select" style={{marginBottom:0,width:"auto"}} value={filters.status} onChange={e => setF("status", e.target.value)} aria-label="Status">
+              <option value="live">Active & paused</option>
+              <option value="active">Active</option>
+              <option value="paused">Paused</option>
+              <option value="done">Finished</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="all">All</option>
+            </select>
+            <select className="nk-select" style={{marginBottom:0,width:"auto",maxWidth:240}} value={filters.eventId} onChange={e => setF("eventId", e.target.value)} aria-label="Event">
+              <option value="all">All events</option>
+              {eventOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            </select>
+          </div>
+          {!shown.length ? (
+            <EmptyState icon="clock" title={list.length ? "No schedule matches" : "No schedules yet"}
+              text={list.length ? "Change the filters to see more." : "Plan SMS or WhatsApp reminders ahead — pick dates, or days of the week."}
+              action={!list.length && (canSms || canWa) ? <button className="nk-btn nk-btn-primary" onClick={() => setPicking(true)}><Icon n="plus" /> New schedule</button> : null} />
+          ) : (
+            <div className="nk-table-wrap">
+              <table className="nk-table">
+                <thead><tr>{["Name", "Event", "Channel", "When", "Who", "Next send", "Done", "Status", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {shown.map(s => {
+                    const next = nextOf(s.id);
+                    const live = s.status === "active" || s.status === "paused";
+                    const ok = canEditOf(s);
+                    return (
+                      <tr key={s.id} style={{cursor:"pointer"}} onClick={() => view(s)}>
+                        <td style={{fontWeight:700,color:N.text}}>{s.title}</td>
+                        <td>{s.event_name || "—"}</td>
+                        <td><Icon n={s.channel === "sms" ? "sms" : "whatsapp"} /> {CHANNEL_WORD[s.channel]}</td>
+                        <td>{describeSchedule(s.pattern || {})}</td>
+                        <td>{AUDIENCE_LABEL[s.audience] || s.audience}</td>
+                        <td>{next ? (next.status === "sending" ? "Sending now" : fmtRun(next.run_at)) : "—"}</td>
+                        <td>{s.done_runs}/{s.total_runs}</td>
+                        <td><SchedBadge map={SCHEDULE_STATUS} status={s.status} /></td>
+                        <td onClick={e => e.stopPropagation()} style={{whiteSpace:"nowrap"}}>
+                          <Sb label={`View ${s.title}`} onClick={() => view(s)}><Icon n="eye" /></Sb>
+                          {live && ok && <Sb label={`Edit ${s.title}`} onClick={() => edit(s)}><Icon n="edit" /></Sb>}
+                          {s.status === "active" && ok && <Sb label={`Pause ${s.title}`} onClick={() => setStatus(s, "paused")}><Icon n="pause" /></Sb>}
+                          {s.status === "paused" && ok && <Sb label={`Resume ${s.title}`} onClick={() => setStatus(s, "active")}><Icon n="play" /></Sb>}
+                          {live && ok && <Sb label={`Cancel ${s.title}`} col={N.red} onClick={() => setStatus(s, "cancelled")}><Icon n="ban" /></Sb>}
+                          {canDelete && <Sb label={`Delete ${s.title}`} col={N.red} onClick={() => remove(s)}><Icon n="trash" /></Sb>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {open && !editing && (
+        <ScheduleDetail schedule={open} runs={openRuns} canEdit={canEditOf(open)} canDelete={canDelete} eventName={open.event_name}
+          onClose={() => show(null)} onEdit={() => edit(open)} onStatus={(st) => setStatus(open, st)}
+          onDelete={async () => { if (await remove(open)) show(null); }}
+          onOpenEvent={() => { show(null); onOpenEvent(open.event_id, open.channel); }} />
+      )}
+      {picking && (
+        <ScheduleTargetPicker events={events} canSms={canSms} canWa={canWa} onClose={() => setPicking(false)}
+          onPick={(ev, channel) => { setPicking(false); setEditing({ initial: null, channel, inputs: scheduleInputsFor(ev, access, fallbackSender), doneRuns: 0 }); }} />
+      )}
+      {editing && (
+        <ScheduleModal channel={editing.channel} initial={editing.initial} doneRuns={editing.doneRuns} {...editing.inputs}
+          unsaved={unsavedFor(editing.inputs.eventId)} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
+          onClose={() => setEditing(null)}
+          onSaved={(id) => { setEditing(null); load(); if (id) { show(id); loadRuns(id); } }} />
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   FEEDBACK — <FeedbackModal> (header button: anyone sends feedback and sees
+   their own with the team's reply) and <FeedbackTab> (the Feedback module:
+   read, answer and track everything). Pure logic in src/lib/feedback.js.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const FEEDBACK_MISSING = /app_feedback|schema cache|does not exist/i;
+
+// 1–5 stars; clicking the chosen star again clears the rating
+function StarRating({ value, onChange, size = "1.5em" }) {
+  return (
+    <div style={{display:"flex",gap:4}} role="radiogroup" aria-label="Rating">
+      {[1, 2, 3, 4, 5].map(n => (
+        <button key={n} type="button" role="radio" aria-checked={value === n} aria-label={`${n} star${n === 1 ? "" : "s"}`}
+          disabled={!onChange} onClick={() => onChange?.(value === n ? 0 : n)}
+          style={{background:"none",border:"none",padding:2,cursor:onChange ? "pointer" : "default",color: n <= (value || 0) ? N.amber : N.textDim}}>
+          <Icon n="star" size={size} style={{fill: n <= (value || 0) ? "currentColor" : "none"}} />
+        </button>
+      ))}
+    </div>
+  );
+}
+// Read-only stars for tables and lists (SVG, like every icon)
+const Stars = ({ value }) => value ? (
+  <span style={{whiteSpace:"nowrap"}} title={`${value} of 5`} aria-label={`${value} of 5 stars`}>
+    {[1, 2, 3, 4, 5].map(n => <Icon key={n} n="star" size="0.95em" style={{color: n <= value ? N.amber : N.textDim, fill: n <= value ? "currentColor" : "none"}} />)}
+  </span>
+) : <span style={{color:N.textDim}}>—</span>;
+const KindBadge = ({ kind }) => FEEDBACK_KINDS[kind] ? <span className={`nk-badge ${FEEDBACK_KINDS[kind].badge}`}><Icon n={FEEDBACK_KINDS[kind].icon} /> {FEEDBACK_KINDS[kind].label}</span> : null;
+const FbStatus = ({ status }) => <span className={`nk-badge ${FEEDBACK_STATUSES[status]?.badge || "badge-idle"}`}>{FEEDBACK_STATUSES[status]?.label || status}</span>;
+
+// Kind / rating / message fields, shared by "send" and "edit my feedback"
+function FeedbackFields({ form, setForm, errors }) {
+  return (
+    <>
+      <label className="nk-label">What is it about?</label>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:6,marginBottom:6}} role="radiogroup" aria-label="Kind of feedback">
+        {Object.entries(FEEDBACK_KINDS).map(([k, v]) => (
+          <button key={k} type="button" role="radio" aria-checked={form.kind === k} title={v.hint}
+            style={{...segStyle(form.kind === k), padding:"10px 8px"}} onClick={() => setForm(f => ({ ...f, kind: k }))}>
+            <Icon n={v.icon} /> {v.label}
+          </button>
+        ))}
+      </div>
+      <div style={{fontSize:11,color:N.textDim,marginBottom:12}}>{FEEDBACK_KINDS[form.kind]?.hint}</div>
+      <label className="nk-label">How is Nikadi Studio working for you? <span style={{fontWeight:400,color:N.textDim}}>(optional)</span></label>
+      <div style={{marginBottom:12}}><StarRating value={form.rating} onChange={r => setForm(f => ({ ...f, rating: r }))} /></div>
+      <Field label={`Your message * · ${form.message.trim().length}/${FEEDBACK_MAX.toLocaleString()}`} error={errors.message}>
+        <textarea className="nk-input nk-textarea" rows={5} maxLength={FEEDBACK_MAX} value={form.message}
+          placeholder={form.kind === "problem" ? "What happened, and what did you expect? Which steps lead to it?" : "Tell the team…"}
+          onChange={e => setForm(f => ({ ...f, message: e.target.value }))} />
+      </Field>
+    </>
+  );
+}
+
+// The header's Feedback pop-up: send feedback, and see what you sent with the team's replies
+function FeedbackModal({ myEmail, page, eventId, eventName, showToast, onClose }) {
+  const [view, setView] = useState("send");
+  const [form, setForm] = useState({ kind: "idea", rating: 0, message: "" });
+  const [tried, setTried] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [mine, setMine] = useState(null);
+  const [missing, setMissing] = useState(false);
+  const [editing, setEditing] = useState(null);     // a copy of one of my feedback rows
+  const device = typeof window === "undefined" ? "" : deviceSummary({ userAgent: navigator.userAgent, width: window.screen?.width, height: window.screen?.height });
+
+  const loadMine = async () => {
+    if (!supabase) return;
+    const { data, error } = await supabase.from("app_feedback").select("*").eq("created_by", myEmail).order("created_at", { ascending: false }).limit(100);
+    if (error) { setMissing(FEEDBACK_MISSING.test(error.message)); setMine([]); return; }
+    setMine(data || []);
+  };
+  useEffect(() => { loadMine(); }, []); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- loads data from the database
+
+  const errors = tried ? validateFeedback(form) : {};
+  const send = async () => {
+    setTried(true);
+    if (Object.keys(validateFeedback(form)).length) return;
+    setSaving(true);
+    const { error } = await supabase.from("app_feedback").insert(feedbackToRow(form, { page, eventId, device }));
+    setSaving(false);
+    if (error) {
+      showToast(FEEDBACK_MISSING.test(error.message) ? "Feedback isn't set up yet — ask an administrator to run supabase-schema.sql" : `Could not send: ${error.message}`, "warn");
+      return;
+    }
+    showToast("Thank you — your feedback was sent to the team", "success");
+    setForm({ kind: form.kind, rating: 0, message: "" }); setTried(false);
+    setView("mine"); loadMine();
+  };
+  const saveEdit = async () => {
+    if (Object.keys(validateFeedback(editing)).length) { showToast("Check the message", "warn"); return; }
+    const { data, error } = await supabase.from("app_feedback")
+      .update({ kind: editing.kind, rating: editing.rating || null, message: editing.message.trim() }).eq("id", editing.id).select("id");
+    if (error || !data?.length) { showToast(error ? `Could not save: ${error.message}` : "The team has already seen this feedback, so it can't be changed", "warn"); loadMine(); return; }
+    showToast("Feedback updated", "success"); setEditing(null); loadMine();
+  };
+
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:560}} role="dialog" aria-modal="true" aria-label="Feedback">
+        <div className="nk-modal-head">
+          <div>
+            <div className="nk-modal-title"><Icon n="message" /> Feedback</div>
+            <div style={{fontSize:12,color:N.textDim,marginTop:2}}>Tell the team what works, what doesn't, and what you'd like next</div>
+          </div>
+          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body">
+          <div style={{display:"flex",gap:6,marginBottom:16}} role="tablist">
+            <button type="button" role="tab" aria-selected={view === "send"} style={{...segStyle(view === "send"), flex:1}} onClick={() => setView("send")}><Icon n="send" /> Send feedback</button>
+            <button type="button" role="tab" aria-selected={view === "mine"} style={{...segStyle(view === "mine"), flex:1}} onClick={() => setView("mine")}>
+              <Icon n="inbox" /> My feedback{mine?.length ? ` (${mine.length})` : ""}
+            </button>
+          </div>
+          {missing ? (
+            <EmptyState compact icon="database" title="Feedback isn't set up yet" text="Ask an administrator to run the latest supabase-schema.sql in Supabase." />
+          ) : view === "send" ? (
+            <>
+              <FeedbackFields form={form} setForm={setForm} errors={errors} />
+              <div style={{fontSize:11,color:N.textDim,lineHeight:1.6}}>
+                <Icon n="info" /> Sent with your name ({myEmail}), the page you're on ({page || "—"}){eventName ? `, the open event (${eventName})` : ""} and your device ({device || "unknown"}), so the team can follow up.
+              </div>
+            </>
+          ) : mine === null ? (
+            <EmptyState compact loading title="Loading your feedback…" />
+          ) : !mine.length ? (
+            <EmptyState compact icon="inbox" title="Nothing sent yet" text="Your feedback and the team's replies will appear here."
+              action={<button className="nk-btn nk-btn-primary" onClick={() => setView("send")}><Icon n="send" /> Send feedback</button>} />
+          ) : (
+            mine.map(f => editing?.id === f.id ? (
+              <div key={f.id} style={{padding:12,borderRadius:10,border:`1px solid ${N.sky}`,marginBottom:10}}>
+                <FeedbackFields form={editing} setForm={setEditing} errors={validateFeedback(editing)} />
+                <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+                  <button className="nk-btn nk-btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
+                  <button className="nk-btn nk-btn-primary" onClick={saveEdit}><Icon n="save" /> Save</button>
+                </div>
+              </div>
+            ) : (
+              <div key={f.id} style={{padding:12,borderRadius:10,border:`1px solid ${N.border}`,background:N.navy700,marginBottom:10}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:6}}>
+                  <KindBadge kind={f.kind} /> <FbStatus status={f.status} /> <Stars value={f.rating} />
+                  <span style={{fontSize:11,color:N.textDim,marginLeft:"auto"}}>{fmtWhen(f.created_at)}{f.page ? ` · ${f.page}` : ""}</span>
+                </div>
+                <div style={{fontSize:13,color:N.text,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{f.message}</div>
+                {f.reply && (
+                  <div style={{marginTop:8,padding:"8px 10px",borderRadius:8,background:N.greenBg,border:`1px solid ${alpha(N.green,"44")}`,fontSize:13}}>
+                    <div style={{fontSize:11,fontWeight:700,color:N.green,marginBottom:2}}><Icon n="message" /> Reply from {f.replied_by || "the team"}{f.replied_at ? ` · ${fmtWhen(f.replied_at)}` : ""}</div>
+                    <div style={{color:N.text,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{f.reply}</div>
+                  </div>
+                )}
+                {f.status === "new" && (
+                  <button className="nk-link" style={{fontSize:12,marginTop:6}} onClick={() => setEditing({ id: f.id, kind: f.kind, rating: f.rating || 0, message: f.message })}>
+                    <Icon n="edit" /> Edit (until the team has seen it)
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
+          {view === "send" && !missing && (
+            <button className="nk-btn nk-btn-primary" onClick={send} disabled={saving || (tried && Object.keys(errors).length > 0)}>
+              {saving ? <><Icon n="loader" /> Sending…</> : <><Icon n="send" /> Send feedback</>}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// One feedback item for the team: full text, details, status and reply
+function FeedbackDetail({ item, canEdit, canDelete, eventName, onClose, onSave, onDelete }) {
+  const [status, setStatus] = useState(item.status);
+  const [reply, setReply] = useState(item.reply || "");
+  const [saving, setSaving] = useState(false);
+  const changed = status !== item.status || reply.trim() !== (item.reply || "");
+  const save = async () => { setSaving(true); await onSave(item, { status, reply: reply.trim() || null }); setSaving(false); };
+  const rows = [
+    ["From", item.created_by], ["Sent", fmtWhen(item.created_at)], ["Page", item.page || "—"],
+    ...(eventName ? [["Event", eventName]] : []), ["Device", item.device || "—"],
+    ...(item.updated_by ? [["Last changed", `${fmtWhen(item.updated_at)} by ${item.updated_by}`]] : []),
+  ];
+  return (
+    <DetailModal label="Feedback" onClose={onClose} width={640}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:12,paddingRight:36}}>
+        <KindBadge kind={item.kind} /> <FbStatus status={item.status} /> <Stars value={item.rating} />
+      </div>
+      <div style={{fontSize:15,color:N.text,whiteSpace:"pre-wrap",wordBreak:"break-word",lineHeight:1.6,marginBottom:14}}>{item.message}</div>
+      <div style={{display:"grid",gridTemplateColumns:"max-content 1fr",gap:"6px 14px",fontSize:13,marginBottom:16}}>
+        {rows.map(([k, v]) => <Fragment key={k}><div style={{color:N.textDim,fontWeight:600}}>{k}</div><div style={{color:N.text,wordBreak:"break-word"}}>{v}</div></Fragment>)}
+      </div>
+      {canEdit ? (
+        <>
+          <label className="nk-label">Status</label>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}} role="radiogroup" aria-label="Status">
+            {Object.entries(FEEDBACK_STATUSES).map(([k, v]) => (
+              <button key={k} type="button" role="radio" aria-checked={status === k} style={segStyle(status === k)} onClick={() => setStatus(k)}>{v.label}</button>
+            ))}
+          </div>
+          <Field label="Reply to the sender (they see it under My feedback)">
+            <textarea className="nk-input nk-textarea" rows={3} maxLength={FEEDBACK_MAX} value={reply} onChange={e => setReply(e.target.value)}
+              placeholder="e.g. Thanks — fixed in the next update." />
+          </Field>
+          {item.replied_by && <div style={{fontSize:11,color:N.textDim,marginTop:-6,marginBottom:10}}>Last reply by {item.replied_by} · {fmtWhen(item.replied_at)}</div>}
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving || !changed}>{saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> Save</>}</button>
+            {canDelete && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => onDelete(item)}><Icon n="trash" /> Delete</button>}
+          </div>
+        </>
+      ) : (
+        <>
+          {item.reply && <div style={{padding:"8px 10px",borderRadius:8,background:N.greenBg,fontSize:13,color:N.text,marginBottom:10}}><b>Reply:</b> {item.reply}</div>}
+          <div style={{fontSize:12,color:N.textDim}}><Icon n="lock" /> Your role can read feedback but not answer it.</div>
+          {canDelete && <button className="nk-btn nk-btn-ghost" style={{color:N.red,marginTop:10}} onClick={() => onDelete(item)}><Icon n="trash" /> Delete</button>}
+        </>
+      )}
+    </DetailModal>
+  );
+}
+
+// Feedback page (module "feedback"): everything users sent, to read, answer and track
+function FeedbackTab({ access, events, askDialog, showToast }) {
+  const canEdit = access.can("feedback", "edit");
+  const canDelete = useCanDelete();
+  const [list, setList] = useState(null);
+  const [error, setError] = useState(null);
+  const [missing, setMissing] = useState(false);
+  const [filters, setFilters] = useState({ q: "", status: "open", kind: "all" });
+  const [openId, setOpenId] = useState(null);
+
+  const load = async () => {
+    if (!supabase) return;
+    const { data, error: e } = await supabase.from("app_feedback").select("*").order("created_at", { ascending: false }).limit(1000);
+    if (e) { const notSetUp = FEEDBACK_MISSING.test(e.message); setMissing(notSetUp); setError(notSetUp ? null : e.message); setList([]); return; }
+    setMissing(false); setError(null); setList(data || []);
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
+
+  const save = async (item, changes) => {
+    const { data, error: e } = await supabase.from("app_feedback").update(changes).eq("id", item.id).select("*");
+    if (e || !data?.length) { showToast(`Could not save${e ? `: ${e.message}` : ""}`, "warn"); return; }
+    setList(ls => ls.map(f => f.id === item.id ? data[0] : f));
+    showToast(changes.reply && changes.reply !== item.reply ? "Saved — the sender sees your reply under My feedback" : "Saved", "success");
+  };
+  const remove = async (item) => {
+    if (!(await confirmDelete(askDialog, "this feedback"))) return;
+    const { data, error: e } = await supabase.from("app_feedback").delete().eq("id", item.id).select("id");
+    if (e || !data?.length) { showToast(`Could not delete${e ? `: ${e.message}` : ""}`, "warn"); return; }
+    setOpenId(null); setList(ls => ls.filter(f => f.id !== item.id)); showToast("Feedback deleted", "success");
+  };
+  const exportXlsx = async () => {
+    const XLSX = await loadXlsx();
+    const ws = XLSX.utils.json_to_sheet(feedbackExportRows(filterFeedback(list || [], filters)));
+    ws["!cols"] = [{ wch: 16 }, { wch: 28 }, { wch: 10 }, { wch: 7 }, { wch: 60 }, { wch: 14 }, { wch: 10 }, { wch: 40 }, { wch: 24 }, { wch: 26 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Feedback");
+    XLSX.writeFile(wb, `Nikadi_Feedback_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const shown = filterFeedback(list || [], filters);
+  const sum = summariseFeedback(list || []);
+  const open = (list || []).find(f => f.id === openId) || null;
+  const evName = (id) => events.find(e => e.id === id)?.username || "";
+  const setF = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+
+  return (
+    <div className="nk-page">
+      <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
+        <div style={{flex:1,minWidth:220}}>
+          <div style={{fontSize:20,fontWeight:800,color:N.text}}><Icon n="message" /> Feedback</div>
+          <div style={{fontSize:13,color:N.textDim}}>What users tell the team about Nikadi Studio. Reply, and move each one from New to Done.</div>
+        </div>
+        <button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Refresh</button>
+        <button className="nk-btn nk-btn-ghost" onClick={exportXlsx} disabled={!shown.length}><Icon n="download" /> Excel</button>
+      </div>
+      {missing ? (
+        <EmptyState icon="database" title="Feedback isn't set up yet" text="Run the latest supabase-schema.sql in Supabase." />
+      ) : error ? (
+        <EmptyState tone="warn" icon="alert" title="Could not load feedback" text={error} action={<button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Try again</button>} />
+      ) : list === null ? (
+        <EmptyState loading title="Loading feedback…" />
+      ) : (
+        <>
+          <div className="nk-stats">
+            <MoneyTile label="Open" value={sum.open} tone="warn" sub={`${sum.byStatus.new} new`} />
+            <MoneyTile label="Problems" value={sum.byKind.problem} tone="bad" />
+            <MoneyTile label="Ideas" value={sum.byKind.idea} tone="info" />
+            <MoneyTile label="Done" value={sum.byStatus.done} tone="good" />
+            <MoneyTile label="Average rating" value={sum.avgRating ? `${sum.avgRating} / 5` : "—"} tone="warn" sub={sum.rated ? `from ${sum.rated}` : undefined} />
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+            <input className="nk-input" style={{marginBottom:0,flex:"1 1 200px",maxWidth:320}} placeholder="Search message, sender or page…"
+              value={filters.q} onChange={e => setF("q", e.target.value)} aria-label="Search feedback" />
+            <select className="nk-select" style={{marginBottom:0,width:"auto"}} value={filters.status} onChange={e => setF("status", e.target.value)} aria-label="Status">
+              <option value="open">Open (new, seen, planned)</option>
+              {Object.entries(FEEDBACK_STATUSES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              <option value="all">All</option>
+            </select>
+            <div style={{display:"flex",gap:4,flexWrap:"wrap"}} role="radiogroup" aria-label="Kind">
+              {[["all", "All"], ...Object.entries(FEEDBACK_KINDS).map(([k, v]) => [k, v.label])].map(([k, l]) => (
+                <button key={k} type="button" role="radio" aria-checked={filters.kind === k} style={segStyle(filters.kind === k)} onClick={() => setF("kind", k)}>{l}</button>
+              ))}
+            </div>
+          </div>
+          {!shown.length ? (
+            <EmptyState icon="inbox" title={list.length ? "No feedback matches" : "No feedback yet"}
+              text={list.length ? "Change the filters to see more." : "Users send feedback with the Feedback button at the top of the page."} />
+          ) : (
+            <div className="nk-table-wrap">
+              <table className="nk-table">
+                <thead><tr>{["When", "From", "Kind", "Rating", "Message", "Page", "Status", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {shown.map(f => (
+                    <tr key={f.id} style={{cursor:"pointer"}} onClick={() => setOpenId(f.id)}>
+                      <td>{fmtWhen(f.created_at)}</td>
+                      <td>{f.created_by}</td>
+                      <td><KindBadge kind={f.kind} /></td>
+                      <td><Stars value={f.rating} /></td>
+                      <td style={{color:N.text}}>{f.message}</td>
+                      <td>{f.page || "—"}</td>
+                      <td><FbStatus status={f.status} />{f.reply ? <> <Icon n="message" title="Replied" /></> : null}</td>
+                      <td onClick={e => e.stopPropagation()}><Sb label="Open feedback" onClick={() => setOpenId(f.id)}><Icon n="eye" /></Sb></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+      {open && (
+        <FeedbackDetail key={open.id + open.updated_at} item={open} canEdit={canEdit} canDelete={canDelete} eventName={evName(open.event_id)}
+          onClose={() => setOpenId(null)} onSave={save} onDelete={remove} />
+      )}
     </div>
   );
 }
@@ -4788,6 +5390,7 @@ export default function App() {
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
   const [menuOpen, setMenuOpen] = useState(false);   // mobile navigation drawer
+  const [feedbackOpen, setFeedbackOpen] = useState(false);   // header "Feedback" pop-up
   const [navOpen, setNavOpen]   = useState(null);    // desktop: group whose sub-menu is open by click/tap (hover opens via CSS)
   // Table cells are one line with "…"; hovering a cut-off cell shows its full text as a tooltip
   useEffect(() => {
@@ -5764,6 +6367,15 @@ export default function App() {
     showToast(`Event "${ev.username}" deleted`, "success");
   };
 
+  // Schedules page → "Open event": opens the schedule's event in its SMS / WhatsApp tab
+  // (the event is read from the database when it isn't among the loaded events)
+  const openScheduleEvent = async (eventId, channel) => {
+    let ev = savedEvents.find(e => e.id === eventId);
+    if (!ev && supabase) ({ data: ev } = await supabase.from("events").select("*").eq("id", eventId).maybeSingle());
+    if (!ev) { showToast("Could not open that event", "warn"); return; }
+    selectEvent(ev, channel === "sms" ? "sms" : "whatsapp");
+  };
+
   /* ── Core: load event data + template from DB into the designer ── */
   // The main "open an event" routine: populates the event form, SMS message,
   // background image + element layout (fetched from Storage, only if the cover URL
@@ -6651,7 +7263,7 @@ export default function App() {
   );
   if (!access.setupMissing && !access.role) return <NoAccess email={user.email} name={user.user_metadata?.full_name} avatar={user.user_metadata?.avatar_url} onRetry={access.loadAll} onSignOut={() => supabase?.auth.signOut()} />;
   const tabModule = TAB_MODULE[tab];
-  const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && !access.can(tabModule, "edit");
+  const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && tab !== "schedules" && !access.can(tabModule, "edit");
   const canDeleteData = access.setupMissing || access.role === "superuser";
 
   return (
@@ -6762,6 +7374,10 @@ export default function App() {
               title="How Nikadi Studio works" aria-label="Help: how Nikadi Studio works">
               <Icon n="help" /> <span className="nk-btn-label">Help</span>
             </button>
+            <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => setFeedbackOpen(true)}
+              title="Tell the team what works, what doesn't, and what you'd like" aria-label="Send feedback about Nikadi Studio">
+              <Icon n="message" /> <span className="nk-btn-label">Feedback</span>
+            </button>
             {/* Theme: System (follows the browser) → Light → Dark */}
             <button className="nk-btn nk-btn-ghost nk-hide-md" style={{padding:"6px 10px",fontSize:12}}
               onClick={()=>setThemePref(nextThemePref(themePref))}
@@ -6830,6 +7446,10 @@ export default function App() {
           })}
         </nav>
 
+        {feedbackOpen && (
+          <FeedbackModal myEmail={(user.email || "").toLowerCase()} page={TAB_LABEL[tab] || tab}
+            eventId={savedEventId} eventName={savedEventId ? eventData.username : ""} showToast={showToast} onClose={() => setFeedbackOpen(false)} />
+        )}
         {welcome && <WelcomeModal name={user.user_metadata?.full_name} onClose={() => closeWelcome(false)} onGuide={() => closeWelcome(true)} />}
 
         {/* Mobile drawer */}
@@ -6860,6 +7480,9 @@ export default function App() {
                 ))}
               </nav>
               <div className="nk-drawer-foot">
+                <button className="nk-drawer-item" onClick={() => { setMenuOpen(false); setFeedbackOpen(true); }}>
+                  <Icon n="message" /> <span style={{flex:1}}>Send feedback</span>
+                </button>
                 <button className="nk-drawer-item" onClick={() => setThemePref(nextThemePref(themePref))}>
                   <Icon n={THEME_ICONS[themePref]} /> <span style={{flex:1}}>Theme</span><span style={{fontSize:12,color:N.textDim}}>{THEME_LABELS[themePref]}</span>
                 </button>
@@ -7274,6 +7897,13 @@ export default function App() {
 
             {/* ─── SETTINGS / SCANNER / CALLS ─── */}
             {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} showToast={showToast} />}
+            {tab === "schedules" && (
+              <SchedulesTab access={access} events={savedEvents} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
+                fallbackSender={smsSettings.senderId}
+                unsavedFor={(id) => id && id === savedEventId ? records.filter(r => !r.sample && !r.dbId).length : 0}
+                onOpenEvent={openScheduleEvent} />
+            )}
+            {tab === "feedback" && <FeedbackTab access={access} events={savedEvents} askDialog={askDialog} showToast={showToast} />}
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} onGuestsAdded={addImportedGuests} />

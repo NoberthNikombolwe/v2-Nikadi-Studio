@@ -315,6 +315,7 @@ NOTIFY pgrst, 'reload schema';
 --   7. View-only share link (code-protected RPCs)
 --   8. Storage usage and clearing card images
 --   9. Message schedules (SMS / WhatsApp sent later by pg_cron + run-schedules)
+--  10. Feedback from users about the system
 -- =====================================================================
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -1354,6 +1355,91 @@ END $outer$;
 -- Live progress of schedules in the SMS / WhatsApp tabs
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_schedules;     EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_schedule_runs; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
+
+-- ─────────────────────────────────────────────────────────────────────
+-- 10. FEEDBACK — what users tell the team about the system: problems,
+--     ideas, questions, praise. Every active user can send feedback, see
+--     their own with the team's reply, and edit it until the team has
+--     looked at it. The Feedback module (view / edit) sees and answers all
+--     of it. Deleting is Super Admin only.
+-- ─────────────────────────────────────────────────────────────────────
+INSERT INTO app_modules (key, label, sort) VALUES ('feedback', 'Feedback', 16)
+ON CONFLICT (key) DO UPDATE SET label = EXCLUDED.label, sort = EXCLUDED.sort;
+INSERT INTO role_permissions (role, module, can_view, can_edit)
+SELECT r, m, TRUE, (p = 'E') FROM (VALUES ('admin','feedback','E')) AS t(r, m, p)
+ON CONFLICT (role, module) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS app_feedback (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind        TEXT NOT NULL DEFAULT 'idea' CHECK (kind IN ('problem','idea','question','praise')),
+  rating      INT CHECK (rating BETWEEN 1 AND 5),                -- optional 1–5 stars
+  message     TEXT NOT NULL CHECK (length(trim(message)) BETWEEN 3 AND 4000),
+  page        TEXT,                                              -- the tab the user was on
+  event_id    UUID REFERENCES events(id) ON DELETE SET NULL,      -- the event that was open, if any
+  device      TEXT,                                              -- e.g. "Chrome · Android · 412×915"
+  status      TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','seen','planned','done','wont_fix')),
+  reply       TEXT CHECK (reply IS NULL OR length(reply) <= 4000),
+  replied_by  TEXT,
+  replied_at  TIMESTAMPTZ,
+  created_by  TEXT NOT NULL DEFAULT lower(auth.jwt() ->> 'email'),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by  TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_app_feedback_created ON app_feedback(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_app_feedback_author  ON app_feedback(created_by);
+
+-- Who sent it and when can't be faked or changed. A new row always starts as "new" with no
+-- reply. The team (Feedback edit) sets the status and reply (reply author and time follow
+-- the text); the sender may only change kind / rating / message, and only while it's "new".
+CREATE OR REPLACE FUNCTION public.guard_app_feedback() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE me TEXT := lower(auth.jwt() ->> 'email');
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF me IS NOT NULL THEN NEW.created_by := me; END IF;
+    NEW.status := 'new'; NEW.reply := NULL; NEW.replied_by := NULL; NEW.replied_at := NULL;
+    NEW.created_at := NOW(); NEW.updated_at := NOW(); NEW.updated_by := NULL;
+    RETURN NEW;
+  END IF;
+  NEW.id := OLD.id; NEW.created_by := OLD.created_by; NEW.created_at := OLD.created_at;
+  NEW.page := OLD.page; NEW.event_id := OLD.event_id; NEW.device := OLD.device;
+  IF me IS NULL OR public.has_perm('feedback', TRUE) THEN
+    IF NEW.reply IS DISTINCT FROM OLD.reply THEN
+      NEW.reply := NULLIF(trim(NEW.reply), '');
+      NEW.replied_by := CASE WHEN NEW.reply IS NULL THEN NULL ELSE me END;
+      NEW.replied_at := CASE WHEN NEW.reply IS NULL THEN NULL ELSE NOW() END;
+    ELSE
+      NEW.replied_by := OLD.replied_by; NEW.replied_at := OLD.replied_at;
+    END IF;
+  ELSE
+    IF OLD.status <> 'new' THEN RAISE EXCEPTION 'The team has already seen this feedback, so it can no longer be changed'; END IF;
+    NEW.status := OLD.status; NEW.reply := OLD.reply; NEW.replied_by := OLD.replied_by; NEW.replied_at := OLD.replied_at;
+  END IF;
+  NEW.updated_at := NOW(); NEW.updated_by := me;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_guard_app_feedback ON app_feedback;
+CREATE TRIGGER trg_guard_app_feedback BEFORE INSERT OR UPDATE ON app_feedback
+  FOR EACH ROW EXECUTE FUNCTION public.guard_app_feedback();
+
+ALTER TABLE app_feedback ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.app_feedback FROM anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.app_feedback TO authenticated;
+GRANT ALL ON public.app_feedback TO service_role;
+DROP POLICY IF EXISTS p_feedback_select ON app_feedback;
+DROP POLICY IF EXISTS p_feedback_insert ON app_feedback;
+DROP POLICY IF EXISTS p_feedback_update ON app_feedback;
+DROP POLICY IF EXISTS p_feedback_delete ON app_feedback;
+CREATE POLICY p_feedback_select ON app_feedback FOR SELECT TO authenticated
+  USING (public.has_perm('feedback') OR (public.is_active_user() AND created_by = lower(auth.jwt() ->> 'email')));
+CREATE POLICY p_feedback_insert ON app_feedback FOR INSERT TO authenticated
+  WITH CHECK (public.is_active_user() AND created_by = lower(auth.jwt() ->> 'email'));
+CREATE POLICY p_feedback_update ON app_feedback FOR UPDATE TO authenticated
+  USING (public.has_perm('feedback', TRUE) OR (public.is_active_user() AND created_by = lower(auth.jwt() ->> 'email') AND status = 'new'))
+  WITH CHECK (public.has_perm('feedback', TRUE) OR created_by = lower(auth.jwt() ->> 'email'));
+CREATE POLICY p_feedback_delete ON app_feedback FOR DELETE TO authenticated
+  USING (public.my_role() = 'superuser');
 
 -- Live updates for the Scanner tab across devices
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE event_cards; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;

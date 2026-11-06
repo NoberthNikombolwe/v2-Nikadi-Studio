@@ -257,6 +257,30 @@ export const RUN_STATUS = {
   cancelled: { label: "Cancelled", badge: "badge-idle" },
 };
 
+// Schedules page filters: q (name / event / message), channel, status ("live" = active or
+// paused), eventId. Each schedule may carry `event_name` (joined in by the page).
+export const filterSchedules = (list = [], { q = "", channel = "all", status = "live", eventId = "all" } = {}) => {
+  const term = q.trim().toLowerCase();
+  return list.filter(s =>
+    (channel === "all" || s.channel === channel)
+    && (status === "all" || (status === "live" ? s.status === "active" || s.status === "paused" : s.status === status))
+    && (eventId === "all" || s.event_id === eventId)
+    && (!term || [s.title, s.event_name, s.body, s.wa_template].some(v => String(v || "").toLowerCase().includes(term))));
+};
+
+// Numbers for the Schedules page. `waiting` = runs still to send ({ schedule_id, run_at, status }).
+export const summariseSchedules = (list = [], waiting = [], now = new Date()) => {
+  const count = (st) => list.filter(s => s.status === st).length;
+  const live = new Set(list.filter(s => s.status === "active").map(s => s.id));
+  const weekEnd = now.getTime() + 7 * 86_400_000;
+  const pending = waiting.filter(r => live.has(r.schedule_id) && (r.status === "pending" || r.status === "sending"));
+  return {
+    active: count("active"), paused: count("paused"), done: count("done"), cancelled: count("cancelled"),
+    dueToday: pending.filter(r => ymd(new Date(r.run_at)) === ymd(now)).length,
+    dueWeek: pending.filter(r => new Date(r.run_at).getTime() <= weekEnd).length,
+  };
+};
+
 // The next send still waiting (runs sorted or not), or null
 export const nextRun = (runs = []) => runs
   .filter(r => r && (r.status === "pending" || r.status === "sending"))

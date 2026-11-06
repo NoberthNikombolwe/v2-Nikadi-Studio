@@ -19,12 +19,13 @@ export const MODULES = [
   { key: "whatsapp", label: "WhatsApp" }, { key: "batch", label: "Batch & Send" }, { key: "reports", label: "Reports" },
   { key: "history", label: "History" }, { key: "finance", label: "Finance" }, { key: "scanner", label: "Scanner" },
   { key: "calls", label: "Calls" }, { key: "settings", label: "Settings" }, { key: "users", label: "Users & roles" },
+  { key: "feedback", label: "Feedback" },
 ];
 
 // "E" = view + edit, "V" = view only; missing = no access. Super Admin (key "superuser") is always everything.
 const M = (s) => Object.fromEntries(s.split(" ").filter(Boolean).map(x => x.split(":")));
 export const DEFAULT_MATRIX = {
-  admin:             M("events:E leads:E customers:E design:E vcard:E sms:E whatsapp:E batch:E reports:E history:E finance:E scanner:E calls:E settings:E users:E"),
+  admin:             M("events:E leads:E customers:E design:E vcard:E sms:E whatsapp:E batch:E reports:E history:E finance:E scanner:E calls:E settings:E users:E feedback:E"),
   sales_officer:     M("events:E leads:E customers:E design:V vcard:V batch:V sms:E whatsapp:V reports:V history:V calls:V"),
   graphics_designer: M("events:V design:E vcard:E batch:E whatsapp:E reports:V history:V"),
   help_desk:         M("events:V customers:V sms:E reports:V history:V scanner:E calls:E"),
@@ -54,13 +55,15 @@ export const can = (matrix, role, module, level = "view") => {
 export const TAB_MODULE = {
   events: "events", leads: "leads", customers: "customers", design: "design", vcard: "vcard", sms: "sms",
   whatsapp: "whatsapp", batch: "batch", reports: "reports", history: "history", finance: "finance",
-  scanner: "scanner", calls: "calls", settings: "settings", guide: null,
+  scanner: "scanner", calls: "calls", settings: "settings", feedback: "feedback", guide: null,
+  schedules: "sms",   // shown with SMS or WhatsApp (see canSeeTab); each schedule checks its own channel
 };
 
 export const canSeeTab = (matrix, role, tab) => {
   const m = TAB_MODULE[tab];
   if (m === null) return !!role;
   if (tab === "settings") return can(matrix, role, "settings") || can(matrix, role, "users");
+  if (tab === "schedules") return can(matrix, role, "sms") || can(matrix, role, "whatsapp");
   return can(matrix, role, m);
 };
 
