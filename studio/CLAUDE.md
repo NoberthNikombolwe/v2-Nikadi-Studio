@@ -86,7 +86,10 @@ Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) 
   - **Placeholders:** scheduled SMS can only use `{name}` / `{cardType}` / `{phone}`, because extra spreadsheet columns aren't stored.
 - **Schedules page** (`tab === "schedules"`, `<SchedulesTab>`): every schedule across the events you can see, with filters, counts and create / view / edit / pause / resume / cancel / delete.
   - It reuses `<ScheduleModal>` / `<ScheduleDetail>` and `useScheduleActions` (shared with the SMS / WhatsApp panels).
-  - New schedules start from `<ScheduleTargetPicker>` (event + channel); `scheduleInputsFor(ev, access)` builds the modal's messages, sender and templates from the event row.
+  - **With an event open** (`current`, keyed by `savedEventId`): the page starts filtered to that event ("Show all events" to widen it), and **New schedule** is for that event.
+    - The picker asks only SMS or WhatsApp; it goes straight to the form when the role has just one, and "Choose another event" still works.
+    - The open event uses `scheduleInputs` from `<App>`: live SMS text / extra messages (unsaved edits included), sender and template. These are the same props the SMS / WhatsApp panels get.
+  - **Other events:** they use `scheduleInputsFor(ev, access)`, which builds the messages, sender and templates from the saved event row.
   - The tab shows with SMS **or** WhatsApp view (`canSeeTab`), and each row checks its own channel's edit permission (no blanket View-only banner).
 - **Feedback** (SQL §10, [src/lib/feedback.js](src/lib/feedback.js)):
   - **Sending:** every signed-in user sends feedback from the header **Feedback** button (`<FeedbackModal>`, also in the phone drawer) and sees their own under *My feedback* with the team's reply. They can edit it while it is still `new`.

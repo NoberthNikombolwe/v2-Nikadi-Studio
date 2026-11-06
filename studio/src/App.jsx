@@ -3564,10 +3564,14 @@ const scheduleInputsFor = (ev, access, fallbackSender) => ({
   defaultAccount: access.settings.wa_account || "Nikadi",
 });
 
-// Step before a new schedule on the Schedules page: which event, and SMS or WhatsApp
-function ScheduleTargetPicker({ events, canSms, canWa, onPick, onClose }) {
-  const sorted = [...events].sort((a, b) => String(b.start_datetime || "").localeCompare(String(a.start_datetime || "")));
-  const [eventId, setEventId] = useState(sorted[0]?.id || "");
+// Step before a new schedule on the Schedules page: which event, and SMS or WhatsApp.
+// With an event open (`current`), that event is used and only the channel is asked;
+// "Choose another event" still allows scheduling for a different one.
+function ScheduleTargetPicker({ events, current, canSms, canWa, onPick, onClose }) {
+  const sorted = [...(current && !events.some(e => e.id === current.id) ? [current] : []), ...events]
+    .sort((a, b) => String(b.start_datetime || "").localeCompare(String(a.start_datetime || "")));
+  const [eventId, setEventId] = useState(current?.id || sorted[0]?.id || "");
+  const [locked, setLocked] = useState(!!current);
   const [channel, setChannel] = useState(canSms ? "sms" : "whatsapp");
   const ev = sorted.find(e => e.id === eventId);
   return (
@@ -3580,11 +3584,22 @@ function ScheduleTargetPicker({ events, canSms, canWa, onPick, onClose }) {
         <div className="nk-modal-body">
           {!sorted.length ? <EmptyState compact icon="folder" title="No events yet" text="Create an event first, then schedule its messages." /> : (
             <>
-              <Field label="Event">
-                <select className="nk-select" value={eventId} onChange={e => setEventId(e.target.value)}>
-                  {sorted.map(e => <option key={e.id} value={e.id}>{e.username || "Event"}{e.start_datetime ? ` · ${fmtDay(e.start_datetime)}` : ""}</option>)}
-                </select>
-              </Field>
+              {locked && ev ? (
+                <div style={{padding:"10px 12px",borderRadius:10,background:N.navy700,border:`1px solid ${N.border}`,marginBottom:14,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                  <Icon n="folder" />
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:11,color:N.textDim}}>For the open event</div>
+                    <div style={{fontWeight:700,color:N.text}}>{ev.username || "Event"}{ev.start_datetime ? ` · ${fmtDay(ev.start_datetime)}` : ""}</div>
+                  </div>
+                  <button type="button" className="nk-link" style={{fontSize:12}} onClick={() => setLocked(false)}>Choose another event</button>
+                </div>
+              ) : (
+                <Field label="Event">
+                  <select className="nk-select" value={eventId} onChange={e => setEventId(e.target.value)}>
+                    {sorted.map(e => <option key={e.id} value={e.id}>{e.username || "Event"}{e.start_datetime ? ` · ${fmtDay(e.start_datetime)}` : ""}{e.id === current?.id ? " (open now)" : ""}</option>)}
+                  </select>
+                </Field>
+              )}
               <label className="nk-label">Send by</label>
               <div style={{display:"flex",gap:6}} role="radiogroup" aria-label="Send by">
                 {[["sms", "SMS", canSms], ["whatsapp", "WhatsApp", canWa]].map(([k, l, ok]) => (
@@ -3610,7 +3625,10 @@ function ScheduleTargetPicker({ events, canSms, canWa, onPick, onClose }) {
 // Schedules page: every scheduled SMS / WhatsApp send across the events you can see —
 // create, view (each send and its result), edit, pause / resume, cancel and (Super Admin)
 // delete. Each schedule obeys its own channel's permission (SMS or WhatsApp edit).
-function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallbackSender, unsavedFor, onOpenEvent }) {
+// `current` = the open event { id, username, start_datetime, inputs } (or null): the page then
+// shows that event's schedules first and "New schedule" is for it, using its live SMS text,
+// messages, sender and template (inputs) — the same as the SMS / WhatsApp tabs.
+function SchedulesTab({ access, events, current, askDialog, showToast, logHistory, fallbackSender, unsavedFor, onOpenEvent }) {
   const canDelete = useCanDelete();
   const canSms = access.can("sms", "edit"), canWa = access.can("whatsapp", "edit");
   const canEditOf = (s) => s.channel === "sms" ? canSms : canWa;
@@ -3618,7 +3636,7 @@ function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallba
   const [waiting, setWaiting] = useState([]);
   const [error, setError] = useState(null);
   const [missing, setMissing] = useState(false);
-  const [filters, setFilters] = useState({ q: "", channel: "all", status: "live", eventId: "all" });
+  const [filters, setFilters] = useState({ q: "", channel: "all", status: "live", eventId: current?.id || "all" });
   const [openId, setOpenId] = useState(null);
   const [openRuns, setOpenRuns] = useState([]);
   const [picking, setPicking] = useState(false);
@@ -3665,8 +3683,24 @@ function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallba
   const shown = filterSchedules(list || [], filters);
   const stats = summariseSchedules(list || [], waiting, now);
   const open = (list || []).find(s => s.id === openId) || null;
-  const eventOptions = [...new Map((list || []).map(s => [s.event_id, s.event_name || "Event"])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const eventOptions = [...new Map([
+    ...(current ? [[current.id, current.username || "Event"]] : []),
+    ...(list || []).map(s => [s.event_id, s.event_name || "Event"]),
+  ]).entries()].sort((a, b) => a[1].localeCompare(b[1]));
   const setF = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+  const onCurrent = !!current && filters.eventId === current.id;
+
+  // What the schedule pop-up needs for an event: live values for the open event, else its saved row
+  const inputsFor = (ev) => ev.id === current?.id ? current.inputs : scheduleInputsFor(ev, access, fallbackSender);
+  // "New schedule": with an event open, it is for that event — straight to the form when the
+  // role can schedule only one channel, else just ask SMS or WhatsApp
+  const newSchedule = () => {
+    if (current && canSms !== canWa) {
+      setEditing({ initial: null, channel: canSms ? "sms" : "whatsapp", inputs: current.inputs, doneRuns: 0 });
+      return;
+    }
+    setPicking(true);
+  };
 
   const view = (s) => { show(s.id); setOpenRuns([]); loadRuns(s.id); };
   // The event row for a schedule (from the loaded events, else read it)
@@ -3679,21 +3713,25 @@ function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallba
   const edit = async (s) => {
     const ev = await eventRow(s.event_id);
     if (!ev) { showToast("Could not open this schedule's event", "warn"); return; }
-    setEditing({ initial: s, channel: s.channel, inputs: scheduleInputsFor(ev, access, fallbackSender),
-      doneRuns: s.done_runs || 0 });
+    setEditing({ initial: s, channel: s.channel, inputs: inputsFor(ev), doneRuns: s.done_runs || 0 });
   };
 
   return (
     <div className="nk-page">
       <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:14}}>
         <div style={{flex:1,minWidth:220}}>
-          <div style={{fontSize:20,fontWeight:800,color:N.text}}><Icon n="clock" /> Schedules</div>
-          <div style={{fontSize:13,color:N.textDim}}>Every scheduled SMS and WhatsApp send across your events. They go out from the server, even with the app closed.</div>
+          <div style={{fontSize:20,fontWeight:800,color:N.text}}><Icon n="clock" /> Schedules{onCurrent ? <span style={{color:N.textMid,fontWeight:600}}> · {current.username || "Event"}</span> : ""}</div>
+          <div style={{fontSize:13,color:N.textDim}}>
+            {onCurrent
+              ? <>The open event's scheduled SMS and WhatsApp sends. <button type="button" className="nk-link" onClick={() => setF("eventId", "all")}>Show all events</button></>
+              : <>Every scheduled SMS and WhatsApp send across your events.{current ? <> <button type="button" className="nk-link" onClick={() => setF("eventId", current.id)}>Show only {current.username || "the open event"}</button></> : ""}</>}
+            {" "}They go out from the server, even with the app closed.
+          </div>
         </div>
         <button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Refresh</button>
-        <button className="nk-btn nk-btn-primary" onClick={() => setPicking(true)} disabled={missing || !(canSms || canWa)}
-          title={canSms || canWa ? "Schedule SMS or WhatsApp sends" : "Your role can view but not change schedules"}>
-          <Icon n="plus" /> New schedule
+        <button className="nk-btn nk-btn-primary" onClick={newSchedule} disabled={missing || !(canSms || canWa)}
+          title={!(canSms || canWa) ? "Your role can view but not change schedules" : current ? `Schedule sends for ${current.username || "the open event"}` : "Schedule SMS or WhatsApp sends"}>
+          <Icon n="plus" /> {current ? `New schedule for ${current.username || "this event"}` : "New schedule"}
         </button>
       </div>
 
@@ -3734,9 +3772,10 @@ function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallba
             </select>
           </div>
           {!shown.length ? (
-            <EmptyState icon="clock" title={list.length ? "No schedule matches" : "No schedules yet"}
-              text={list.length ? "Change the filters to see more." : "Plan SMS or WhatsApp reminders ahead — pick dates, or days of the week."}
-              action={!list.length && (canSms || canWa) ? <button className="nk-btn nk-btn-primary" onClick={() => setPicking(true)}><Icon n="plus" /> New schedule</button> : null} />
+            <EmptyState icon="clock"
+              title={onCurrent && !filters.q && filters.channel === "all" ? `No schedules for ${current.username || "this event"} yet` : list.length ? "No schedule matches" : "No schedules yet"}
+              text={onCurrent ? "Plan SMS or WhatsApp reminders for this event — pick dates, or days of the week." : list.length ? "Change the filters to see more." : "Plan SMS or WhatsApp reminders ahead — pick dates, or days of the week."}
+              action={(onCurrent || !list.length) && (canSms || canWa) ? <button className="nk-btn nk-btn-primary" onClick={newSchedule}><Icon n="plus" /> New schedule</button> : null} />
           ) : (
             <div className="nk-table-wrap">
               <table className="nk-table">
@@ -3781,8 +3820,8 @@ function SchedulesTab({ access, events, askDialog, showToast, logHistory, fallba
           onOpenEvent={() => { show(null); onOpenEvent(open.event_id, open.channel); }} />
       )}
       {picking && (
-        <ScheduleTargetPicker events={events} canSms={canSms} canWa={canWa} onClose={() => setPicking(false)}
-          onPick={(ev, channel) => { setPicking(false); setEditing({ initial: null, channel, inputs: scheduleInputsFor(ev, access, fallbackSender), doneRuns: 0 }); }} />
+        <ScheduleTargetPicker events={events} current={current} canSms={canSms} canWa={canWa} onClose={() => setPicking(false)}
+          onPick={(ev, channel) => { setPicking(false); setEditing({ initial: null, channel, inputs: inputsFor(ev), doneRuns: 0 }); }} />
       )}
       {editing && (
         <ScheduleModal channel={editing.channel} initial={editing.initial} doneRuns={editing.doneRuns} {...editing.inputs}
@@ -7265,6 +7304,21 @@ export default function App() {
   const tabModule = TAB_MODULE[tab];
   const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && tab !== "schedules" && !access.can(tabModule, "edit");
   const canDeleteData = access.setupMissing || access.role === "superuser";
+  // What a schedule for the open event starts from — the live SMS text and messages (unsaved
+  // edits included), its sender ID and WhatsApp template. Used by the SMS / WhatsApp panels
+  // and by the Schedules page, so all three schedule exactly the same thing.
+  const scheduleInputs = savedEventId ? {
+    eventId: savedEventId,
+    eventDate: openEventRow?.start_datetime || null,
+    smsMessages: [{ key: MAIN_MSG, title: "Main SMS", body: smsMessage },
+      ...extraMessages.filter(m => m.source === "contacts").map(m => ({ key: m.id, title: m.title, body: m.body }))],
+    defaultSender: smsSender,
+    senderIds: access.senderIds.filter(x => x.active).map(x => x.sender_id),
+    waTemplates: activeWaTemplates,
+    defaultTemplate: waTemplate,
+    defaultAccount: access.settings.wa_account || "Nikadi",
+  } : null;
+  const unsavedGuests = records.filter(r => !r.sample && !r.dbId).length;
 
   return (
     <CanDeleteContext.Provider value={canDeleteData}>
@@ -7898,9 +7952,13 @@ export default function App() {
             {/* ─── SETTINGS / SCANNER / CALLS ─── */}
             {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} showToast={showToast} />}
             {tab === "schedules" && (
-              <SchedulesTab access={access} events={savedEvents} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
+              // keyed by the open event, so opening another event shows that event's schedules
+              <SchedulesTab key={savedEventId || "no-event"} access={access} events={savedEvents}
+                current={savedEventId ? { id: savedEventId, username: eventData.username || openEventRow?.username || "",
+                  start_datetime: openEventRow?.start_datetime || null, inputs: scheduleInputs } : null}
+                askDialog={askDialog} showToast={showToast} logHistory={logHistory}
                 fallbackSender={smsSettings.senderId}
-                unsavedFor={(id) => id && id === savedEventId ? records.filter(r => !r.sample && !r.dbId).length : 0}
+                unsavedFor={(id) => id && id === savedEventId ? unsavedGuests : 0}
                 onOpenEvent={openScheduleEvent} />
             )}
             {tab === "feedback" && <FeedbackTab access={access} events={savedEvents} askDialog={askDialog} showToast={showToast} />}
@@ -8227,12 +8285,9 @@ export default function App() {
                     <button className="nk-btn nk-btn-ghost nk-btn-full" onClick={downloadSmsCsv}>
                       <Icon n="download" /> Download SMS CSV
                     </button>
-                    <ScheduledSends channel="sms" eventId={savedEventId} eventDate={openEventRow?.start_datetime || null}
+                    <ScheduledSends channel="sms" {...scheduleInputs} eventId={savedEventId}
                       canEdit={access.can("sms", "edit")} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
-                      unsaved={records.filter(r => !r.sample && !r.dbId).length}
-                      smsMessages={[{ key: MAIN_MSG, title: "Main SMS", body: smsMessage },
-                        ...extraMessages.filter(m => m.source === "contacts").map(m => ({ key: m.id, title: m.title, body: m.body }))]}
-                      defaultSender={smsSender} senderIds={access.senderIds.filter(x => x.active).map(x => x.sender_id)} />
+                      unsaved={unsavedGuests} />
                   </div>
                   {/* ── iPhone Pro Max Mockup ── */}
                   <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
@@ -8411,10 +8466,9 @@ export default function App() {
                       disabled={bulkSending||!records.filter(r=>r.phone&&r.cardUrl).length}>
                       {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`Send All (${records.filter(r=>r.phone&&r.cardUrl).length})`}</>}
                     </button>
-                    <ScheduledSends channel="whatsapp" eventId={savedEventId} eventDate={openEventRow?.start_datetime || null}
+                    <ScheduledSends channel="whatsapp" {...scheduleInputs} eventId={savedEventId}
                       canEdit={access.can("whatsapp", "edit")} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
-                      unsaved={records.filter(r => !r.sample && !r.dbId).length}
-                      waTemplates={activeWaTemplates} defaultTemplate={waTemplate} defaultAccount={access.settings.wa_account || "Nikadi"} />
+                      unsaved={unsavedGuests} />
                   </div>
 
                   {/* Middle: table */}
