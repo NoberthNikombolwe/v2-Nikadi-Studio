@@ -246,6 +246,37 @@ npm run preview
 
 ---
 
+### Deploy to Heroku (from the GitHub repository)
+
+The repository root holds what Heroku needs: `package.json` (builds `studio/` in `heroku-postbuild`), `Procfile` (`web: node server.js`), `server.js` (a dependency-free static server for `studio/dist` with gzip, caching, HTTPS redirect and single-page-app fallback) and `app.json`.
+
+1. **Create the app.** In the Heroku dashboard: **New → Create new app** (pick the Europe region if most users are in Tanzania).
+2. **Set the config vars** (Settings → Config Vars). They are read at **build** time and baked into the browser bundle, so only public values go here:
+
+   | Key | Value |
+   |---|---|
+   | `VITE_SUPABASE_URL` | `https://<project-ref>.supabase.co` |
+   | `VITE_SUPABASE_ANON_KEY` | the anon / publishable key |
+   | `VITE_SITE_URL` | `https://<your-app>.herokuapp.com/` (or your own domain, with the trailing `/`) |
+   | `VITE_SMS_SENDER_ID` | `NIKADI` (optional fallback) |
+
+   Never add `VITE_SMS_BEARER_TOKEN` / `VITE_WA_BEARER_TOKEN` — provider tokens live only in the Supabase Edge Function secrets.
+3. **Connect GitHub.** Deploy tab → **Deployment method: GitHub** → find `v1-Nikadi-Studio` → **Connect**. Under *Automatic deploys* choose branch `main` and click **Enable Automatic Deploys** (optionally tick *Wait for CI to pass*). Then **Deploy Branch** once to build now.
+4. **Let users sign in on the new address.** Supabase → Authentication → URL Configuration: add `https://<your-app>.herokuapp.com` to **Redirect URLs** (and set it as **Site URL** if Heroku is now the main address). In Google Cloud, the OAuth client's redirect stays the Supabase callback, so nothing changes there.
+5. **Allow the app to call the messaging functions.** If you set `ALLOWED_ORIGINS` for the Edge Functions (Step 8.2), add the Heroku origin:
+   ```bash
+   supabase secrets set ALLOWED_ORIGINS="https://<your-app>.herokuapp.com,https://<github-user>.github.io"
+   ```
+6. **Check it.** Open `https://<your-app>.herokuapp.com/healthz` (should say `ok`), then the app itself, sign in, and open an event.
+
+Notes
+- After changing any `VITE_*` config var, redeploy (Deploy → **Deploy Branch**) — the values are fixed at build time.
+- The GitHub Pages workflow still runs on every push to `main`. If Heroku replaces Pages, disable it in GitHub → Settings → Pages (or delete `.github/workflows/deploy-pages.yml`).
+- Run the same build locally with `npm run build && npm start` from the repository root (serves on port 3000).
+- Link previews use `VITE_SITE_URL`; after the first deploy refresh them in Facebook's Sharing Debugger.
+
+---
+
 ## Step 8 — Deploy the Messaging Edge Functions (Production Only)
 
 `send-sms` and `send-wa` are server-side proxies for the messaging API. They exist because the provider has no CORS headers and its token must not ship in the browser. Both share [`supabase/functions/_shared/proxy.ts`](supabase/functions/_shared/proxy.ts), which enforces:

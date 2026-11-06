@@ -1,0 +1,13 @@
+{
+  "name": "Nikadi Studio",
+  "description": "Event invitation cards, guest lists, WhatsApp/SMS delivery, calls and door check-in.",
+  "repository": "https://github.com/NoberthNikombolwe/v1-Nikadi-Studio",
+  "buildpacks": [{ "url": "heroku/nodejs" }],
+  "env": {
+    "VITE_SUPABASE_URL": { "description": "Supabase project URL, e.g. https://abcd.supabase.co", "required": true },
+    "VITE_SUPABASE_ANON_KEY": { "description": "Supabase anon / publishable key (public; protected by RLS)", "required": true },
+    "VITE_SITE_URL": { "description": "Public address of this app with a trailing slash, e.g. https://nikadi-studio.herokuapp.com/ (used for link previews)", "required": true },
+    "VITE_SMS_SENDER_ID": { "description": "Fallback SMS sender name", "value": "NIKADI", "required": false },
+    "VITE_BASE_PATH": { "description": "Served from the domain root on Heroku", "value": "/", "required": false }
+  }
+}

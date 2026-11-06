@@ -1,0 +1,14 @@
+{
+  "name": "nikadi-studio-heroku",
+  "private": true,
+  "description": "Heroku entry point: builds studio/ and serves studio/dist with server.js",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "heroku-postbuild": "npm ci --prefix studio --include=dev && npm run build --prefix studio",
+    "build": "npm ci --prefix studio --include=dev && npm run build --prefix studio",
+    "start": "node server.js"
+  }
+}

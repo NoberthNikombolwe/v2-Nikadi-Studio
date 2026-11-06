@@ -19,6 +19,8 @@ npm run test:functions  # Edge Function proxy tests (needs Node ≥ 22.18; mocks
 npm run preview         # serve the production build
 ```
 
+**Hosting (Heroku):** the repo root has `package.json` (`heroku-postbuild` builds `studio/`), `Procfile`, `server.js` (dependency-free static server for `studio/dist`: gzip, cache headers, HTTPS redirect, SPA fallback, `/healthz`) and `app.json`. `VITE_*` config vars are read at build time. Steps: README → "Deploy to Heroku".
+
 **Hosting:** GitHub Pages via [.github/workflows/deploy-pages.yml](../.github/workflows/deploy-pages.yml) (at the git root) — every push to `main` lints, tests, builds and deploys. The site lives in a sub-folder (`/<repo>/`), so `vite.config.js` takes `base` from `VITE_BASE_PATH`; never hard-code root-absolute URLs (`"/foo"`) in app code — use `import.meta.env.BASE_URL`. Build-time values come from repository *variables* (public only). Setup steps: README → "Deploy to GitHub Pages". Link-preview meta tags live in `index.html` and use `%SITE_URL%` (filled by the `nikadi-site-url` plugin in `vite.config.js` from `VITE_SITE_URL`); keep `public/og-image.jpg` 1200×630 and well under 300 KB or WhatsApp drops the preview.
 
 Before finishing a change run `npm run lint`, `npm test`, `npm run test:functions` (if you touched `supabase/functions`) and `npm run build`, then exercise the UI in `npm run dev`. There are no component/UI tests — `App.jsx` is verified by hand.
