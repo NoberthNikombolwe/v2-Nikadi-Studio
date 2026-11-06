@@ -1,3 +1,4 @@
+import Logo from "./Logo";
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "./lib/supabase";
 import Icon from "./Icon";
@@ -82,7 +83,7 @@ export default function PublicScanPage({ eventId }) {
   const box = { maxWidth: 1000, margin: "0 auto" };
   const brand = (
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
-      <div style={{width:36,height:36,borderRadius:10,background:`linear-gradient(135deg, ${N.accent}, ${N.sky})`,color:"#fff",fontWeight:800,display:"grid",placeItems:"center"}}>N</div>
+      <div style={{width:36,height:36,borderRadius:10,background:`linear-gradient(135deg, ${N.accent}, ${N.sky})`,color:"#fff",fontWeight:800,display:"grid",placeItems:"center"}}><Logo title="Nikadi" /></div>
       <div><div style={{fontWeight:800}}>Nikadi Studio</div><div style={{fontSize:11,color:N.textDim}}>Door check-in</div></div>
     </div>
   );

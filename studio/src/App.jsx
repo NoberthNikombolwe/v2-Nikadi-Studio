@@ -1,3 +1,4 @@
+import Logo from "./Logo";
 import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
@@ -2523,7 +2524,7 @@ function NoAccess({ email, name, avatar, onSignOut, onRetry }) {
       <style>{CSS}</style>
       <div className="nk-noaccess-card" role="main" aria-labelledby="nk-noaccess-title">
         <div className="nk-noaccess-brand">
-          <div className="nk-logo-icon">N</div>
+          <div className="nk-logo-icon"><Logo title="Nikadi" /></div>
           <div>
             <div className="nk-logo-name">Nikadi Studio</div>
             <div className="nk-logo-tag">Card Design &amp; Dispatch</div>
@@ -5839,7 +5840,7 @@ export default function App() {
             <Icon n="menu" />
           </button>
           <div className="nk-logo">
-            <div className="nk-logo-icon">N</div>
+            <div className="nk-logo-icon"><Logo title="Nikadi" /></div>
             <div>
               <div className="nk-logo-name">Nikadi Studio</div>
               <div className="nk-logo-tag nk-hide-md">Card Design & Dispatch</div>
@@ -5944,7 +5945,7 @@ export default function App() {
             <aside className="nk-drawer" role="dialog" aria-modal="true" aria-label="Menu">
               <div className="nk-drawer-head">
                 <div className="nk-logo">
-                  <div className="nk-logo-icon">N</div>
+                  <div className="nk-logo-icon"><Logo title="Nikadi" /></div>
                   <div className="nk-logo-name">Nikadi Studio</div>
                 </div>
                 <button className="nk-modal-close" onClick={() => setMenuOpen(false)} aria-label="Close menu"><Icon n="x" /></button>
@@ -6730,7 +6731,7 @@ export default function App() {
                           {/* nav bar */}
                           <div style={{background:"#f5f5f5",borderBottom:"1px solid #e0e0e0",padding:"6px 12px",display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
                             <span style={{fontSize:16,color:"#007aff"}}>‹</span>
-                            <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#0a7ea4,#0d9da8)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0}}>N</div>
+                            <div style={{width:28,height:28,borderRadius:"50%",background:"linear-gradient(135deg,#0a7ea4,#0d9da8)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#fff",flexShrink:0}}><Logo /></div>
                             <div style={{flex:1}}>
                               <div style={{fontSize:11,fontWeight:700,color:"#000",lineHeight:1.2}}>NIKADI</div>
                               <div style={{fontSize:9,color:"#8e8e93"}}>Text Message</div>
@@ -6743,7 +6744,7 @@ export default function App() {
                             <div style={{textAlign:"center",fontSize:9,color:"#8e8e93",marginBottom:4,marginTop:"auto"}}>Today 9:41 AM</div>
                             {/* received bubble */}
                             <div style={{display:"flex",alignItems:"flex-end",gap:4}}>
-                              <div style={{width:20,height:20,borderRadius:"50%",background:"linear-gradient(135deg,#0a7ea4,#0d9da8)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:700,color:"#fff",flexShrink:0}}>N</div>
+                              <div style={{width:20,height:20,borderRadius:"50%",background:"linear-gradient(135deg,#0a7ea4,#0d9da8)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:700,color:"#fff",flexShrink:0}}><Logo /></div>
                               <div style={{
                                 background:"#e5e5ea",
                                 borderRadius:"16px 16px 16px 4px",

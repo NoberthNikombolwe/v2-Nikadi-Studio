@@ -1,3 +1,4 @@
+import Logo from "./Logo";
 import { useState } from "react";
 import { supabase } from "./lib/supabase";
 
@@ -137,7 +138,7 @@ export default function LoginPage() {
       <style>{CSS}</style>
       <div className="login-root">
         <div className="login-card">
-          <div className="login-logo-icon">N</div>
+          <div className="login-logo-icon"><Logo title="Nikadi" /></div>
           <div className="login-app-name">Nikadi Studio</div>
           <div className="login-tagline">Card Design &amp; Dispatch</div>
 
