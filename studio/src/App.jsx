@@ -1,5 +1,5 @@
 import Logo from "./Logo";
-import { planCardSave } from "./lib/guestMerge";
+import { planCardSave, splitImport } from "./lib/guestMerge";
 import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
@@ -3018,10 +3018,11 @@ const NoEventOpen = ({ what, onGo }) => (
     action={<button className="nk-btn nk-btn-primary" onClick={() => onGo("events")}><Icon n="folder" /> Go to Events</button>} />
 );
 
-function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory }) {
+function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const [commenting, setCommenting] = useState(null);
   const canComment = access.setupMissing || access.can("calls", "edit") || access.can("scanner", "edit");
+  const canImport  = access.setupMissing || access.can("calls", "edit") || access.can("design", "edit") || access.can("batch", "edit");
   // Saves a guest comment (same field as the Calls tab) and logs it to the event history
   const saveComment = async (c, text) => {
     const next = { call_comment: text || null, call_updated_at: new Date().toISOString(), call_by: myEmail };
@@ -3075,6 +3076,7 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
         </div>
         <div style={{display:"flex",gap:8}}>
           <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => { load(); loadRecent(); }}><Icon n="refresh" /> Refresh</button>
+          {canImport && <GuestImport eventId={eventId} cards={cards || []} showToast={showToast} logHistory={logHistory} onAdded={(rows) => { load(); onGuestsAdded?.(rows); }} />}
           {canScan && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="link" /> Share scan page{eventRow?.scan_code ? " (on)" : ""}</button>}
         </div>
       </div>
@@ -3109,6 +3111,96 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
       )}
       {sharing && <ShareScanModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
     </div>
+  );
+}
+
+// "Import guests (Excel)" for the Calls and Scanner tabs: reads a sheet (Name, Card
+// type, Phone — same columns as the Design upload), shows what will be added and what is
+// skipped because that name + phone is already on the guest list, then inserts only the
+// new guests. Never changes or removes saved guests, so calls and check-ins are safe.
+function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
+  const [plan, setPlan] = useState(null);    // { fileName, add, skip, invalid }
+  const [busy, setBusy] = useState(false);
+  const inputId = useId();
+  const onFile = (e) => {
+    const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
+    const r = new FileReader();
+    r.onload = async (ev) => {
+      try {
+        const XLSX = await loadXlsx();
+        const wb = XLSX.read(ev.target.result, { type: "array" });
+        const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
+        const { rows } = normaliseSheetRows(data);
+        if (!rows.length) { showToast("No rows found in that file", "warn"); return; }
+        setPlan({ fileName: f.name, ...splitImport(rows, cards) });
+      } catch (err) { showToast(`Could not read the file: ${err.message}`, "warn"); }
+    };
+    r.readAsArrayBuffer(f);
+  };
+  const doImport = async () => {
+    if (!plan?.add.length) return;
+    setBusy(true);
+    const rows = plan.add.map(r => ({ event_id: eventId, name: String(r.name || "").trim(), card_type: String(r.cardType || "").trim(),
+      phone: String(r.phone || "").trim(), wa_status: WA.idle, sms_status: SMS.pending }));
+    const { data, error } = await supabase.from("event_cards").insert(rows).select("id,name,card_type,phone,wa_status,sms_status");
+    setBusy(false);
+    if (error) { showToast(`Import failed: ${error.message}`, "warn"); return; }
+    logHistory?.({ channel: "event", action: "contacts", detail: `Imported ${rows.length} guest${rows.length === 1 ? "" : "s"} from ${plan.fileName}${plan.skip.length ? ` (${plan.skip.length} skipped: already on the list)` : ""}` }, eventId);
+    onAdded?.(data || []);
+    showToast(`Added ${rows.length} guest${rows.length === 1 ? "" : "s"}${plan.skip.length ? ` — ${plan.skip.length} skipped (already on the list)` : ""}`, "success");
+    setPlan(null);
+  };
+  const th = (t) => <th>{t}</th>;
+  return (
+    <>
+      <label htmlFor={inputId} className="nk-btn nk-btn-ghost" style={{fontSize:12,cursor:"pointer"}}><Icon n="upload" /> Import guests (Excel)</label>
+      <input id={inputId} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={onFile} />
+      {plan && (
+        <DetailModal label="Import guests" onClose={() => setPlan(null)} width={720}>
+          <div style={{fontSize:18,fontWeight:800,color:N.text,marginBottom:4}}>Import guests</div>
+          <p style={{fontSize:12,color:N.textDim,marginBottom:14}}>{plan.fileName} · only new guests are added; saved guests, their calls and check-ins are not changed.</p>
+          <div className="nk-stats" style={{marginBottom:14}}>
+            <MoneyTile label="Will be added" value={plan.add.length} tone="good" />
+            <MoneyTile label="Skipped — already exist" value={plan.skip.length} tone="warn" />
+            {plan.invalid.length > 0 && <MoneyTile label="Skipped — no name" value={plan.invalid.length} tone="bad" />}
+          </div>
+          {plan.skip.length > 0 && (
+            <>
+              <div style={{fontSize:13,fontWeight:700,color:N.amber,marginBottom:6}}><Icon n="alert" /> These names with the same phone number already exist and will be skipped</div>
+              <div className="nk-table-wrap" style={{maxHeight:220,overflowY:"auto",marginBottom:14}}>
+                <table className="nk-table">
+                  <thead><tr>{th("Name")}{th("Phone")}{th("Card type")}{th("Why skipped")}</tr></thead>
+                  <tbody>{plan.skip.map((s, i) => (
+                    <tr key={i}><td style={{fontWeight:600}}>{s.row.name}</td><td>{s.row.phone || "—"}</td><td>{s.row.cardType || "—"}</td><td><Pill tone="warn">{s.reason}</Pill></td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </>
+          )}
+          {plan.add.length > 0 ? (
+            <>
+              <div style={{fontSize:13,fontWeight:700,color:N.green,marginBottom:6}}><Icon n="plus" /> New guests to add</div>
+              <div className="nk-table-wrap" style={{maxHeight:220,overflowY:"auto"}}>
+                <table className="nk-table">
+                  <thead><tr>{th("Name")}{th("Phone")}{th("Card type")}</tr></thead>
+                  <tbody>{plan.add.map((r, i) => (
+                    <tr key={i}><td style={{fontWeight:600}}>{r.name}</td><td>{r.phone || "—"}</td><td>{r.cardType || "—"}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </>
+          ) : <EmptyState compact icon="check" title="Nothing new to add" text="Every guest in this file is already on the list." />}
+          <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16}}>
+            <button className="nk-btn nk-btn-ghost" onClick={() => setPlan(null)} disabled={busy}>Cancel</button>
+            {plan.add.length > 0 && (
+              <button className="nk-btn nk-btn-primary" onClick={doImport} disabled={busy}>
+                {busy ? <><Icon n="loader" /> Adding…</> : <><Icon n="plus" /> Add {plan.add.length} guest{plan.add.length === 1 ? "" : "s"}{plan.skip.length ? `, skip ${plan.skip.length}` : ""}</>}
+              </button>
+            )}
+          </div>
+        </DetailModal>
+      )}
+    </>
   );
 }
 
@@ -3458,7 +3550,7 @@ function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
 }
 
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
-function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents }) {
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const [filter, setFilter] = useState({ status: "all", q: "" });
   const [commenting, setCommenting] = useState(null);
@@ -3509,6 +3601,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
         </div>
         <div style={{display:"flex",gap:8}}>
           <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={load}><Icon n="refresh" /> Refresh</button>
+          {canEdit && <GuestImport eventId={eventId} cards={cards || []} showToast={showToast} logHistory={logHistory} onAdded={(rows) => { load(); onGuestsAdded?.(rows); }} />}
           <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={exportCalls} disabled={!cards?.length}><Icon n="download" /> Export Excel</button>
           {canShare && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="eye" /> Share view-only{eventRow?.view_code ? " (on)" : ""}</button>}
         </div>
@@ -5085,6 +5178,13 @@ export default function App() {
       ? `${total} cards saved — ${plan.retained.length} guest${plan.retained.length === 1 ? "" : "s"} not in the new sheet kept because they have call or check-in history`
       : `${total} cards saved — calls and check-ins kept`, plan.retained.length ? "info" : "success");
   };
+
+  // Guests imported in the Calls / Scanner tabs are already saved; add them to the open
+  // event's list too, so the Design / send tabs see them and a later Save Cards keeps them.
+  const addImportedGuests = (rows) => setRecords(rs => [...rs.filter(r => !r.sample), ...rows.map(c => ({
+    dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
+    waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
+  }))]);
 
   // Manually persists the current element layout to the loaded event's DB row
   // (and refreshes the localStorage layout cache to match)
@@ -6679,11 +6779,11 @@ export default function App() {
             {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} showToast={showToast} />}
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
-                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} />
+                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} onGuestsAdded={addImportedGuests} />
             )}
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
-                showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} />
+                showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} onGuestsAdded={addImportedGuests} />
             )}
 
             {/* ─── GUIDE ─── */}

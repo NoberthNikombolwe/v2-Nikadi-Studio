@@ -498,3 +498,18 @@ test("re-uploading a guest list keeps calls and check-ins", () => {
   assert.equal(hasLedger({ scan_count: 1 }), true);
   assert.equal(hasLedger({ call_comment: "  " }), false);
 });
+
+import { splitImport } from "./guestMerge.js";
+test("guest import adds only new name + phone pairs", () => {
+  const cards = [{ name: "Asha Said", phone: "255712000001" }];
+  const r = splitImport([
+    { name: "asha said", phone: "0712 000 001" },   // existing → skip
+    { name: "Asha Said", phone: "0712000099" },     // same name, other phone → add
+    { name: "Juma", phone: "0712000002" },          // new
+    { name: "JUMA", phone: "+255712000002" },       // repeated in file
+    { name: "", phone: "0712000003" },              // invalid
+  ], cards);
+  assert.deepEqual(r.add.map(x => x.phone), ["0712000099", "0712000002"]);
+  assert.deepEqual(r.skip.map(x => x.reason), ["Already on the guest list", "Repeated in this file"]);
+  assert.equal(r.invalid.length, 1);
+});
