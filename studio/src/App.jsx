@@ -4082,6 +4082,7 @@ export default function App() {
   /* ── Saved templates ── */
   const [savedTemplates,    setSavedTemplates]    = useState([]);
   const [pickingTemplate,   setPickingTemplate]   = useState(false);   // "Change template" pop-up
+  const [designSaveFor,     setDesignSaveFor]     = useState(null);    // event id whose new template must be written to the DB
   const [showSaveTemplate,  setShowSaveTemplate]  = useState(false);
   const [templateSaveName,  setTemplateSaveName]  = useState("");
 
@@ -4683,11 +4684,30 @@ export default function App() {
       if (ok !== "yes") return false;
     }
     setPickingTemplate(false);
-    if (choice.file) { onBgUpload({ target: { files: [choice.file] } }, { keepLayout }); }
+    // The old design is replaced: cards rendered with it are cleared so they get re-made
+    setRecords(rs => rs.map(r => r.uploadStatus === "uploaded" || r.cardUrl ? { ...r, uploadStatus: "idle", cardUrl: null } : r));
+    if (choice.file) { setCoverUrl(null); onBgUpload({ target: { files: [choice.file] } }, { keepLayout }); }
     else await applySavedTemplate(choice.tpl, { keepLayout });
-    if (savedEventId) showToast("New template on the canvas — press Save Event to keep it for this event", "info");
+    if (savedEventId) setDesignSaveFor(savedEventId);   // written to the event once the image + layout settle
     return true;
   };
+
+  // After "Change template", store the new background + layout on the event straight away,
+  // so reopening the event (on any device) reads the new design, not the old one.
+  useEffect(() => {
+    if (!designSaveFor || !supabase || loadingTemplate || !coverUrl) return;
+    const t = setTimeout(async () => {
+      const id = designSaveFor;
+      setDesignSaveFor(null);
+      if (id !== savedEventId) return;
+      const { error } = await supabase.from("events").update({ cover_image_url: coverUrl, elements_layout: elements }).eq("id", id);
+      if (error) { showToast(`Template changed on screen but not saved: ${error.message} — press Save Event`, "warn"); return; }
+      logHistory({ channel: "event", action: "update", detail: "Card template changed" }, id);
+      loadSavedEvents();
+      showToast("Template changed and saved to this event — upload the cards again before sending", "success");
+    }, 800);
+    return () => clearTimeout(t);
+  }, [designSaveFor, coverUrl, elements, loadingTemplate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Clears the canvas entirely: no background image, default element layout
   const resetTemplate = () => {
