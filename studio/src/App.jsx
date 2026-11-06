@@ -20,6 +20,8 @@ import { ACCOUNT_TYPES, TXN_KINDS, TXN_CATEGORIES, validateTransaction, txnToRow
 import { N, alpha, getThemePref, applyTheme, nextThemePref } from "./lib/theme";
 import { PACKAGE_OPTIONS, EVENT_TYPES, TZ_REGIONS, LEAD_STATUSES, OPEN_STATUSES, FOLLOWUP_METHODS, parsePrice, formatTsh, validateLead, validateCustomer,
          leadToRow, eventFromLead, matchCustomer, localDate, followupDue, filterLeads, sortLeads, summariseLeads } from "./lib/crm";
+import { MAX_SCHEDULE_RUNS, MAX_EVERY_WEEKS, WEEKDAYS, CARD_PLACEHOLDERS, AUDIENCE_LABEL, SCHEDULE_STATUS, RUN_STATUS, scheduleTargets, describeTargetSkips,
+  validateSchedule, describeSchedule, defaultScheduleForm, formForEdit, patternOf, parseLocal, fmtRun, ymd, smsParts, estimateSms, audienceOptions, nextRun } from "./lib/schedule";
 import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory, HISTORY_CHANNELS, HISTORY_ACTIONS, HISTORY_STATUSES } from "./lib/history";
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -548,6 +550,9 @@ const CSS = `
   .badge-no      { background: ${N.redBg};   color: ${N.red};   border: 1px solid ${alpha(N.red,"44")}; }
   .badge-sent    { background: ${N.tealBg};  color: ${N.teal};  border: 1px solid ${alpha(N.teal,"44")}; }
   .badge-purple  { background: ${N.purpleBg}; color: ${N.purple}; border: 1px solid ${alpha(N.purple,"44")}; }
+  .nk-sched-row { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; padding: 8px 10px; margin-bottom: 6px;
+    border-radius: 8px; border: 1px solid ${N.border}; background: ${N.navy700}; color: ${N.text}; cursor: pointer; font: inherit; font-size: 13px; }
+  .nk-sched-row:hover, .nk-sched-row:focus-visible { border-color: ${N.purple}; }
 
   /* Toast */
   .nk-toast {
@@ -3024,6 +3029,509 @@ const NoEventOpen = ({ what, onGo }) => (
   <EmptyState icon="folder" title="No event open" text={`${what} works on one event at a time. Open the event first.`}
     action={<button className="nk-btn nk-btn-primary" onClick={() => onGo("events")}><Icon n="folder" /> Go to Events</button>} />
 );
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SCHEDULED SENDS — useSchedules() + <ScheduledSends> (panel in the SMS and
+   WhatsApp tabs), <ScheduleModal> (new / edit) and <ScheduleDetail> (its sends).
+   Send times are worked out in src/lib/schedule.js and saved through the
+   save_message_schedule() RPC; the run-schedules Edge Function (called every
+   minute by pg_cron) does the sending, so it works with every browser closed.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+// The open event's schedules for one channel and their sends, kept live with realtime.
+// `missing` is true until the schedules SQL (section 9) has been run.
+function useSchedules(eventId, channel) {
+  const [schedules, setSchedules] = useState(null);
+  const [runs, setRuns] = useState([]);
+  const [error, setError] = useState(null);
+  const [missing, setMissing] = useState(false);
+  const load = async () => {
+    if (!supabase || !eventId) { setSchedules(null); setRuns([]); return; }
+    const { data, error: e } = await supabase.from("message_schedules").select("*")
+      .eq("event_id", eventId).eq("channel", channel).order("created_at", { ascending: false });
+    if (e) {
+      const notSetUp = /message_schedules|schema cache|does not exist/i.test(e.message);
+      setMissing(notSetUp); setError(notSetUp ? null : e.message); setSchedules([]); setRuns([]);
+      return;
+    }
+    setMissing(false); setError(null); setSchedules(data || []);
+    const ids = (data || []).map(s => s.id);
+    if (!ids.length) { setRuns([]); return; }
+    const { data: rs, error: re } = await supabase.from("message_schedule_runs")
+      .select("id,schedule_id,run_at,status,sent,failed,skipped,detail,started_at,finished_at").in("schedule_id", ids).order("run_at");
+    if (re) setError(re.message); else setRuns(rs || []);
+  };
+  useEffect(() => {
+    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
+    if (!supabase || !eventId) return;
+    const byTime = (a, b) => new Date(a.run_at) - new Date(b.run_at);
+    const ch = supabase.channel(`schedules-${channel}-${eventId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedules", filter: `event_id=eq.${eventId}` }, (p) => {
+        if (p.eventType === "DELETE") {
+          setSchedules(ss => ss && ss.filter(s => s.id !== p.old.id));
+          setRuns(rs => rs.filter(r => r.schedule_id !== p.old.id));
+          return;
+        }
+        const row = p.new;
+        if (row.channel !== channel) return;
+        setSchedules(ss => !ss ? ss : ss.some(s => s.id === row.id) ? ss.map(s => s.id === row.id ? { ...s, ...row } : s) : [row, ...ss]);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedule_runs", filter: `event_id=eq.${eventId}` }, (p) => {
+        if (p.eventType === "DELETE") { setRuns(rs => rs.filter(r => r.id !== p.old.id)); return; }
+        const row = p.new;
+        setRuns(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [...rs, row].sort(byTime));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [eventId, channel]); // eslint-disable-line react-hooks/exhaustive-deps
+  return { schedules, runs, error, missing, load };
+}
+
+const CHANNEL_WORD = { sms: "SMS", whatsapp: "WhatsApp" };
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const SchedBadge = ({ map, status }) => <span className={`nk-badge ${map[status]?.badge || "badge-idle"}`}>{map[status]?.label || status}</span>;
+
+// Panel in the SMS / WhatsApp tab: the event's schedules for that channel and "New schedule".
+//   smsMessages: [{ key, title, body }] (main + extra "contacts" messages) — SMS only
+//   waTemplates: active wa_templates rows — WhatsApp only
+function ScheduledSends({ channel, eventId, eventDate, canEdit, askDialog, showToast, logHistory, unsaved = 0,
+  smsMessages = [], defaultSender, senderIds = [], waTemplates = [], defaultTemplate, defaultAccount }) {
+  const canDelete = useCanDelete();
+  const { schedules, runs, error, missing, load } = useSchedules(eventId, channel);
+  const [editing, setEditing] = useState(null);      // null | { initial: schedule row or null }
+  const [openId, setOpenId] = useState(null);
+  const [showDone, setShowDone] = useState(false);
+  const runsOf = (id) => runs.filter(r => r.schedule_id === id);
+  const live = (schedules || []).filter(s => s.status === "active" || s.status === "paused");
+  const ended = (schedules || []).filter(s => s.status === "done" || s.status === "cancelled");
+  const open = (schedules || []).find(s => s.id === openId) || null;
+  const word = CHANNEL_WORD[channel];
+
+  // Pause / resume / cancel through the RPC (it checks the role and the event)
+  const setStatus = async (s, status) => {
+    if (status === "cancelled") {
+      const ok = await askDialog({ title: `Cancel "${s.title}"?`, body: "Sends still waiting won't go out, and a send in progress stops before its next batch. Sends already made stay in the history. This can't be undone — make a new schedule to start again.",
+        actions: [{ value: "yes", label: "Cancel schedule", kind: "danger" }] });
+      if (ok !== "yes") return;
+    }
+    const { error: e } = await supabase.rpc("set_message_schedule_status", { p_id: s.id, p_status: status });
+    if (e) { showToast(`Could not change the schedule: ${e.message}`, "warn"); return; }
+    const verb = { paused: "paused", active: "resumed", cancelled: "cancelled" }[status];
+    logHistory({ channel, action: "schedule", title: s.title, detail: `Schedule ${verb}` }, eventId);
+    showToast(`"${s.title}" ${verb}${status === "active" ? " — sends that came due while paused are skipped" : ""}`, status === "cancelled" ? "info" : "success");
+    load();
+  };
+  // Super Admin only (RLS refuses anyone else)
+  const remove = async (s) => {
+    if (!(await confirmDelete(askDialog, `schedule "${s.title}"`))) return;
+    const { data, error: e } = await supabase.from("message_schedules").delete().eq("id", s.id).select("id");
+    if (e || !data?.length) { showToast(`Could not delete the schedule${e ? `: ${e.message}` : ""}`, "warn"); return; }
+    logHistory({ channel, action: "schedule", title: s.title, detail: "Schedule deleted" }, eventId);
+    setOpenId(null); showToast(`Deleted "${s.title}"`, "success"); load();
+  };
+
+  const row = (s) => {
+    const rs = runsOf(s.id);
+    const next = nextRun(rs);
+    const last = [...rs].reverse().find(r => r.status === "done" || r.status === "failed");
+    return (
+      <button key={s.id} type="button" className="nk-sched-row" onClick={() => setOpenId(s.id)} aria-label={`Open schedule ${s.title}`}>
+        <span style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+          <b style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.title}</b>
+          <SchedBadge map={SCHEDULE_STATUS} status={s.status} />
+        </span>
+        <span style={{fontSize:11,color:N.textDim}}>
+          {next ? <><Icon n="clock" /> {next.status === "sending" ? "Sending now" : `Next: ${fmtRun(next.run_at)}`}</>
+            : last ? `Last: ${fmtRun(last.run_at)} · ${last.sent} sent` : "No sends left"}
+          {" · "}{s.done_runs}/{s.total_runs} done
+        </span>
+      </button>
+    );
+  };
+
+  return (
+    <div style={{marginTop:20}}>
+      <div className="nk-sec" style={{color:N.purple}}><Icon n="clock" /> Scheduled {word}</div>
+      <div className="nk-chip" style={{marginBottom:10,fontSize:11,lineHeight:1.7}}>
+        Plan {word} sends ahead: pick dates, or days of the week for a few weeks. They go out from the server, even with this page closed.
+      </div>
+      {!eventId ? (
+        <EmptyState compact icon="folder" title="Save the event first" text="Schedules belong to a saved event." />
+      ) : missing ? (
+        <EmptyState compact icon="database" title="Schedules aren't set up yet" text="Run supabase-schema.sql in Supabase and deploy run-schedules (README → Scheduled sends)." />
+      ) : error ? (
+        <EmptyState compact tone="warn" icon="alert" title="Could not load schedules" text={error}
+          action={<button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Try again</button>} />
+      ) : schedules === null ? (
+        <EmptyState compact loading title="Loading schedules…" />
+      ) : (
+        <>
+          {live.map(row)}
+          {!live.length && <div style={{fontSize:12,color:N.textDim,marginBottom:8}}>No {word} scheduled for this event.</div>}
+          {!!ended.length && (
+            <>
+              <button type="button" className="nk-link" style={{fontSize:12,marginBottom:6}} onClick={() => setShowDone(v => !v)} aria-expanded={showDone}>
+                {showDone ? "Hide" : "Show"} finished ({ended.length})
+              </button>
+              {showDone && ended.map(row)}
+            </>
+          )}
+        </>
+      )}
+      <button className="nk-btn nk-btn-full" style={{marginTop:8,background:N.purpleBg,color:N.purple,border:`1px solid ${alpha(N.purple,"44")}`}}
+        onClick={() => setEditing({ initial: null })} disabled={!eventId || missing || !canEdit}
+        title={canEdit ? `Schedule ${word} sends` : `Your role can view but not change ${word} schedules`}>
+        <Icon n="clock" /> New schedule
+      </button>
+
+      {open && !editing && (
+        <ScheduleDetail schedule={open} runs={runsOf(open.id)} canEdit={canEdit} canDelete={canDelete}
+          onClose={() => setOpenId(null)} onEdit={() => setEditing({ initial: open })}
+          onStatus={(st) => setStatus(open, st)} onDelete={() => remove(open)} />
+      )}
+      {editing && (
+        <ScheduleModal channel={channel} eventId={eventId} eventDate={eventDate} initial={editing.initial}
+          doneRuns={editing.initial ? runsOf(editing.initial.id).filter(r => r.status !== "pending" && r.status !== "cancelled").length : 0}
+          smsMessages={smsMessages} defaultSender={defaultSender} senderIds={senderIds}
+          waTemplates={waTemplates} defaultTemplate={defaultTemplate} defaultAccount={defaultAccount} unsaved={unsaved}
+          askDialog={askDialog} showToast={showToast} logHistory={logHistory}
+          onClose={() => setEditing(null)}
+          onSaved={(id) => { setEditing(null); setOpenId(id); load(); }} />
+      )}
+    </div>
+  );
+}
+
+// One schedule: what it sends, to whom, and every send with its result
+function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit, onStatus, onDelete }) {
+  const live = s.status === "active" || s.status === "paused";
+  const info = [
+    ["When", describeSchedule(s.pattern || {})],
+    ["Who", AUDIENCE_LABEL[s.audience] || s.audience],
+    ...(s.channel === "sms"
+      ? [["Sender", s.sender_id || "Default"], ["Message", s.body || ""]]
+      : [["Template", `${s.wa_template || "—"} · ${s.wa_image ? "each guest's card image" : "text only"}`]]),
+    ["Created", `${fmtWhen(s.created_at)}${s.created_by ? ` by ${s.created_by}` : ""}`],
+    ...(s.updated_by ? [["Changed", `${fmtWhen(s.updated_at)} by ${s.updated_by}`]] : []),
+  ];
+  const totals = runs.reduce((t, r) => ({ sent: t.sent + (r.sent || 0), failed: t.failed + (r.failed || 0), skipped: t.skipped + (r.skipped || 0) }), { sent: 0, failed: 0, skipped: 0 });
+  return (
+    <DetailModal label={`Schedule ${s.title}`} onClose={onClose} width={760}>
+      <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",marginBottom:12,paddingRight:36}}>
+        <div style={{fontSize:18,fontWeight:800,color:N.text}}><Icon n={s.channel === "sms" ? "sms" : "whatsapp"} /> {s.title}</div>
+        <SchedBadge map={SCHEDULE_STATUS} status={s.status} />
+        <span style={{fontSize:12,color:N.textDim}}>{s.done_runs}/{s.total_runs} sends done · {totals.sent} delivered to the provider{totals.failed ? ` · ${totals.failed} failed` : ""}{totals.skipped ? ` · ${totals.skipped} skipped` : ""}</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"max-content 1fr",gap:"6px 14px",fontSize:13,marginBottom:14}}>
+        {info.map(([k, v]) => (
+          <Fragment key={k}>
+            <div style={{color:N.textDim,fontWeight:600}}>{k}</div>
+            <div style={{color:N.text,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{v}</div>
+          </Fragment>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+        {live && canEdit && <button className="nk-btn nk-btn-primary" onClick={onEdit}><Icon n="edit" /> Edit</button>}
+        {s.status === "active" && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("paused")}><Icon n="pause" /> Pause</button>}
+        {s.status === "paused" && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("active")}><Icon n="play" /> Resume</button>}
+        {live && canEdit && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => onStatus("cancelled")}><Icon n="ban" /> Cancel schedule</button>}
+        {canDelete && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={onDelete}><Icon n="trash" /> Delete</button>}
+        {!canEdit && <span style={{fontSize:12,color:N.textDim,alignSelf:"center"}}><Icon n="lock" /> Your role can view but not change this schedule</span>}
+      </div>
+      <div className="nk-table-wrap">
+        <table className="nk-table">
+          <thead><tr>{["#", "When", "Status", "Sent", "Failed", "Skipped", "Detail"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+          <tbody>
+            {runs.map((r, i) => (
+              <tr key={r.id}>
+                <td>{i + 1}</td>
+                <td>{fmtRun(r.run_at)}</td>
+                <td><SchedBadge map={RUN_STATUS} status={r.status} /></td>
+                <td>{r.sent}</td>
+                <td>{r.failed}</td>
+                <td>{r.skipped}</td>
+                <td>{r.detail || ""}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!runs.length && <EmptyState compact icon="clock" title="No sends" />}
+      </div>
+    </DetailModal>
+  );
+}
+
+// New / edit schedule pop-up. Every send time is checked as you type — a date or time that
+// has already passed is refused — and the preview shows who it goes to and what it costs.
+function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMessages, defaultSender, senderIds,
+  waTemplates, defaultTemplate, defaultAccount, unsaved, askDialog, showToast, logHistory, onClose, onSaved }) {
+  const isSms = channel === "sms";
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => { const t = setInterval(() => setNow(new Date()), 30_000); return () => clearInterval(t); }, []);
+  const [title, setTitle] = useState(initial?.title || "Reminder");
+  const firstMsg = smsMessages[0] || { key: MAIN_MSG, title: "Main SMS", body: "" };
+  const [messageKey, setMessageKey] = useState(initial?.message_key || firstMsg.key);
+  const [body, setBody] = useState(initial?.body ?? firstMsg.body ?? "");
+  const [sender, setSender] = useState(initial?.sender_id || defaultSender || "");
+  const templateNames = waTemplates.length ? waTemplates.map(t => t.name) : [defaultTemplate].filter(Boolean);
+  const [template, setTemplate] = useState(initial?.wa_template || defaultTemplate || templateNames[0] || "");
+  const tplRow = waTemplates.find(t => t.name === template);
+  const image = isSms ? false : (tplRow ? tplRow.has_image_header !== false : (initial?.wa_image ?? true));
+  const [audience, setAudience] = useState(initial?.audience || "all");
+  const [form, setForm] = useState(() => initial ? formForEdit(initial.pattern, { now: new Date(), doneRuns }) : defaultScheduleForm(new Date(), eventDate));
+  const [cards, setCards] = useState(null);
+  const [tried, setTried] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const bodyRef = useRef(null);
+
+  // The guests as saved — what the server will send to
+  useEffect(() => {
+    let off = false;
+    if (!supabase || !eventId) return;
+    supabase.from("event_cards").select("*").eq("event_id", eventId)
+      .then(({ data }) => { if (!off) setCards(data || []); });
+    return () => { off = true; };
+  }, [eventId]);
+
+  const audiences = audienceOptions({ channel, messageKey, image });
+  const aud = audiences.some(o => o.value === audience) ? audience : "all";
+  const v = validateSchedule(form, { now, eventDate, channel, title, body, waTemplate: template });
+  const shown = tried ? v.errors : Object.fromEntries(Object.entries(v.errors).filter(([k]) => !["title", "body", "waTemplate", "weekdays"].includes(k)));
+  const hasErrors = Object.keys(v.errors).length > 0;
+  const picked = cards ? scheduleTargets(cards, { channel, audience: aud, image, body }) : null;
+  const guests = picked?.targets.length ?? 0;
+  const parts = isSms ? Math.max(1, ...(picked?.targets || []).map(t => smsParts(t.text))) : 1;
+  const cost = estimateSms(v.runs.length, guests, parts);
+  const today = ymd(now);
+  const setF = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const setRow = (i, k, val) => setForm(f => ({ ...f, dates: f.dates.map((r, j) => j === i ? { ...r, [k]: val } : r) }));
+  const toggleDay = (d) => setForm(f => ({ ...f, weekdays: f.weekdays.includes(d) ? f.weekdays.filter(x => x !== d) : [...f.weekdays, d] }));
+  const pickMessage = (key) => {
+    setMessageKey(key);
+    const m = smsMessages.find(x => x.key === key);
+    if (m) setBody(m.body || "");
+  };
+  // Puts a {placeholder} at the cursor in the SMS text
+  const insertChip = (ph) => {
+    const el = bodyRef.current;
+    const from = el ? el.selectionStart : body.length, to = el ? el.selectionEnd : body.length;
+    setBody(body.slice(0, from) + `{${ph}}` + body.slice(to));
+  };
+
+  const save = async () => {
+    setTried(true);
+    const fresh = validateSchedule(form, { now: new Date(), eventDate, channel, title, body, waTemplate: template });
+    if (Object.keys(fresh.errors).length) { showToast("Check the highlighted fields", "warn"); return; }
+    const n = fresh.runs.length;
+    const what = isSms ? `about ${cost.messages.toLocaleString()} SMS (≈ ${cost.tsh.toLocaleString()} TSh)` : `about ${(n * guests).toLocaleString()} WhatsApp messages`;
+    const ok = await askDialog({
+      title: initial ? `Save the changes to "${title.trim()}"?` : `Schedule ${plural(n, "send")}?`,
+      body: `${describeSchedule(form)} — first ${fmtRun(fresh.runs[0])}, last ${fmtRun(fresh.runs[n - 1])}. `
+        + `Each send goes to ${plural(guests, "guest")} as the list stands now (${AUDIENCE_LABEL[aud]}): ${what}. `
+        + (initial ? "Sends still waiting are replaced; sends already made stay as they were. " : "")
+        + "They go out automatically from the server; you can pause or cancel at any time.",
+      actions: [{ value: "yes", label: initial ? "Save changes" : `Schedule ${plural(n, "send")}`, kind: "primary" }],
+    });
+    if (ok !== "yes") return;
+    setSaving(true);
+    const fields = {
+      title: title.trim(), audience: aud, pattern: patternOf(form),
+      ...(isSms
+        ? { body, message_key: messageKey, sender_id: sender || null }
+        : { message_key: image ? "card" : "text", wa_template: template, wa_account: tplRow?.account || defaultAccount || null, wa_image: image }),
+    };
+    const { data, error } = await supabase.rpc("save_message_schedule", {
+      p_id: initial?.id || null, p_event_id: eventId, p_channel: channel, p_fields: fields,
+      p_run_times: fresh.runs.map(d => d.toISOString()),
+    });
+    setSaving(false);
+    if (error) { showToast(`Could not save the schedule: ${error.message}`, "warn"); return; }
+    logHistory({ channel, action: "schedule", title: title.trim(),
+      detail: `${initial ? "Schedule changed" : "Scheduled"}: ${describeSchedule(form)} · ${plural(n, "send")} from ${fmtRun(fresh.runs[0])} · ${AUDIENCE_LABEL[aud]}` }, eventId);
+    showToast(initial ? `Saved "${title.trim()}"` : `Scheduled ${plural(n, "send")} — the first goes out ${fmtRun(fresh.runs[0])}`, "success");
+    onSaved(data);
+  };
+
+  const dayChip = (on) => ({ ...segStyle(on), padding:"6px 0", minWidth:42, textAlign:"center", ...(on ? { color: N.purple, borderColor: N.purple, background: N.purpleBg } : {}) });
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:640}} role="dialog" aria-modal="true" aria-label="Schedule sends">
+        <div className="nk-modal-head">
+          <div>
+            <div className="nk-modal-title"><Icon n="clock" /> {initial ? "Edit schedule" : `Schedule ${CHANNEL_WORD[channel]}`}</div>
+            <div style={{fontSize:12,color:N.textDim,marginTop:2}}>Sent by the server at each time below, even with this page closed</div>
+          </div>
+          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body">
+          <div className="nk-form-grid">
+            <Field label="Name *" error={shown.title} span>
+              <input className="nk-input" value={title} maxLength={120} onChange={e => setTitle(e.target.value)} placeholder="e.g. Reminder" />
+            </Field>
+            {isSms ? (
+              <>
+                <Field label="Message">
+                  <select className="nk-select" value={messageKey} onChange={e => pickMessage(e.target.value)}>
+                    {smsMessages.map(m => <option key={m.key} value={m.key}>{m.title}</option>)}
+                    <option value="custom">Custom text</option>
+                  </select>
+                  <div style={{fontSize:11,color:N.textDim,marginTop:-6,marginBottom:8}}>
+                    {messageKey === MAIN_MSG ? "Updates each guest's SMS status, like Send All" : "Recorded in History; guests' SMS status is not changed"}
+                  </div>
+                </Field>
+                <Field label="Sender ID">
+                  <select className="nk-select" value={sender} onChange={e => setSender(e.target.value)}>
+                    {[...new Set([sender, ...senderIds].filter(Boolean))].map(id => <option key={id} value={id}>{id}</option>)}
+                  </select>
+                </Field>
+                <Field label={`SMS text * · ${body.length} characters · ${plural(smsParts(body), "part")}`} error={shown.body} span>
+                  <textarea ref={bodyRef} className="nk-input nk-textarea" rows={4} value={body}
+                    onChange={e => setBody(e.target.value)} />
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:-4,marginBottom:10}}>
+                    {CARD_PLACEHOLDERS.map(ph => (
+                      <button key={ph} type="button" className="nk-chip" style={{cursor:"pointer",fontSize:11}} onClick={() => insertChip(ph)}>{`{${ph}}`}</button>
+                    ))}
+                  </div>
+                </Field>
+              </>
+            ) : (
+              <Field label="WhatsApp template *" error={shown.waTemplate} span>
+                <select className="nk-select" value={template} onChange={e => setTemplate(e.target.value)}>
+                  {[...new Set([template, ...templateNames].filter(Boolean))].map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <div style={{fontSize:11,color:N.textDim,marginTop:-6,marginBottom:8}}>
+                  {image ? <><Icon n="image" /> Sends each guest's uploaded card image. Guests without an uploaded card are skipped.</>
+                    : <><Icon n="alignLeft" /> Text-only template: sends the reminder without a card.</>}
+                </div>
+              </Field>
+            )}
+          </div>
+
+          <label className="nk-label">Who gets it</label>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}} role="radiogroup" aria-label="Who gets it">
+            {audiences.map(o => (
+              <button key={o.value} type="button" role="radio" aria-checked={aud === o.value} style={segStyle(aud === o.value)} onClick={() => setAudience(o.value)}>{o.label}</button>
+            ))}
+          </div>
+          <div style={{fontSize:12,color:N.textDim,marginBottom:14}}>
+            {!picked ? <><Icon n="loader" /> Counting guests…</> : <>
+              <b style={{color:N.text}}>{plural(guests, "guest")}</b> per send as the list stands now
+              {describeTargetSkips(picked.skipped) && ` · ${describeTargetSkips(picked.skipped)}`}
+              {unsaved > 0 && <div style={{color:N.amber}}><Icon n="alert" /> {plural(unsaved, "guest")} on the list {unsaved === 1 ? "isn't" : "aren't"} saved yet — press Save Cards so {unsaved === 1 ? "it is" : "they are"} included.</div>}
+              <div>Guests added later are included in later sends.</div>
+            </>}
+          </div>
+
+          <label className="nk-label">When</label>
+          <div style={{display:"flex",gap:6,marginBottom:12}} role="tablist">
+            {[["dates", "Pick dates"], ["weekly", "Repeat weekly"]].map(([m, l]) => (
+              <button key={m} type="button" role="tab" aria-selected={form.mode === m} style={{...segStyle(form.mode === m), flex:1}}
+                onClick={() => setForm(f => ({ ...f, mode: m }))}>
+                <Icon n={m === "dates" ? "calendar" : "repeat"} /> {l}
+              </button>
+            ))}
+          </div>
+
+          {form.mode === "dates" ? (
+            <div style={{marginBottom:8}}>
+              {form.dates.map((r, i) => (
+                <div key={i} style={{marginBottom:6}}>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:12,color:N.textDim,width:22}}>{i + 1}.</span>
+                    <input type="date" className="nk-input" style={{marginBottom:0,flex:"1 1 150px"}} min={today} value={r.date}
+                      aria-label={`Send ${i + 1} date`} onChange={e => setRow(i, "date", e.target.value)} />
+                    <input type="time" className="nk-input" style={{marginBottom:0,flex:"0 1 120px"}} value={r.time}
+                      aria-label={`Send ${i + 1} time`} onChange={e => setRow(i, "time", e.target.value)} />
+                    {form.dates.length > 1 && (
+                      <button type="button" className="nk-btn nk-btn-ghost" style={{padding:"6px 8px"}} aria-label={`Remove send ${i + 1}`} title="Remove"
+                        onClick={() => setForm(f => ({ ...f, dates: f.dates.filter((_, j) => j !== i) }))}><Icon n="x" /></button>
+                    )}
+                  </div>
+                  {shown[`date_${i}`] && <div style={{fontSize:11,color:N.red,margin:"2px 0 0 30px"}}>{shown[`date_${i}`]}</div>}
+                </div>
+              ))}
+              {shown.dates && <div style={{fontSize:11,color:N.red}}>{shown.dates}</div>}
+              {form.dates.length < MAX_SCHEDULE_RUNS && (
+                <button type="button" className="nk-btn nk-btn-ghost" style={{fontSize:12,marginTop:4}}
+                  onClick={() => setForm(f => { const lastRow = f.dates[f.dates.length - 1]; const base = parseLocal(lastRow?.date, "00:00");
+                    const nextDay = base ? ymd(new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1)) : today;
+                    return { ...f, dates: [...f.dates, { date: nextDay, time: lastRow?.time || "09:00" }] }; })}>
+                  <Icon n="plus" /> Add date
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="nk-form-grid">
+              <Field label="Start date" error={shown.startDate}>
+                <input type="date" className="nk-input" min={today} value={form.startDate} onChange={setF("startDate")} />
+              </Field>
+              <Field label="Time" error={shown.time}>
+                <input type="time" className="nk-input" value={form.time} onChange={setF("time")} />
+              </Field>
+              <Field label="On these days" error={shown.weekdays} span>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+                  {WEEKDAYS.map(w => (
+                    <button key={w.d} type="button" aria-pressed={form.weekdays.includes(w.d)} title={w.long} style={dayChip(form.weekdays.includes(w.d))} onClick={() => toggleDay(w.d)}>{w.short}</button>
+                  ))}
+                </div>
+              </Field>
+              <Field label="Repeat" error={shown.everyWeeks}>
+                <select className="nk-select" value={form.everyWeeks} onChange={e => setForm(f => ({ ...f, everyWeeks: Number(e.target.value) }))}>
+                  {Array.from({ length: MAX_EVERY_WEEKS }, (_, i) => i + 1).map(n => <option key={n} value={n}>{n === 1 ? "Every week" : `Every ${n} weeks`}</option>)}
+                </select>
+              </Field>
+              <Field label="Stop" error={form.stop === "until" ? shown.until : shown.count}>
+                <div style={{display:"flex",gap:6}}>
+                  <select className="nk-select" style={{flex:"0 0 auto",width:"auto"}} value={form.stop} onChange={setF("stop")} aria-label="Stop after">
+                    <option value="count">After</option>
+                    <option value="until">On</option>
+                  </select>
+                  {form.stop === "until"
+                    ? <input type="date" className="nk-input" min={form.startDate || today} value={form.until} onChange={setF("until")} aria-label="Last day" />
+                    : <input type="number" className="nk-input" min={1} max={MAX_SCHEDULE_RUNS} value={form.count}
+                        onChange={e => setForm(f => ({ ...f, count: e.target.value === "" ? "" : Number(e.target.value) }))} aria-label="Number of sends" />}
+                </div>
+                {form.stop === "count" && <div style={{fontSize:11,color:N.textDim,marginTop:-6,marginBottom:8}}>sends in total</div>}
+              </Field>
+            </div>
+          )}
+
+          {/* Preview */}
+          <div style={{padding:"12px 14px",borderRadius:10,background:N.navy700,border:`1px solid ${N.border}`,fontSize:12,lineHeight:1.7}}>
+            {v.runs.length && !shown.runs ? (
+              <>
+                <div style={{fontWeight:700,color:N.text,fontSize:13}}>
+                  {plural(Math.min(v.runs.length, MAX_SCHEDULE_RUNS), "send")} · {fmtRun(v.runs[0])}{v.runs.length > 1 ? ` → ${fmtRun(v.runs[Math.min(v.runs.length, MAX_SCHEDULE_RUNS) - 1])}` : ""}
+                </div>
+                <div style={{color:N.textMid}}>{describeSchedule(form)}</div>
+                <div style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:11}}>
+                  {v.runs.slice(0, 5).map(r => fmtRun(r)).join("  ·  ")}{v.runs.length > 6 ? "  ·  …" : ""}{v.runs.length > 5 ? `  ·  ${fmtRun(v.runs[Math.min(v.runs.length, MAX_SCHEDULE_RUNS) - 1])}` : ""}
+                </div>
+                {picked && (isSms
+                  ? <div style={{color:N.amber}}>≈ {cost.messages.toLocaleString()} SMS in total (≈ {cost.tsh.toLocaleString()} TSh at {plural(parts, "part")} each)</div>
+                  : <div style={{color:N.amber}}>≈ {(v.runs.length * guests).toLocaleString()} WhatsApp messages in total</div>)}
+              </>
+            ) : (
+              <div style={{color: shown.runs ? N.red : N.textDim}}><Icon n={shown.runs ? "alert" : "info"} /> {shown.runs || "Pick when to send to see the dates here."}</div>
+            )}
+            {v.warnings.map(w => <div key={w} style={{color:N.amber}}><Icon n="alert" /> {w}</div>)}
+          </div>
+          {initial && (
+            <div style={{fontSize:11,color:N.textDim,marginTop:8}}>
+              <Icon n="info" /> Saving replaces the sends still waiting; the {plural(doneRuns, "send")} already made stay as they were.
+            </div>
+          )}
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving || (tried && hasErrors)}>
+            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="clock" /> {initial ? "Save changes" : `Schedule ${v.runs.length && !v.errors.runs ? plural(Math.min(v.runs.length, MAX_SCHEDULE_RUNS), "send") : ""}`.trim()}</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded }) {
   const { cards, error, load, patch } = useEventCards(eventId);
@@ -7089,6 +7597,12 @@ export default function App() {
                     <button className="nk-btn nk-btn-ghost nk-btn-full" onClick={downloadSmsCsv}>
                       <Icon n="download" /> Download SMS CSV
                     </button>
+                    <ScheduledSends channel="sms" eventId={savedEventId} eventDate={openEventRow?.start_datetime || null}
+                      canEdit={access.can("sms", "edit")} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
+                      unsaved={records.filter(r => !r.sample && !r.dbId).length}
+                      smsMessages={[{ key: MAIN_MSG, title: "Main SMS", body: smsMessage },
+                        ...extraMessages.filter(m => m.source === "contacts").map(m => ({ key: m.id, title: m.title, body: m.body }))]}
+                      defaultSender={smsSender} senderIds={access.senderIds.filter(x => x.active).map(x => x.sender_id)} />
                   </div>
                   {/* ── iPhone Pro Max Mockup ── */}
                   <div style={{flexShrink:0,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
@@ -7267,6 +7781,10 @@ export default function App() {
                       disabled={bulkSending||!records.filter(r=>r.phone&&r.cardUrl).length}>
                       {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`Send All (${records.filter(r=>r.phone&&r.cardUrl).length})`}</>}
                     </button>
+                    <ScheduledSends channel="whatsapp" eventId={savedEventId} eventDate={openEventRow?.start_datetime || null}
+                      canEdit={access.can("whatsapp", "edit")} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
+                      unsaved={records.filter(r => !r.sample && !r.dbId).length}
+                      waTemplates={activeWaTemplates} defaultTemplate={waTemplate} defaultAccount={access.settings.wa_account || "Nikadi"} />
                   </div>
 
                   {/* Middle: table */}

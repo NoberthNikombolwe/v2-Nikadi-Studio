@@ -578,3 +578,91 @@ test("scheduleTargets picks the audience, fills the text and drops duplicates", 
   assert.equal(describeTargetSkips({}), "");
   assert.deepEqual(placeholdersIn("Hi {name}, {name}! {Table} {cardType}"), ["name", "Table", "cardType"]);
 });
+
+/* ── Smart schedules ── */
+import { buildRunTimes, validateSchedule, describeSchedule, formForEdit, patternOf, parseLocal, fmtRun, smsParts, estimateSms, audienceOptions, nextRun, defaultScheduleForm, ymd } from "./schedule.js";
+
+const FRI_NOV_6 = new Date(2026, 10, 6, 12, 0);    // Friday 6 Nov 2026, 12:00
+const weekly = (over = {}) => ({ mode: "weekly", startDate: "2026-11-09", time: "09:00", weekdays: [1, 3, 5], everyWeeks: 1, stop: "count", count: 3, until: "", ...over });
+
+test("weekly schedule: 3 times a week, 30 sends → 10 weeks of Mon/Wed/Fri", () => {
+  const { runs } = buildRunTimes(weekly({ count: 30 }), FRI_NOV_6);
+  assert.equal(runs.length, 30);
+  assert.ok(runs.every(r => [1, 3, 5].includes(r.getDay()) && r.getHours() === 9 && r.getMinutes() === 0));
+  assert.equal(ymd(runs[0]), "2026-11-09");
+  assert.equal(ymd(runs[29]), "2027-01-15");
+  assert.equal(describeSchedule(weekly({ count: 30 })), "Mon, Wed, Fri at 09:00 · every week · 30 sends");
+});
+
+test("weekly schedule: every 2 weeks, 3 sends → 14 days apart", () => {
+  const form = weekly({ weekdays: [6], time: "10:00", everyWeeks: 2 });
+  const { runs } = buildRunTimes(form, FRI_NOV_6);
+  assert.deepEqual(runs.map(ymd), ["2026-11-14", "2026-11-28", "2026-12-12"]);
+  assert.equal(describeSchedule(form), "Sat at 10:00 · every 2 weeks · 3 sends");
+});
+
+test("weekly schedule starts on the start date and stops on the last day", () => {
+  assert.deepEqual(buildRunTimes(weekly({ startDate: "2026-11-11" }), FRI_NOV_6).runs.map(ymd), ["2026-11-11", "2026-11-13", "2026-11-16"]);
+  const until = weekly({ stop: "until", until: "2026-11-20" });
+  assert.deepEqual(buildRunTimes(until, FRI_NOV_6).runs.map(ymd), ["2026-11-09", "2026-11-11", "2026-11-13", "2026-11-16", "2026-11-18", "2026-11-20"]);
+  assert.equal(describeSchedule(until), "Mon, Wed, Fri at 09:00 · every week · until Fri 20 Nov");
+});
+
+test("a time today that has passed is skipped with a note", () => {
+  const now = new Date(2026, 10, 11, 10, 0);   // Wed 11 Nov, 10:00
+  const v = validateSchedule(weekly({ startDate: "2026-11-11", count: 2 }), { now, channel: "sms", title: "Reminder", body: "Hi {name}" });
+  assert.deepEqual(v.errors, {});
+  assert.deepEqual(v.runs.map(ymd), ["2026-11-13", "2026-11-16"]);
+  assert.deepEqual(v.warnings, ["Today's 09:00 has already passed — the first send is Fri 13 Nov 09:00"]);
+});
+
+test("validateSchedule refuses past dates and bad forms", () => {
+  const ctx = { now: FRI_NOV_6, channel: "sms", title: "Reminder", body: "Hi {name}" };
+  const past = validateSchedule({ mode: "dates", dates: [{ date: "2026-11-05", time: "09:00" }, { date: "2026-11-06", time: "11:59" }, { date: "2026-11-07", time: "" }] }, ctx);
+  assert.equal(past.errors.date_0, "This time has passed — pick a later one");
+  assert.equal(past.errors.date_1, "This time has passed — pick a later one");
+  assert.equal(past.errors.date_2, "Pick a date and a time");
+  const dup = validateSchedule({ mode: "dates", dates: [{ date: "2026-11-07", time: "09:00" }, { date: "2026-11-07", time: "09:00" }] }, ctx);
+  assert.equal(dup.errors.date_1, "Same time as send 1");
+  assert.equal(validateSchedule({ mode: "dates", dates: [] }, ctx).errors.dates, "Add at least one date");
+  assert.match(validateSchedule(weekly({ startDate: "2026-11-01" }), ctx).errors.startDate, /start date has passed/);
+  assert.equal(validateSchedule(weekly({ weekdays: [] }), ctx).errors.weekdays, "Pick at least one day");
+  assert.equal(validateSchedule(weekly({ count: 101 }), ctx).errors.count, "At most 100 sends");
+  assert.equal(validateSchedule(weekly({ everyWeeks: 9 }), ctx).errors.everyWeeks, "Every 1 to 8 weeks");
+  assert.equal(validateSchedule(weekly({ stop: "until", until: "2026-11-08" }), ctx).errors.until, "The last day is before the start date");
+  const many = validateSchedule(weekly({ weekdays: [0, 1, 2, 3, 4, 5, 6], stop: "until", until: "2027-06-01" }), ctx);
+  assert.match(many.errors.runs, /more than 100 sends/);
+  assert.equal(validateSchedule(weekly(), { ...ctx, title: " " }).errors.title, "Give the schedule a name, e.g. Reminder");
+  assert.match(validateSchedule(weekly(), { ...ctx, body: "Karibu {name} meza {Table}" }).errors.body, /\{Table\} can't be filled in/);
+  assert.equal(validateSchedule(weekly(), { ...ctx, body: "" }).errors.body, "Write the SMS text");
+  assert.equal(validateSchedule(weekly(), { ...ctx, channel: "whatsapp", waTemplate: "" }).errors.waTemplate, "Pick a WhatsApp template");
+  assert.deepEqual(validateSchedule(weekly(), { ...ctx, channel: "whatsapp", waTemplate: "Mwaliko", body: "" }).errors, {});
+});
+
+test("validateSchedule warns about sends after the event", () => {
+  const v = validateSchedule(weekly({ count: 6 }), { now: FRI_NOV_6, channel: "sms", title: "R", body: "x", eventDate: "2026-11-14T15:00:00" });
+  assert.deepEqual(v.warnings, ["3 sends are after the event (Sat 14 Nov 15:00)"]);
+});
+
+test("schedule helpers: dates, edit form, pattern, cost, audiences", () => {
+  assert.equal(parseLocal("2026-02-30", "09:00"), null);
+  assert.equal(parseLocal("2026-11-20", "24:00"), null);
+  assert.equal(fmtRun(new Date(2027, 0, 4, 8, 5), 2026), "Mon 4 Jan 2027 08:05");
+  assert.equal(describeSchedule({ mode: "dates", dates: [{ date: "2026-11-20", time: "09:00" }] }).startsWith("Once: Fri 20 Nov"), true);
+  assert.equal(describeSchedule({ mode: "dates", dates: [{}, {}] }), "2 chosen dates");
+  const d = defaultScheduleForm(FRI_NOV_6, "2026-12-12T14:00:00");
+  assert.deepEqual([d.dates[0].date, d.startDate, d.stop, d.until], ["2026-11-07", "2026-11-06", "until", "2026-12-12"]);
+  const edit = formForEdit({ mode: "weekly", startDate: "2026-10-01", time: "09:00", weekdays: [1], everyWeeks: 1, stop: "count", count: 30 }, { now: FRI_NOV_6, doneRuns: 10 });
+  assert.deepEqual([edit.startDate, edit.count], ["2026-11-06", 20]);
+  const editDates = formForEdit({ mode: "dates", dates: [{ date: "2026-11-01", time: "09:00" }, { date: "2026-11-20", time: "09:00" }] }, { now: FRI_NOV_6 });
+  assert.deepEqual(editDates.dates, [{ date: "2026-11-20", time: "09:00" }]);
+  assert.deepEqual(patternOf(weekly({ weekdays: [5, 1], extra: "dropped" })), { mode: "weekly", startDate: "2026-11-09", time: "09:00", weekdays: [1, 5], everyWeeks: 1, stop: "count", count: 3, until: "" });
+  assert.equal(smsParts("x".repeat(160)), 1);
+  assert.equal(smsParts("x".repeat(161)), 2);
+  assert.deepEqual(estimateSms(30, 118, 1), { messages: 3540, tsh: 56640 });
+  assert.deepEqual(audienceOptions({ channel: "sms", messageKey: "main" }).map(o => o.value), ["all", "not_sent", "confirmed", "not_declined"]);
+  assert.deepEqual(audienceOptions({ channel: "sms", messageKey: "custom" }).map(o => o.value), ["all", "confirmed", "not_declined"]);
+  assert.deepEqual(audienceOptions({ channel: "whatsapp", image: true }).map(o => o.value), ["all", "not_sent", "confirmed", "not_declined"]);
+  assert.equal(nextRun([{ status: "done", run_at: "2026-11-01" }, { status: "pending", run_at: "2026-11-20" }, { status: "pending", run_at: "2026-11-10" }]).run_at, "2026-11-10");
+  assert.equal(nextRun([]), null);
+});

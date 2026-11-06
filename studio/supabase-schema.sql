@@ -1130,7 +1130,7 @@ DECLARE
   v_sender TEXT := NULLIF(trim(COALESCE(p_fields ->> 'sender_id', '')), '');
   v_tpl    TEXT := NULLIF(trim(COALESCE(p_fields ->> 'wa_template', '')), '');
   v_acct   TEXT := NULLIF(trim(COALESCE(p_fields ->> 'wa_account', '')), '');
-  v_image  BOOLEAN := COALESCE((p_fields ->> 'wa_image')::BOOLEAN, TRUE);
+  v_image  BOOLEAN := p_channel = 'whatsapp' AND COALESCE((p_fields ->> 'wa_image')::BOOLEAN, TRUE);   -- SMS never has an image
   v_aud    TEXT := COALESCE(NULLIF(p_fields ->> 'audience', ''), 'all');
   v_pat    JSONB := COALESCE(p_fields -> 'pattern', '{}'::jsonb);
 BEGIN

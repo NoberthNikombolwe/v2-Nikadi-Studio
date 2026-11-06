@@ -77,6 +77,9 @@ const P = {
   chevronDown:<><path d="m6 9 6 6 6-6" /></>,
   menu:       <><path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h16" /></>,
   trendUp:    <><path d="m22 7-8.5 8.5-5-5L2 17" /><path d="M16 7h6v6" /></>,
+  clock:      <><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></>,
+  pause:      <><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></>,
+  play:       <><path d="M6 3l14 9-14 9V3z" /></>,
 };
 
 
