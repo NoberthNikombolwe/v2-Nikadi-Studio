@@ -1,4 +1,5 @@
 import { normalisePhone } from "./phone.js";
+import { fillTemplate, smsStatusFromGroup, matchSmsResults, classifyWaSend } from "../../supabase/functions/_shared/messaging.js";
 
 // Helpers for an event's SMS messages. An event has its main message (events.sms_message,
 // statuses in event_cards.sms_status) plus any number of extra messages stored as JSON in
@@ -8,14 +9,11 @@ import { normalisePhone } from "./phone.js";
 //   source "upload"   → its own uploaded list (`recipients`, each with a `smsStatus`) whose
 //                        columns become {placeholders} for that message
 
-// Fills {name} / {cardType} / {phone} and any other {Column} from a recipient. Every
-// occurrence is replaced; an unknown {x} is left as typed so the user can spot it.
-export const fillTemplate = (template = "", rec = {}) => String(template).replace(/\{(\w+)\}/g, (_, key) => {
-  if (key === "name")     return rec.name     || "";
-  if (key === "cardType") return rec.cardType || "";
-  if (key === "phone")    return rec.phone ? `+${normalisePhone(rec.phone)}` : "";
-  return rec[key] !== undefined && rec[key] !== null ? String(rec[key]) : `{${key}}`;
-});
+// Fills {name} / {cardType} / {phone} and any other {Column} from a recipient. Shared with
+// the run-schedules Edge Function, so it lives in supabase/functions/_shared/messaging.js.
+// The provider-result readers (SMS groupIds, the multi-send matcher, the WhatsApp send
+// classifier) live there too, so a scheduled send reads results exactly like a click does.
+export { fillTemplate, smsStatusFromGroup, matchSmsResults, classifyWaSend };
 
 // Turns spreadsheet rows (SheetJS sheet_to_json output) into recipients. Header variants
 // map to the standard keys name / cardType / phone (case, spaces and _ ignored); every

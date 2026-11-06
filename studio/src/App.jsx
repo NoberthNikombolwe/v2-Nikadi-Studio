@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useEffect, useId, Children, isValidEleme
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
-import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages } from "./lib/messages";
+import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, smsStatusFromGroup, matchSmsResults, classifyWaSend } from "./lib/messages";
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
 import ScanPanel from "./ScanPanel";
@@ -700,6 +700,13 @@ const defaultElements = () => [
 ];
 const WA  = { idle:"idle", sending:"sending", sent:"sent", notSent:"notSent", invalid:"invalid" };
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
+// A saved card's uploaded image (event_cards.card_url), so uploaded cards survive a reload
+// and scheduled WhatsApp sends can attach them
+const cardFromRow = (c) => ({ cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle" });
+// True when a re-uploaded row still has the saved card's name and card type, so the
+// card image made for it still shows the right thing
+const sameCardFace = (r, c) => String(r.name || "").trim() === String(c.name || "").trim()
+  && String(r.cardType || "").trim() === String(c.card_type || "").trim();
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
 // Columns the event form may write (persistEvent sends only these). The CRM links are only
 // present once supabase-schema.sql has added them, so they are sent only when the form has them.
@@ -3381,7 +3388,7 @@ function StorageSettings({ access, askDialog, showToast }) {
   const clearCards = async () => {
     const ok = await askDialog({
       title: "Clear all WhatsApp card images?",
-      body: `This deletes all ${u.cards.files} stored card image${u.cards.files === 1 ? "" : "s"} (${fmtBytes(u.cards.bytes)}) for every event. Messages already delivered are not affected, but cards must be uploaded again before sending more — and any message still waiting to be delivered may arrive without its image.`,
+      body: `This deletes all ${u.cards.files} stored card image${u.cards.files === 1 ? "" : "s"} (${fmtBytes(u.cards.bytes)}) for every event. Messages already delivered are not affected, but cards must be uploaded again before sending more — any message still waiting to be delivered may arrive without its image, and scheduled WhatsApp card sends skip guests until their cards are uploaded again.`,
       actions: [{ value: "yes", label: "Clear all images", kind: "danger" }],
     });
     if (ok !== "yes") return;
@@ -3400,6 +3407,9 @@ function StorageSettings({ access, askDialog, showToast }) {
           setClearing({ done, total: u.cards.files });
         }
       }
+      // The images are gone, so no guest has an uploaded card any more
+      const { error: ue } = await supabase.from("event_cards").update({ card_url: null }).not("card_url", "is", null);
+      if (ue && !/card_url/.test(ue.message)) throw ue;
       showToast(`Cleared ${done} card image${done === 1 ? "" : "s"} — upload cards again before the next WhatsApp send`, "success");
     } catch (e) {
       showToast(`Clearing stopped after ${done} file${done === 1 ? "" : "s"}: ${e.message}`, "warn");
@@ -4925,6 +4935,9 @@ export default function App() {
     setPickingTemplate(false);
     // The old design is replaced: cards rendered with it are cleared so they get re-made
     setRecords(rs => rs.map(r => r.uploadStatus === "uploaded" || r.cardUrl ? { ...r, uploadStatus: "idle", cardUrl: null } : r));
+    // …in the database too, so a scheduled WhatsApp send can't attach an old-design card
+    if (supabase && savedEventId) supabase.from("event_cards").update({ card_url: null }).eq("event_id", savedEventId).not("card_url", "is", null)
+      .then(({ error }) => { if (error) console.warn("Clear card images:", error.message); });
     if (choice.file) { setCoverUrl(null); onBgUpload({ target: { files: [choice.file] } }, { keepLayout }); }
     else await applySavedTemplate(choice.tpl, { keepLayout });
     if (savedEventId) setDesignSaveFor(savedEventId);   // written to the event once the image + layout settle
@@ -4984,8 +4997,7 @@ export default function App() {
       // name); guests missing from the sheet but with call/check-in history stay on the list.
       let kept = 0, matched = 0;
       if (supabase && savedEventId) {
-        const { data: saved, error } = await supabase.from("event_cards")
-          .select("id,name,card_type,phone,wa_status,sms_status,call_status,call_comment,scan_count").eq("event_id", savedEventId);
+        const { data: saved, error } = await supabase.from("event_cards").select("*").eq("event_id", savedEventId);
         if (error) showToast("Could not compare with the saved guest list: " + error.message, "warn");
         else if (saved?.length) {
           const plan = planCardSave(norm.map((r, i) => ({ r, i })), saved);
@@ -4993,12 +5005,13 @@ export default function App() {
           matched = byIdx.size;
           norm = norm.map((r, i) => {
             const o = byIdx.get(i); if (!o) return r;
-            return { ...r, dbId: o.id, waStatus: o.wa_status || r.waStatus, smsStatus: o.sms_status || r.smsStatus };
+            return { ...r, dbId: o.id, waStatus: o.wa_status || r.waStatus, smsStatus: o.sms_status || r.smsStatus,
+              ...(sameCardFace(r, o) ? cardFromRow(o) : {}) };   // a renamed guest needs a new card
           });
           kept = plan.retained.length;
           norm = [...norm, ...plan.retained.map(c => ({
             dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
-            waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
+            waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
           }))];
         }
       }
@@ -5107,10 +5120,11 @@ export default function App() {
     const entries = recs.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample);   // keep each row's position in `recs`
     const toSave  = entries.map(({ r }) => r);
     if (!toSave.length) { showToast("No contacts to save", "info"); return; }
-    const { data: old, error: readErr } = await supabase.from("event_cards")
-      .select("id,name,card_type,phone,wa_status,sms_status,call_status,call_comment,call_updated_at,call_by,scan_count,max_scans,last_scanned_at")
-      .eq("event_id", eventId);
+    const { data: old, error: readErr } = await supabase.from("event_cards").select("*").eq("event_id", eventId);
     if (readErr) { showToast("Cards save error: " + readErr.message, "warn"); return; }
+    // card_url (the uploaded card image) exists once the schedules SQL has been run; only
+    // write it when the saved rows show the column, so saving never fails on an older database
+    const urlCol = (old || []).some(c => "card_url" in c);
     const toRow = r => ({
       event_id:   eventId,
       name:       r.name||"",
@@ -5135,6 +5149,9 @@ export default function App() {
           if ((r.waStatus || WA.idle) === WA.idle && o.wa_status) row.wa_status = o.wa_status;
           if ((r.smsStatus || SMS.pending) === SMS.pending && o.sms_status) row.sms_status = o.sms_status;
         }
+        // The list in memory knows the card image; a row matched from a new sheet keeps the
+        // saved image only while its name and card type are unchanged
+        if (urlCol) row.card_url = r.cardUrl || (matched !== "id" && sameCardFace(r, o) ? o.card_url : null) || null;
         return row;
       }));
       if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
@@ -5154,6 +5171,9 @@ export default function App() {
       if (inserted?.length === fresh.length) {
         const ids = new Map(fresh.map(({ i }, n) => [i, inserted[n].id]));
         setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
+        // Cards uploaded before the list was first saved: store their images too (silently
+        // ignored on a database without the card_url column)
+        fresh.forEach(({ r }, n) => { if (r.cardUrl) saveCardUrl(inserted[n].id, r.cardUrl); });
       }
     }
     // Guests missing from the new list: delete only those with no call/check-in history.
@@ -5166,7 +5186,7 @@ export default function App() {
     if (plan.retained.length) {
       setRecords(rs => [...rs, ...plan.retained.map(c => ({
         dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
-        waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
+        waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
       }))]);
     }
     const total = toSave.length + plan.retained.length;
@@ -5326,8 +5346,7 @@ export default function App() {
         phone:     c.phone||"",
         waStatus:     c.wa_status||WA.idle,
         smsStatus:    c.sms_status||SMS.pending,
-        cardUrl:      null,
-        uploadStatus: "idle",
+        ...cardFromRow(c),
       })) : sampleRecords());
       setActiveIdx(0);
     }
@@ -5624,6 +5643,7 @@ export default function App() {
       if (upErr) throw new Error(upErr.message);
       const { data: { publicUrl } } = supabase.storage.from("wa-cards").getPublicUrl(storageKey);
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, cardUrl:publicUrl, uploadStatus:"uploaded"} : r));
+      if (rec.dbId) saveCardUrl(rec.dbId, publicUrl);   // kept for reloads and scheduled WhatsApp sends
       logHistory({ channel:"card", action:"upload", name:rec.name, phone:rec.phone });
       return publicUrl;
     } catch (err) {
@@ -5676,6 +5696,15 @@ export default function App() {
     if (!Object.keys(updates).length) return;
     supabase.from("event_cards").update(updates).eq("id", dbId)
       .then(({ error }) => { if (error) console.warn("Auto-save card:", error.message); });
+  };
+
+  // Stores a card's uploaded image URL (event_cards.card_url) so it survives a reload and a
+  // scheduled WhatsApp send can attach it. Silent: before the schedules SQL is run the
+  // column doesn't exist and the app simply keeps the URL in memory as before.
+  const saveCardUrl = (dbId, url) => {
+    if (!supabase || !dbId) return;
+    supabase.from("event_cards").update({ card_url: url }).eq("id", dbId)
+      .then(({ error }) => { if (error) console.warn("Save card image:", error.message); });
   };
 
   /* Poll delivery report until we get a terminal status (runs in background) */
@@ -5777,46 +5806,16 @@ export default function App() {
         showToast(`${rec.name} — ${reason}`, "warn");
       };
 
-      const invalidHint = (t = "") => {
-        const s = t.toLowerCase();
-        return s.includes("not a whatsapp") || s.includes("not registered")
-          || s.includes("unregistered") || s.includes("no whatsapp")
-          || s.includes("missing outlet") || s.includes("recipient not found");
-      };
-
-      if (!res.ok) {
-        if ((res.status === 422 || res.status === 400) && invalidHint(rawText)) {
-          markInvalid("number not on WhatsApp"); return;
-        }
-        throw new Error(`HTTP ${res.status}: ${rawText}`);
-      }
-
-      let data = {};
-      try { data = JSON.parse(rawText); } catch { throw new Error("Invalid JSON response"); }
-
-      const msg   = data?.messages?.[0];
-      const grp   = msg?.status?.groupId;
-      const id    = msg?.status?.id;
-      const sName = msg?.status?.name || "";
-      const sDesc = (msg?.status?.description || "").toLowerCase();
-
-      if (grp === 18) {
-        // PENDING — accepted by API; mark Sent now, poll in background for rejection
+      // classifyWaSend (shared with scheduled sends) reads the provider's groupId/id codes
+      const result = classifyWaSend(res.status, rawText);
+      if (result.status === "sent") {
         markSent();
-        const messageId = msg?.messageId;
-        if (messageId) pollWaStatus(messageId, idx, rec.name, rec.dbId, rec.phone);
-      } else if (grp === 20 && [73, 109, 77].includes(id)) {
-        // DELIVERED_TO_HANDSET / SENT_TO_OPERATOR / DELIVERED_TO_OPERATOR
-        markSent();
-      } else if (
-        (grp === 20 && [75, 76, 78, 79, 80].includes(id)) ||
-        (grp === 19 && id === 111) ||
-        invalidHint(sName) || invalidHint(sDesc)
-      ) {
-        // UNDELIVERABLE / REJECTED_MISSING_OUTLET — number not on WhatsApp
-        markInvalid("number not on WhatsApp");
+        // PENDING — accepted by API; marked Sent now, poll in background for a late rejection
+        if (result.pending && result.messageId) pollWaStatus(result.messageId, idx, rec.name, rec.dbId, rec.phone);
+      } else if (result.status === "invalid") {
+        markInvalid(result.detail);
       } else {
-        throw new Error(sName || `groupId ${grp}`);
+        throw new Error(result.detail);
       }
     } catch (err) {
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
@@ -5988,10 +5987,9 @@ export default function App() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const grp = data?.messages?.[0]?.status?.groupId;
-      if (grp === 18 || grp === 20) {
-        const status = grp === 20 ? SMS.delivered : SMS.sent;
-        const logStatus = grp === 20 ? "delivered" : "sent";
+      const logStatus = smsStatusFromGroup(data?.messages?.[0]?.status?.groupId);
+      if (logStatus !== "failed") {
+        const status = logStatus === "delivered" ? SMS.delivered : SMS.sent;
         setMessageStatuses(msgId, recs, new Map([[idx, status]]));
         logHistory({ channel:"sms", action:"send", status:logStatus, name:rec.name, phone:rec.phone, title: msg ? msg.title : "Main message" });
         setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: logStatus } : x));
@@ -6053,15 +6051,9 @@ export default function App() {
       const data = await res.json();
       const respMsgs = data?.messages || [];
       // The provider echoes each recipient's number. If a number was sent more than once
-      // (user chose "Send duplicates too"), hand out its results in order, one per record.
-      const queues = new Map();
-      respMsgs.forEach(m => {
-        const k = String(m.to);
-        if (!queues.has(k)) queues.set(k, []);
-        queues.get(k).push(m);
-      });
-      const groupIds = targets.map(({rec}) => queues.get(normalisePhone(rec.phone))?.shift()?.status?.groupId);
-      const statusOf = (grp) => grp === 20 ? SMS.delivered : grp === 18 ? SMS.sent : SMS.failed;
+      // (user chose "Send duplicates too"), its results are handed out in order, one per record.
+      const groupIds = matchSmsResults(targets.map(({rec}) => rec.phone), respMsgs);
+      const statusOf = (grp) => ({ delivered: SMS.delivered, sent: SMS.sent })[smsStatusFromGroup(grp)] || SMS.failed;
       // index → new smsStatus, only for recipients the provider actually reported on
       const updates = new Map(targets.flatMap(({index}, n) => groupIds[n] === undefined ? [] : [[index, statusOf(groupIds[n])]]));
       if (msg) setMessageStatuses(msgId, recs, updates);   // extra message: its own statuses, saved at once
@@ -6069,14 +6061,11 @@ export default function App() {
         applyResults = (rs) => rs.map((r, i) => updates.has(i) ? { ...r, smsStatus: updates.get(i) } : r);
         setRecords(applyResults);
       }
-      setSmsLog(targets.map(({rec}, n) => ({
-        name: rec.name,
-        status: groupIds[n] === 20 ? "delivered" : groupIds[n] === 18 ? "sent" : "failed",
-      })));
-      const sentCount = respMsgs.filter(m => m.status?.groupId === 18 || m.status?.groupId === 20).length;
+      setSmsLog(targets.map(({rec}, n) => ({ name: rec.name, status: smsStatusFromGroup(groupIds[n]) })));
+      const sentCount = respMsgs.filter(m => smsStatusFromGroup(m.status?.groupId) !== "failed").length;
       targets.forEach(({rec}, n) => logHistory({
         channel:"sms", action:"send", name:rec.name, phone:rec.phone, title:msgTitle,
-        status: groupIds[n] === 20 ? "delivered" : groupIds[n] === 18 ? "sent" : "failed",
+        status: smsStatusFromGroup(groupIds[n]),
         detail: groupIds[n] === undefined ? "No result from the SMS provider" : undefined,
       }));
       logHistory({ channel:"sms", action:"bulk", title:msgTitle, detail:`${sentCount}/${targets.length} SMS sent` });

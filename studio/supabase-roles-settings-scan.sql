@@ -10,6 +10,9 @@
 --   4. Scanner (check-in) + phone-call tracking
 --   5. Row level security rewritten per module
 --   6. Public (no-login) scan page RPCs, code-protected
+--   7. View-only share link (code-protected RPCs)
+--   8. Storage usage and clearing card images
+--   9. Message schedules (SMS / WhatsApp sent later by pg_cron + run-schedules)
 -- =====================================================================
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -712,6 +715,343 @@ GRANT EXECUTE ON FUNCTION public.storage_usage(), public.wa_cards_names(INT) TO 
 DROP POLICY IF EXISTS "superadmin_delete_wa_cards" ON storage.objects;
 CREATE POLICY "superadmin_delete_wa_cards" ON storage.objects FOR DELETE TO authenticated
   USING (bucket_id = 'wa-cards' AND public.my_role() = 'superuser');
+
+-- ─────────────────────────────────────────────────────────────────────
+-- 9. MESSAGE SCHEDULES — SMS / WhatsApp sends planned ahead: one or more
+--    dates, or chosen weekdays repeated for a number of weeks. The browser
+--    works out every send time and saves them as runs; pg_cron calls the
+--    run-schedules Edge Function every minute while a run is due, and it
+--    sends with the service role. Users never write these tables directly:
+--    save_message_schedule() / set_message_schedule_status() check the role,
+--    the event and that no send time has already passed.
+-- ─────────────────────────────────────────────────────────────────────
+
+-- Each guest's uploaded WhatsApp card image, so a scheduled send can attach it
+ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS card_url TEXT;
+
+CREATE TABLE IF NOT EXISTS message_schedules (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id     UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  channel      TEXT NOT NULL CHECK (channel IN ('sms','whatsapp')),
+  title        TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 120),
+  body         TEXT,                                 -- SMS text: {name} {cardType} {phone}
+  message_key  TEXT NOT NULL DEFAULT 'custom',       -- 'main' (guest statuses update like a normal send) | an extra message id | 'custom'
+  sender_id    TEXT,                                 -- SMS sender ID
+  wa_template  TEXT,
+  wa_account   TEXT,
+  wa_image     BOOLEAN NOT NULL DEFAULT TRUE,        -- template has an image header → sends each guest's card
+  audience     TEXT NOT NULL DEFAULT 'all' CHECK (audience IN ('all','not_sent','confirmed','not_declined')),
+  pattern      JSONB NOT NULL DEFAULT '{}'::jsonb,   -- the form (dates / weekdays …), to describe and edit it
+  status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','done','cancelled')),
+  total_runs   INT NOT NULL DEFAULT 0,
+  done_runs    INT NOT NULL DEFAULT 0,
+  created_by   TEXT DEFAULT (auth.jwt() ->> 'email'),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by   TEXT,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_message_schedules_event ON message_schedules(event_id);
+
+CREATE TABLE IF NOT EXISTS message_schedule_runs (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  schedule_id  UUID NOT NULL REFERENCES message_schedules(id) ON DELETE CASCADE,
+  event_id     UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  run_at       TIMESTAMPTZ NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','done','failed','skipped','cancelled')),
+  sent         INT NOT NULL DEFAULT 0,
+  failed       INT NOT NULL DEFAULT 0,
+  skipped      INT NOT NULL DEFAULT 0,
+  detail       TEXT,
+  next_index   INT NOT NULL DEFAULT 0,               -- how far through its recipients the run is
+  locked_until TIMESTAMPTZ,                          -- lease: a run being sent is not picked up twice
+  attempts     INT NOT NULL DEFAULT 0,
+  started_at   TIMESTAMPTZ,
+  finished_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON message_schedule_runs(schedule_id, run_at);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_due ON message_schedule_runs(run_at) WHERE status IN ('pending','sending');
+
+-- Who a run goes to, fixed when it starts (phones + texts). Server only; removed when the run ends.
+CREATE TABLE IF NOT EXISTS message_run_targets (
+  run_id     UUID PRIMARY KEY REFERENCES message_schedule_runs(id) ON DELETE CASCADE,
+  targets    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE message_schedules     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE message_schedule_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE message_run_targets   ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.message_schedules, public.message_schedule_runs, public.message_run_targets FROM anon, authenticated;
+GRANT SELECT, DELETE ON public.message_schedules TO authenticated;
+GRANT SELECT ON public.message_schedule_runs TO authenticated;
+GRANT ALL ON public.message_schedules, public.message_schedule_runs, public.message_run_targets TO service_role;
+
+-- Seen by whoever may view that channel (SMS / WhatsApp) on an event they can see.
+-- Deleting a schedule is Super Admin only; everyone else cancels it.
+DROP POLICY IF EXISTS p_schedules_select ON message_schedules;
+DROP POLICY IF EXISTS p_schedules_delete ON message_schedules;
+DROP POLICY IF EXISTS p_schedule_runs_select ON message_schedule_runs;
+CREATE POLICY p_schedules_select ON message_schedules FOR SELECT TO authenticated
+  USING (public.has_perm(channel, FALSE) AND public.can_see_event(event_id));
+CREATE POLICY p_schedules_delete ON message_schedules FOR DELETE TO authenticated
+  USING (public.my_role() = 'superuser');
+CREATE POLICY p_schedule_runs_select ON message_schedule_runs FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM message_schedules s WHERE s.id = message_schedule_runs.schedule_id));
+
+-- Recounts a schedule's runs and marks it done once nothing is left to send
+CREATE OR REPLACE FUNCTION public.refresh_message_schedule(p_id UUID) RETURNS VOID
+LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  UPDATE message_schedules s SET
+    total_runs = (SELECT count(*) FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status <> 'cancelled'),
+    done_runs  = (SELECT count(*) FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status IN ('done','failed','skipped')),
+    status     = CASE WHEN s.status IN ('active','paused')
+                       AND NOT EXISTS (SELECT 1 FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status IN ('pending','sending'))
+                      THEN 'done' ELSE s.status END
+   WHERE s.id = p_id
+$$;
+
+-- Creates a schedule with its send times, or (p_id set) edits one: the fields change and
+-- the sends still waiting are replaced by p_run_times; sends already made stay as they were.
+-- p_fields: title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern.
+CREATE OR REPLACE FUNCTION public.save_message_schedule(
+  p_id UUID, p_event_id UUID, p_channel TEXT, p_fields JSONB, p_run_times TIMESTAMPTZ[]
+) RETURNS UUID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_id     UUID := p_id;
+  v_old    message_schedules%ROWTYPE;
+  v_times  TIMESTAMPTZ[];
+  v_email  TEXT := auth.jwt() ->> 'email';
+  v_title  TEXT := left(trim(COALESCE(p_fields ->> 'title', '')), 120);
+  v_body   TEXT := NULLIF(p_fields ->> 'body', '');
+  v_key    TEXT := left(COALESCE(NULLIF(trim(p_fields ->> 'message_key'), ''), 'custom'), 64);
+  v_sender TEXT := NULLIF(trim(COALESCE(p_fields ->> 'sender_id', '')), '');
+  v_tpl    TEXT := NULLIF(trim(COALESCE(p_fields ->> 'wa_template', '')), '');
+  v_acct   TEXT := NULLIF(trim(COALESCE(p_fields ->> 'wa_account', '')), '');
+  v_image  BOOLEAN := COALESCE((p_fields ->> 'wa_image')::BOOLEAN, TRUE);
+  v_aud    TEXT := COALESCE(NULLIF(p_fields ->> 'audience', ''), 'all');
+  v_pat    JSONB := COALESCE(p_fields -> 'pattern', '{}'::jsonb);
+BEGIN
+  IF p_channel NOT IN ('sms','whatsapp') THEN RAISE EXCEPTION 'Unknown channel %', p_channel; END IF;
+  IF NOT public.has_perm(p_channel, TRUE) THEN
+    RAISE EXCEPTION 'Your role cannot schedule % sends', CASE p_channel WHEN 'sms' THEN 'SMS' ELSE 'WhatsApp' END;
+  END IF;
+  IF p_event_id IS NULL OR NOT public.can_see_event(p_event_id) THEN RAISE EXCEPTION 'You are not assigned to this event'; END IF;
+  IF v_title = '' THEN RAISE EXCEPTION 'Give the schedule a name'; END IF;
+  IF p_channel = 'sms' AND COALESCE(trim(v_body), '') = '' THEN RAISE EXCEPTION 'The SMS text is empty'; END IF;
+  IF p_channel = 'sms' AND v_sender IS NOT NULL AND v_sender !~ '^[A-Za-z0-9 ]{1,11}$' THEN RAISE EXCEPTION 'Sender ID "%" is not valid', v_sender; END IF;
+  IF p_channel = 'whatsapp' AND v_tpl IS NULL THEN RAISE EXCEPTION 'Pick a WhatsApp template'; END IF;
+  IF v_aud NOT IN ('all','not_sent','confirmed','not_declined') THEN RAISE EXCEPTION 'Unknown audience %', v_aud; END IF;
+  IF v_aud = 'not_sent' AND NOT ((p_channel = 'sms' AND v_key = 'main') OR (p_channel = 'whatsapp' AND v_image)) THEN
+    RAISE EXCEPTION '"Not sent yet" works only for the main SMS or the WhatsApp card';
+  END IF;
+
+  SELECT array_agg(DISTINCT t ORDER BY t) INTO v_times FROM unnest(p_run_times) t WHERE t IS NOT NULL;
+  IF v_times IS NULL OR cardinality(v_times) = 0 THEN RAISE EXCEPTION 'Pick at least one send time'; END IF;
+  IF cardinality(v_times) <> cardinality(p_run_times) THEN RAISE EXCEPTION 'The same send time is listed twice'; END IF;
+  IF cardinality(v_times) > 100 THEN RAISE EXCEPTION 'At most 100 sends per schedule'; END IF;
+  IF v_times[1] < NOW() + INTERVAL '30 seconds' THEN RAISE EXCEPTION 'A send time has already passed — pick a later time'; END IF;
+
+  IF v_id IS NOT NULL THEN
+    SELECT * INTO v_old FROM message_schedules s WHERE s.id = v_id FOR UPDATE;
+    IF NOT FOUND OR v_old.event_id <> p_event_id OR v_old.channel <> p_channel THEN RAISE EXCEPTION 'Schedule not found'; END IF;
+    IF v_old.status IN ('done','cancelled') THEN RAISE EXCEPTION 'This schedule has finished — create a new one'; END IF;
+    UPDATE message_schedules s SET title = v_title, body = v_body, message_key = v_key, sender_id = v_sender,
+           wa_template = v_tpl, wa_account = v_acct, wa_image = v_image, audience = v_aud, pattern = v_pat,
+           updated_by = v_email, updated_at = NOW()
+     WHERE s.id = v_id;
+    UPDATE message_schedule_runs r SET status = 'cancelled', finished_at = NOW(), detail = 'Replaced when the schedule was edited'
+     WHERE r.schedule_id = v_id AND r.status = 'pending';
+  ELSE
+    INSERT INTO message_schedules (event_id, channel, title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern, created_by)
+    VALUES (p_event_id, p_channel, v_title, v_body, v_key, v_sender, v_tpl, v_acct, v_image, v_aud, v_pat, v_email)
+    RETURNING id INTO v_id;
+  END IF;
+  INSERT INTO message_schedule_runs (schedule_id, event_id, run_at) SELECT v_id, p_event_id, t FROM unnest(v_times) t;
+  PERFORM public.refresh_message_schedule(v_id);
+  RETURN v_id;
+END $$;
+
+-- Pause, resume or cancel a schedule. Resuming skips the sends that came due while it was
+-- paused (a late reminder is worse than none); cancelling stops the waiting sends and a send
+-- in progress (the function checks before every batch).
+CREATE OR REPLACE FUNCTION public.set_message_schedule_status(p_id UUID, p_status TEXT) RETURNS TEXT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v message_schedules%ROWTYPE;
+BEGIN
+  SELECT * INTO v FROM message_schedules s WHERE s.id = p_id FOR UPDATE;
+  IF NOT FOUND OR NOT public.can_see_event(v.event_id) THEN RAISE EXCEPTION 'Schedule not found'; END IF;
+  IF NOT public.has_perm(v.channel, TRUE) THEN RAISE EXCEPTION 'Your role cannot change this schedule'; END IF;
+  IF v.status IN ('done','cancelled') THEN RAISE EXCEPTION 'This schedule has already finished'; END IF;
+  IF p_status = 'paused' THEN
+    UPDATE message_schedules s SET status = 'paused' WHERE s.id = p_id;
+  ELSIF p_status = 'active' THEN
+    UPDATE message_schedule_runs r SET status = 'skipped', finished_at = NOW(), detail = 'Missed while the schedule was paused'
+     WHERE r.schedule_id = p_id AND r.status = 'pending' AND r.run_at <= NOW();
+    UPDATE message_schedules s SET status = 'active' WHERE s.id = p_id;
+    PERFORM public.refresh_message_schedule(p_id);
+  ELSIF p_status = 'cancelled' THEN
+    UPDATE message_schedule_runs r SET status = 'cancelled', finished_at = NOW(), locked_until = NULL,
+           detail = CASE WHEN r.status = 'sending' THEN 'Stopped when the schedule was cancelled' ELSE 'Schedule cancelled' END
+     WHERE r.schedule_id = p_id AND r.status IN ('pending','sending');
+    UPDATE message_schedules s SET status = 'cancelled' WHERE s.id = p_id;
+  ELSE
+    RAISE EXCEPTION 'Unknown status %', p_status;
+  END IF;
+  UPDATE message_schedules s SET updated_by = auth.jwt() ->> 'email', updated_at = NOW() WHERE s.id = p_id;
+  RETURN (SELECT s.status FROM message_schedules s WHERE s.id = p_id);
+END $$;
+
+-- ── Used only by the run-schedules Edge Function (service role) ──
+
+-- Picks the next due run and leases it for 2 minutes, so two calls never send the same run.
+-- Runs more than 2 hours late are skipped (the server was not running at the time), and a run
+-- still "sending" after 6 hours is given up.
+CREATE OR REPLACE FUNCTION public.claim_schedule_run()
+RETURNS TABLE (run_id UUID, schedule_id UUID, event_id UUID, run_at TIMESTAMPTZ, next_index INT,
+               sent INT, failed INT, skipped INT, run_number INT, total_runs INT, has_targets BOOLEAN,
+               channel TEXT, title TEXT, body TEXT, message_key TEXT, sender_id TEXT, wa_template TEXT,
+               wa_account TEXT, wa_image BOOLEAN, audience TEXT, created_by TEXT, event_name TEXT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_run UUID;
+  v_ids UUID[];
+BEGIN
+  WITH u AS (
+    UPDATE message_schedule_runs r SET status = 'skipped', finished_at = NOW(),
+           detail = 'Missed — the server was not running at this time'
+      FROM message_schedules s
+     WHERE s.id = r.schedule_id AND s.status = 'active' AND r.status = 'pending' AND r.run_at < NOW() - INTERVAL '2 hours'
+    RETURNING r.schedule_id
+  ) SELECT array_agg(DISTINCT u.schedule_id) INTO v_ids FROM u;
+  PERFORM public.refresh_message_schedule(x) FROM unnest(COALESCE(v_ids, '{}')) x;
+
+  WITH u AS (
+    UPDATE message_schedule_runs r SET status = 'failed', finished_at = NOW(), locked_until = NULL,
+           detail = 'Stopped: sending did not finish within 6 hours'
+     WHERE r.status = 'sending' AND r.started_at < NOW() - INTERVAL '6 hours'
+    RETURNING r.schedule_id
+  ) SELECT array_agg(DISTINCT u.schedule_id) INTO v_ids FROM u;
+  PERFORM public.refresh_message_schedule(x) FROM unnest(COALESCE(v_ids, '{}')) x;
+
+  SELECT r.id INTO v_run
+    FROM message_schedule_runs r JOIN message_schedules s ON s.id = r.schedule_id
+   WHERE s.status = 'active'
+     AND ((r.status = 'pending' AND r.run_at <= NOW())
+       OR (r.status = 'sending' AND (r.locked_until IS NULL OR r.locked_until < NOW())))
+   ORDER BY r.run_at
+   LIMIT 1
+   FOR UPDATE OF r SKIP LOCKED;
+  IF v_run IS NULL THEN RETURN; END IF;
+
+  UPDATE message_schedule_runs r SET status = 'sending', started_at = COALESCE(r.started_at, NOW()),
+         locked_until = NOW() + INTERVAL '2 minutes', attempts = r.attempts + 1
+   WHERE r.id = v_run;
+
+  RETURN QUERY
+  SELECT r.id, r.schedule_id, r.event_id, r.run_at, r.next_index, r.sent, r.failed, r.skipped,
+         (SELECT count(*)::INT FROM message_schedule_runs x WHERE x.schedule_id = r.schedule_id AND x.status <> 'cancelled' AND x.run_at <= r.run_at),
+         s.total_runs, EXISTS (SELECT 1 FROM message_run_targets t WHERE t.run_id = r.id),
+         s.channel, s.title, s.body, s.message_key, s.sender_id, s.wa_template, s.wa_account, s.wa_image, s.audience, s.created_by,
+         e.username
+    FROM message_schedule_runs r
+    JOIN message_schedules s ON s.id = r.schedule_id
+    JOIN events e ON e.id = r.event_id
+   WHERE r.id = v_run;
+END $$;
+
+-- Saves how far a run has got and renews (or, p_release, hands back) its lease.
+-- Returns FALSE when the run must stop now: cancelled, or its schedule paused.
+CREATE OR REPLACE FUNCTION public.save_run_progress(
+  p_run_id UUID, p_next_index INT, p_sent INT, p_failed INT, p_skipped INT, p_release BOOLEAN DEFAULT FALSE
+) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_active BOOLEAN;
+BEGIN
+  SELECT s.status = 'active' INTO v_active
+    FROM message_schedule_runs r JOIN message_schedules s ON s.id = r.schedule_id
+   WHERE r.id = p_run_id AND r.status = 'sending';
+  IF v_active IS NULL THEN RETURN FALSE; END IF;
+  UPDATE message_schedule_runs r SET next_index = GREATEST(COALESCE(p_next_index, 0), 0),
+         sent = GREATEST(COALESCE(p_sent, 0), 0), failed = GREATEST(COALESCE(p_failed, 0), 0), skipped = GREATEST(COALESCE(p_skipped, 0), 0),
+         locked_until = CASE WHEN p_release OR NOT v_active THEN NULL ELSE NOW() + INTERVAL '2 minutes' END
+   WHERE r.id = p_run_id AND r.status = 'sending';
+  RETURN v_active;
+END $$;
+
+-- Ends a run (done / failed), drops its recipient list and updates the schedule's counts
+CREATE OR REPLACE FUNCTION public.finish_schedule_run(p_run_id UUID, p_status TEXT, p_detail TEXT DEFAULT NULL) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_sched UUID;
+BEGIN
+  IF p_status NOT IN ('done','failed') THEN RAISE EXCEPTION 'Unknown status %', p_status; END IF;
+  UPDATE message_schedule_runs r SET status = p_status, finished_at = NOW(), locked_until = NULL, detail = left(p_detail, 500)
+   WHERE r.id = p_run_id AND r.status = 'sending'
+  RETURNING r.schedule_id INTO v_sched;
+  DELETE FROM message_run_targets t WHERE t.run_id = p_run_id;
+  IF v_sched IS NULL THEN RETURN FALSE; END IF;
+  PERFORM public.refresh_message_schedule(v_sched);
+  RETURN TRUE;
+END $$;
+
+-- Main-SMS and card sends update the guests' statuses like a send from the app does.
+-- p_items: [{ "id": card id, "sms_status": … } or { "id": …, "wa_status": … }]
+CREATE OR REPLACE FUNCTION public.set_card_send_statuses(p_items JSONB) RETURNS INT
+LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  WITH x AS (
+    SELECT (i ->> 'id')::UUID AS id, i ->> 'sms_status' AS sms, i ->> 'wa_status' AS wa
+      FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) i
+     WHERE i ? 'id'
+  ), u AS (
+    UPDATE event_cards c SET sms_status = COALESCE(x.sms, c.sms_status), wa_status = COALESCE(x.wa, c.wa_status)
+      FROM x WHERE c.id = x.id
+    RETURNING 1
+  ) SELECT count(*)::INT FROM u
+$$;
+
+REVOKE ALL ON FUNCTION public.refresh_message_schedule(UUID), public.claim_schedule_run(),
+  public.save_run_progress(UUID, INT, INT, INT, INT, BOOLEAN), public.finish_schedule_run(UUID, TEXT, TEXT),
+  public.set_card_send_statuses(JSONB) FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.refresh_message_schedule(UUID), public.claim_schedule_run(),
+  public.save_run_progress(UUID, INT, INT, INT, INT, BOOLEAN), public.finish_schedule_run(UUID, TEXT, TEXT),
+  public.set_card_send_statuses(JSONB) TO service_role;
+REVOKE ALL ON FUNCTION public.save_message_schedule(UUID, UUID, TEXT, JSONB, TIMESTAMPTZ[]),
+  public.set_message_schedule_status(UUID, TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.save_message_schedule(UUID, UUID, TEXT, JSONB, TIMESTAMPTZ[]),
+  public.set_message_schedule_status(UUID, TEXT) TO authenticated;
+
+-- Every minute, but only while a send is due, call the run-schedules Edge Function. The
+-- project URL and the shared secret come from Supabase Vault (created once by hand — README
+-- "Scheduled sends"), so neither is in this file. Where pg_cron / pg_net aren't available
+-- this only prints a notice and the schedules wait.
+DO $outer$
+BEGIN
+  CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA pg_catalog;
+  CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
+  PERFORM cron.schedule('nikadi-run-schedules', '* * * * *', $job$
+    SELECT net.http_post(
+      url     := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'nikadi_project_url') || '/functions/v1/run-schedules',
+      headers := jsonb_build_object(
+                   'Content-Type', 'application/json',
+                   'x-cron-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'nikadi_cron_secret')),
+      body    := '{}'::jsonb,
+      timeout_milliseconds := 60000)
+    WHERE EXISTS (
+      SELECT 1 FROM public.message_schedule_runs r JOIN public.message_schedules s ON s.id = r.schedule_id
+       WHERE s.status = 'active'
+         AND ((r.status = 'pending' AND r.run_at <= NOW())
+           OR (r.status = 'sending' AND (r.locked_until IS NULL OR r.locked_until < NOW()))))
+  $job$);
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Scheduled sends: could not set up pg_cron / pg_net (%). Turn both on under Database → Extensions, then run this file again.', SQLERRM;
+END $outer$;
+
+-- Live progress of schedules in the SMS / WhatsApp tabs
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_schedules;     EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_schedule_runs; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 
 -- Live updates for the Scanner tab across devices
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE event_cards; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;

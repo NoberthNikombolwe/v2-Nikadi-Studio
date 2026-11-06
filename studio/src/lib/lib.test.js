@@ -513,3 +513,68 @@ test("guest import adds only new name + phone pairs", () => {
   assert.deepEqual(r.skip.map(x => x.reason), ["Already on the guest list", "Repeated in this file"]);
   assert.equal(r.invalid.length, 1);
 });
+
+/* ── Send logic shared with the Edge Functions ── */
+import { smsStatusFromGroup, matchSmsResults, classifyWaSend, scheduleTargets, describeTargetSkips, placeholdersIn } from "../../supabase/functions/_shared/messaging.js";
+
+test("SMS provider groupIds map to sent / delivered / failed", () => {
+  assert.equal(smsStatusFromGroup(18), "sent");
+  assert.equal(smsStatusFromGroup(20), "delivered");
+  assert.equal(smsStatusFromGroup(19), "failed");
+  assert.equal(smsStatusFromGroup(undefined), "failed");
+});
+
+test("matchSmsResults hands out a repeated number's results in order", () => {
+  const resp = [
+    { to: 255712000001, status: { groupId: 18 } },
+    { to: "255712000002", status: { groupId: 20 } },
+    { to: 255712000001, status: { groupId: 19 } },
+  ];
+  assert.deepEqual(matchSmsResults(["0712000001", "+255712000002", "712000001", "0712000009"], resp), [18, 20, 19, undefined]);
+  assert.deepEqual(matchSmsResults(["0712000001"], null), [undefined]);
+});
+
+test("classifyWaSend reads the WhatsApp provider's answer", () => {
+  const body = (groupId, id, extra = {}) => JSON.stringify({ messages: [{ messageId: "m1", status: { groupId, id, ...extra } }] });
+  assert.deepEqual(classifyWaSend(200, body(18, 7)), { status: "sent", pending: true, messageId: "m1", detail: null });
+  assert.equal(classifyWaSend(200, body(20, 73)).status, "sent");
+  assert.equal(classifyWaSend(200, body(20, 76)).status, "invalid");
+  assert.equal(classifyWaSend(200, body(19, 111)).status, "invalid");
+  assert.equal(classifyWaSend(200, body(5, 1, { name: "Recipient not registered" })).status, "invalid");
+  assert.deepEqual(classifyWaSend(200, body(5, 1, { name: "REJECTED" })), { status: "not_sent", pending: false, messageId: "m1", detail: "REJECTED" });
+  assert.equal(classifyWaSend(422, "Number is not a WhatsApp user").status, "invalid");
+  assert.deepEqual(classifyWaSend(401, "nope"), { status: "not_sent", pending: false, messageId: null, detail: "HTTP 401: nope" });
+  assert.equal(classifyWaSend(200, "<html>").detail, "Invalid JSON response");
+});
+
+test("scheduleTargets picks the audience, fills the text and drops duplicates", () => {
+  const cards = [
+    { id: "a", name: "Asha", card_type: "Double", phone: "0712000001", sms_status: "sent",    wa_status: "sent", call_status: "yes", card_url: "https://x/a.jpg" },
+    { id: "b", name: "Juma", card_type: "Single", phone: "0712000002", sms_status: "pending", wa_status: "idle", call_status: "no",  card_url: null },
+    { id: "c", name: "Neema", card_type: "",      phone: "",           sms_status: "pending" },
+    { id: "d", name: "Bad",   card_type: "",      phone: "123" },
+    { id: "e", name: "Asha", card_type: "Double", phone: "+255712000001", call_status: "picked", card_url: "https://x/a.jpg" },
+    { id: "f", name: "Rehema", card_type: "VIP",  phone: "0712000001", call_status: "busy", card_url: "https://x/f.jpg" },
+  ];
+  const all = scheduleTargets(cards, { channel: "sms", body: "Hi {name} ({cardType})" });
+  assert.deepEqual(all.targets.map(t => [t.id, t.phone, t.text]), [
+    ["a", "255712000001", "Hi Asha (Double)"],
+    ["b", "255712000002", "Hi Juma (Single)"],
+    ["f", "255712000001", "Hi Rehema (VIP)"],
+  ]);
+  assert.deepEqual(all.skipped, { audience: 0, noPhone: 1, invalid: 1, noCard: 0, duplicate: 1 });
+  assert.equal(describeTargetSkips(all.skipped), "3 skipped: 1 no phone, 1 invalid number, 1 duplicate");
+  assert.deepEqual(scheduleTargets(cards, { channel: "sms", audience: "confirmed", body: "x" }).targets.map(t => t.id), ["a"]);
+  // e repeats a's number and text, so it is a duplicate — unless a is out of the audience
+  assert.deepEqual(scheduleTargets(cards, { channel: "sms", audience: "not_declined", body: "{name}" }).targets.map(t => t.id), ["a", "f"]);
+  assert.deepEqual(scheduleTargets(cards, { channel: "sms", audience: "not_sent", body: "{name}" }).targets.map(t => t.id), ["b", "e", "f"]);
+  // WhatsApp card: needs an uploaded card; same number + same card is a duplicate
+  const wa = scheduleTargets(cards, { channel: "whatsapp", image: true });
+  assert.deepEqual(wa.targets.map(t => [t.id, t.cardUrl]), [["a", "https://x/a.jpg"], ["f", "https://x/f.jpg"]]);
+  assert.equal(wa.skipped.noCard, 1);
+  assert.equal(wa.skipped.duplicate, 1);
+  // Text-only WhatsApp: one message per number
+  assert.deepEqual(scheduleTargets(cards, { channel: "whatsapp", image: false }).targets.map(t => t.id), ["a", "b"]);
+  assert.equal(describeTargetSkips({}), "");
+  assert.deepEqual(placeholdersIn("Hi {name}, {name}! {Table} {cardType}"), ["name", "Table", "cardType"]);
+});
