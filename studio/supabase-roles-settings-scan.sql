@@ -614,6 +614,71 @@ $$;
 REVOKE ALL ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT) FROM public;
 GRANT EXECUTE ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT) TO anon, authenticated;
 
+-- ─────────────────────────────────────────────────────────────────────
+-- 7. VIEW-ONLY SHARE LINK — #/view/<eventId> + events.view_code. Read-only guest
+--    list (card sent, call answer + comment, check-in) and the card history.
+--    Phone numbers are masked; nothing can be changed through these functions.
+-- ─────────────────────────────────────────────────────────────────────
+ALTER TABLE events ADD COLUMN IF NOT EXISTS view_code TEXT;   -- NULL = view-only link off
+
+-- Turn the link on (new code) or off (NULL). Needs Events or Calls (edit) on an event you can see.
+CREATE OR REPLACE FUNCTION public.set_view_code(p_event UUID, p_code TEXT) RETURNS VOID
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT (public.has_any_perm(ARRAY['events','calls','history'], TRUE) AND public.can_see_event(p_event)) THEN
+    RAISE EXCEPTION 'Your role cannot share this event';
+  END IF;
+  IF p_code IS NOT NULL AND p_code !~ '^[A-Z0-9]{6,12}$' THEN RAISE EXCEPTION 'Invalid code'; END IF;
+  UPDATE events SET view_code = p_code WHERE id = p_event;
+END $$;
+REVOKE ALL ON FUNCTION public.set_view_code(UUID, TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.set_view_code(UUID, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.view_code_ok(p_event UUID, p_code TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT EXISTS (SELECT 1 FROM events WHERE id = p_event AND view_code IS NOT NULL AND view_code = p_code)
+$$;
+REVOKE ALL ON FUNCTION public.view_code_ok(UUID, TEXT) FROM public, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.mask_phone(p TEXT) RETURNS TEXT
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN COALESCE(regexp_replace(p, '\D', '', 'g'), '') = '' THEN NULL
+              ELSE '••• ' || right(regexp_replace(p, '\D', '', 'g'), 3) END
+$$;
+
+CREATE OR REPLACE FUNCTION public.public_view_event(p_event UUID, p_code TEXT)
+RETURNS TABLE (name TEXT, event_type TEXT, start_datetime TIMESTAMPTZ, venue_name TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT e.username, e.event_type, e.start_datetime, e.venue_name
+    FROM events e WHERE e.id = p_event AND public.view_code_ok(p_event, p_code)
+$$;
+
+CREATE OR REPLACE FUNCTION public.public_view_guests(p_event UUID, p_code TEXT)
+RETURNS TABLE (id UUID, name TEXT, card_type TEXT, phone TEXT, wa_status TEXT, sms_status TEXT,
+               call_status TEXT, call_comment TEXT, call_updated_at TIMESTAMPTZ,
+               max_scans INT, scan_count INT, last_scanned_at TIMESTAMPTZ)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT c.id, c.name, c.card_type, public.mask_phone(c.phone), c.wa_status, c.sms_status,
+         c.call_status, c.call_comment, c.call_updated_at, c.max_scans, c.scan_count, c.last_scanned_at
+    FROM event_cards c
+   WHERE c.event_id = p_event AND public.view_code_ok(p_event, p_code)
+   ORDER BY c.name
+$$;
+
+CREATE OR REPLACE FUNCTION public.public_view_history(p_event UUID, p_code TEXT)
+RETURNS TABLE (created_at TIMESTAMPTZ, channel TEXT, action TEXT, status TEXT, recipient_name TEXT,
+               recipient_phone TEXT, message_title TEXT, detail TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT l.created_at, l.channel, l.action, l.status, l.recipient_name, public.mask_phone(l.recipient_phone),
+         l.message_title, l.detail
+    FROM event_logs l
+   WHERE l.event_id = p_event AND public.view_code_ok(p_event, p_code)
+     AND l.channel IN ('whatsapp','sms','card','calls','scan')
+   ORDER BY l.created_at DESC LIMIT 1000
+$$;
+REVOKE ALL ON FUNCTION public.public_view_event(UUID, TEXT), public.public_view_guests(UUID, TEXT), public.public_view_history(UUID, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_view_event(UUID, TEXT), public.public_view_guests(UUID, TEXT), public.public_view_history(UUID, TEXT) TO anon, authenticated;
+
 -- Live updates for the Scanner tab across devices
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE event_cards; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE scan_logs;   EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;

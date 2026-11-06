@@ -3014,8 +3014,20 @@ const NoEventOpen = ({ what, onGo }) => (
     action={<button className="nk-btn nk-btn-primary" onClick={() => onGo("events")}><Icon n="folder" /> Go to Events</button>} />
 );
 
-function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents }) {
-  const { cards, error, load } = useEventCards(eventId);
+function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory }) {
+  const { cards, error, load, patch } = useEventCards(eventId);
+  const [commenting, setCommenting] = useState(null);
+  const canComment = access.setupMissing || access.can("calls", "edit") || access.can("scanner", "edit");
+  // Saves a guest comment (same field as the Calls tab) and logs it to the event history
+  const saveComment = async (c, text) => {
+    const next = { call_comment: text || null, call_updated_at: new Date().toISOString(), call_by: myEmail };
+    const before = { call_comment: c.call_comment, call_updated_at: c.call_updated_at, call_by: c.call_by };
+    patch(c.id, next);
+    const { error: e } = await supabase.from("event_cards").update(next).eq("id", c.id);
+    if (e) { patch(c.id, before); showToast(`Could not save the comment: ${e.message}`, "warn"); return; }
+    logHistory?.({ channel: "calls", action: "call", status: c.call_status || "ok", name: c.name, phone: c.phone, detail: `Comment: ${text || "(removed)"}` }, eventId);
+    setCommenting(null);
+  };
   const [recent, setRecent] = useState([]);
   const [sharing, setSharing] = useState(false);
   const canScan = access.can("scanner", "edit");
@@ -3071,7 +3083,8 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
       {cards === null ? <EmptyState loading title="Loading guest list…" />
         : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." action={<button className="nk-btn nk-btn-ghost" onClick={() => onGo("design")}><Icon n="palette" /> Go to Design</button>} />
         : <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests."
-            renderBelow={({ begin, busy }) => <GuestList cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} />} />}
+            renderBelow={({ begin, busy }) => <GuestList cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} onComment={canComment ? setCommenting : null} />} />}
+      {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)} onSave={(text) => saveComment(commenting, text)} />}
       {recent.length > 0 && (
         <div className="nk-table-wrap" style={{marginTop:16}}>
           <table className="nk-table">
@@ -3098,7 +3111,7 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
 // Scanner guest list: every saved card for the event (sent or only uploaded), with live scan
 // state. Filters as you type and by state; "Check in" uses ScanPanel's flow (count prompt).
 const GUEST_FILTERS = [["all", "All"], ["waiting", "Not scanned"], ["partial", "Partly in"], ["complete", "Fully in"], ["entered", "Scanned"]];
-function GuestList({ cards = [], canScan, busy, onCheckIn }) {
+function GuestList({ cards = [], canScan, busy, onCheckIn, onComment }) {
   const [q, setQ] = useState("");
   const [state, setState] = useState("all");
   const rows = filterGuests(cards, { q, state });
@@ -3122,7 +3135,7 @@ function GuestList({ cards = [], canScan, busy, onCheckIn }) {
       {!rows.length ? <EmptyState compact icon="search" title="No guests match" text="Change the filter or clear the search." /> : (
         <div className="nk-table-wrap">
           <table className="nk-table">
-            <thead><tr><th>Guest</th><th>Card type</th><th>Phone</th><th>Card</th><th className="num">Entered</th><th>Status</th><th>Last scan</th><th></th></tr></thead>
+            <thead><tr><th>Guest</th><th>Card type</th><th>Phone</th><th>Card</th><th className="num">Entered</th><th>Status</th><th>Comment</th><th>Last scan</th><th></th></tr></thead>
             <tbody>
               {rows.map(c => {
                 const st = scanStatus(c.scan_count, c.max_scans);
@@ -3134,6 +3147,12 @@ function GuestList({ cards = [], canScan, busy, onCheckIn }) {
                     <td>{cardSource(c) === "sent" ? <Pill tone="good">Sent</Pill> : <Pill tone="info">Uploaded</Pill>}</td>
                     <td className="num">{c.scan_count || 0} / {c.max_scans || 1}</td>
                     <td><Pill tone={tone[st]}>{word[st]}</Pill></td>
+                    <td>
+                      <div className="nk-row-actions">
+                        <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
+                        {onComment && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => onComment(c)}><Icon n="note" /></Sb>}
+                      </div>
+                    </td>
                     <td style={{fontSize:12,color:N.textDim}}>{c.last_scanned_at ? fmtWhen(c.last_scanned_at) : "—"}</td>
                     <td>{canScan && (
                       <Sb bg="transparent" col={N.green} border={N.border} label={st === "complete" ? `Everyone on ${c.name}'s card has entered` : `Check in ${c.name} (${placesLeft(c.scan_count, c.max_scans)} left)`}
@@ -3147,6 +3166,52 @@ function GuestList({ cards = [], canScan, busy, onCheckIn }) {
         </div>
       )}
     </div>
+  );
+}
+
+// Turns the public, view-only report link (#/view/<id>: guests, calls + comments, card
+// history; phones masked) on/off. Uses set_view_code() so Tele Sales etc. can share too.
+function ShareViewModal({ eventRow, showToast, onClose, reloadEvents }) {
+  const [code, setCode] = useState(eventRow?.view_code || null);
+  const [busy, setBusy] = useState(false);
+  const link = `${window.location.origin}${import.meta.env.BASE_URL}#/view/${eventRow?.id}`;
+  const setViewCode = async (value) => {
+    setBusy(true);
+    const { error } = await supabase.rpc("set_view_code", { p_event: eventRow.id, p_code: value });
+    setBusy(false);
+    if (error) { showToast(/set_view_code|schema cache/i.test(error.message) ? "Sharing isn't set up yet — run the latest supabase-schema.sql" : `Could not update the link: ${error.message}`, "warn"); return; }
+    setCode(value); reloadEvents?.();
+    showToast(value ? "View-only link is on — share the link and code" : "View-only link turned off", "success");
+  };
+  const copy = async (text, what) => {
+    try { await navigator.clipboard.writeText(text); showToast(`${what} copied`, "success"); }
+    catch { showToast(`Copy didn't work — select the ${what.toLowerCase()} and copy it by hand`, "warn"); }
+  };
+  return (
+    <DetailModal label="Share view-only link" onClose={onClose} width={560}>
+      <div style={{fontSize:18,fontWeight:800,color:N.text,marginBottom:4}}>Share view-only link</div>
+      <p style={{fontSize:12,color:N.textDim,marginBottom:16}}>Anyone with the link and code can see this event's guest list (card sent, call answers and comments, check-in) and its card history. They can't change anything, and phone numbers are partly hidden.</p>
+      {code ? (
+        <>
+          <div className="nk-guide-block"><div className="nk-guide-block-label">Link</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}><code style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:N.sky}}>{link}</code>
+              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy link" onClick={() => copy(link, "Link")}><Icon n="copy" /></Sb></div></div>
+          <div className="nk-guide-block"><div className="nk-guide-block-label">Code</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{flex:1,fontSize:28,fontWeight:800,letterSpacing:6,fontFamily:"JetBrains Mono, monospace",color:N.text}}>{code}</span>
+              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy code" onClick={() => copy(code, "Code")}><Icon n="copy" /></Sb></div></div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end",marginTop:12}}>
+            <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setViewCode(null)}><Icon n="ban" /> Turn off</button>
+            <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setViewCode(newScanCode())} title="The old code stops working immediately"><Icon n="refresh" /> New code</button>
+            <button className="nk-btn nk-btn-primary" onClick={onClose}>Done</button>
+          </div>
+        </>
+      ) : (
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
+          <button className="nk-btn nk-btn-primary" disabled={busy} onClick={() => setViewCode(newScanCode())}><Icon n="link" /> Turn on & create code</button>
+        </div>
+      )}
+    </DetailModal>
   );
 }
 
@@ -3196,10 +3261,12 @@ function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
 }
 
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
-function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo }) {
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const [filter, setFilter] = useState({ status: "all", q: "" });
   const [commenting, setCommenting] = useState(null);
+  const [sharing, setSharing] = useState(false);
+  const canShare = access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit");
   const canEdit = access.can("calls", "edit");
   if (!eventId) return <div className="nk-page"><NoEventOpen what="Calls" onGo={onGo} /></div>;
   if (error) return (
@@ -3246,6 +3313,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
         <div style={{display:"flex",gap:8}}>
           <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={load}><Icon n="refresh" /> Refresh</button>
           <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={exportCalls} disabled={!cards?.length}><Icon n="download" /> Export Excel</button>
+          {canShare && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="eye" /> Share view-only{eventRow?.view_code ? " (on)" : ""}</button>}
         </div>
       </div>
       <div className="nk-stats">
@@ -3308,6 +3376,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
       </div>
       {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)}
         onSave={async (text) => { if (await update(commenting, { call_comment: text || null }, { status: commenting.call_status || "ok", detail: `Comment: ${text || "(removed)"}` })) setCommenting(null); }} />}
+      {sharing && <ShareViewModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
     </div>
   );
 }
@@ -4002,6 +4071,7 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyFilter,  setHistoryFilter]  = useState({ channel:"all", status:"all", q:"" });
+  const [shareView, setShareView] = useState(false);   // "Share view-only link" pop-up (History tab)
   const historyEventRef = useRef(null);   // event whose history is in historyRows
   const historyQueue    = useRef([]);     // rows waiting to be written
   const historyTimer    = useRef(null);
@@ -6299,15 +6369,17 @@ export default function App() {
                 onOpenEvent={setOverviewId} onOpenLead={openLead} onNewEvent={newEventForCustomer} />
             )}
 
+            {shareView && openEventRow && <ShareViewModal eventRow={openEventRow} showToast={showToast} onClose={() => setShareView(false)} reloadEvents={loadSavedEvents} />}
+
             {/* ─── SETTINGS / SCANNER / CALLS ─── */}
             {tab === "settings" && <SettingsTab access={access} askDialog={askDialog} myEmail={(user.email || "").toLowerCase()} />}
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
-                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} />
+                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} />
             )}
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
-                showToast={showToast} logHistory={logHistory} onGo={goTab} />
+                showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} />
             )}
 
             {/* ─── GUIDE ─── */}
@@ -6952,6 +7024,9 @@ export default function App() {
                       <button className="nk-btn nk-btn-success" onClick={downloadHistory} disabled={!shown.length}>
                         <Icon n="download" /> Export (.xlsx)
                       </button>
+                      {(access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit")) && openEventRow && (
+                        <button className="nk-btn nk-btn-ghost" onClick={() => setShareView(true)}><Icon n="eye" /> Share view-only{openEventRow.view_code ? " (on)" : ""}</button>
+                      )}
                     </div>
                   )}
                 </div>
