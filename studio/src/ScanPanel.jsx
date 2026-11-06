@@ -3,6 +3,7 @@ import Icon from "./Icon";
 import { N, alpha } from "./lib/theme";
 import { parseQrPayload, SCAN_REASON } from "./lib/scan";
 import { scanStatus, remaining, peopleLabel } from "./lib/cardRules";
+import { createCamera } from "./lib/camera";
 
 // The door check-in screen, shared by the staff Scanner tab (App.jsx) and the public,
 // code-protected Scan page (PublicScanPage.jsx). It only talks to the outside through
@@ -11,9 +12,34 @@ import { scanStatus, remaining, peopleLabel } from "./lib/cardRules";
 //   search(query)                    → Promise<card[]>   (manual search)
 //   checkIn(card, count, method)     → Promise<{ accepted, reason, scan_count, max_scans, name, card_type }>
 // A card is { id, name, card_type, max_scans, scan_count }.
-// The camera is stopped after every read (saves battery on a phone used all evening).
+// The camera is stopped after every read (saves battery on a phone used all evening), and it
+// must really be released each time: a phone only lets one page hold the camera, so a stream
+// left running in the background makes the next "Scan next card" fail until the screen is
+// locked. The start / stop order that guarantees this is in src/lib/camera.js (unit-tested).
 
 const loadQr = () => import("html5-qrcode");
+
+// Last resort after every scan: stop any camera track still attached to the box's video and
+// empty the box, so nothing keeps the camera even if the library's own stop() didn't run
+const releaseCameraBox = (id) => {
+  const box = document.getElementById(id);
+  if (!box) return;
+  box.querySelectorAll("video").forEach(v => {
+    const stream = v.srcObject;
+    if (stream && typeof stream.getTracks === "function") stream.getTracks().forEach(t => { try { t.stop(); } catch { /* already ended */ } });
+    v.srcObject = null;
+  });
+  box.innerHTML = "";   // React renders nothing inside this box; only the library's leftovers go
+};
+
+// Why the camera didn't start, in words for the door staff
+const camErrorText = (e) => {
+  const s = `${e?.name || ""} ${e?.message || e || ""}`;
+  if (/NotAllowed|Permission/i.test(s)) return "Camera permission was refused. Allow the camera in the browser settings, or search by name below.";
+  if (/NotReadable|Could not start video source|in use|TrackStart/i.test(s)) return "The camera is busy — close other apps or tabs using it, then press Start camera again. You can also search by name below.";
+  if (/NotFound|Overconstrained|no camera/i.test(s)) return "No camera was found on this device. Search by name below.";
+  return "Could not start the camera. Press Start camera to try again, or search by name below.";
+};
 
 const CSS = `
   .sp-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
@@ -45,8 +71,8 @@ const statusTone = (s) => s === "complete" ? N.green : s === "partial" ? N.amber
 // a check-in through the same flow, including the "how many are entering?" prompt.
 export default function ScanPanel({ findCard, search, checkIn, scannerName, disabled, disabledReason, renderBelow }) {
   const camId = useId().replace(/:/g, "");
-  const qr = useRef(null);
   const [camOn, setCamOn]   = useState(false);
+  const [camReady, setCamReady] = useState(false);   // the video is showing
   const [camErr, setCamErr] = useState(null);
   const [busy, setBusy]     = useState(false);
   const [result, setResult] = useState(null);   // { tone, title, card, message }
@@ -54,29 +80,38 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
   const [pick, setPick]     = useState(null);   // several cards match an ID-less QR
   const [q, setQ]           = useState("");
   const [hits, setHits]     = useState([]);
+  // One camera controller per panel (src/lib/camera.js): it makes sure the camera is really
+  // released after each read, so "Scan next card" can always open it again
+  const [camera] = useState(() => createCamera({
+    create: async () => { const { Html5Qrcode } = await loadQr(); return new Html5Qrcode(camId, { verbose: false }); },
+    release: () => releaseCameraBox(camId),
+    nextFrame: () => new Promise(r => requestAnimationFrame(() => r())),
+  }));
 
-  const stopCam = async () => {
-    const s = qr.current; qr.current = null;
-    if (s) { try { await s.stop(); } catch { /* already stopped */ } try { s.clear(); } catch { /* ignore */ } }
-    setCamOn(false);
-  };
-  useEffect(() => () => { stopCam(); }, []);
+  // Turns the camera off and gives it back to the phone
+  const stopCam = () => { setCamOn(false); setCamReady(false); return camera.stop(); };
+  useEffect(() => {
+    // Leaving the page or locking the phone gives the camera back straight away
+    const onHide = () => { if (document.hidden) stopCam(); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => { document.removeEventListener("visibilitychange", onHide); camera.stop(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- stopCam only touches the controller and state setters
 
-  // Turns the camera on and waits for one QR code
+  // Turns the camera on and waits for one QR code (the controller stops it after the read)
   const startCam = async () => {
-    if (disabled) return;
+    if (disabled || camera.busy) return;
     setCamErr(null); setResult(null); setPick(null);
+    setCamOn(true); setCamReady(false);                   // show the box first, so the video gets a size
     try {
-      const { Html5Qrcode } = await loadQr();
-      const s = new Html5Qrcode(camId, { verbose: false });
-      qr.current = s;
-      setCamOn(true);
-      await s.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 230, height: 230 } },
-        async (text) => { await stopCam(); onQr(text); }, () => {});
+      const r = await camera.start({
+        constraints: { facingMode: "environment" },
+        config: { fps: 10, qrbox: { width: 230, height: 230 } },
+        onCode: (text) => { setCamOn(false); setCamReady(false); onQr(text); },
+      });
+      if (r === "started") setCamReady(true);
     } catch (e) {
-      setCamOn(false); qr.current = null;
-      setCamErr(/permission|notallowed/i.test(String(e)) ? "Camera permission was refused. Allow the camera in the browser settings, or search by name below."
-        : "Could not start the camera. Use search by name below.");
+      setCamOn(false); setCamReady(false);
+      setCamErr(camErrorText(e));
     }
   };
 
@@ -152,8 +187,13 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
       )}
       <div className="sp-wrap">
         <div className="sp-card">
-          <div className="sp-cam">
+          <div className="sp-cam" style={{position:"relative"}}>
             <div id={camId} style={{width:"100%",height:"100%",display:camOn ? "block" : "none"}} />
+            {camOn && !camReady && (
+              <div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",color:N.textDim,fontSize:13}} role="status">
+                <span><Icon n="loader" /> Opening the camera…</span>
+              </div>
+            )}
             {!camOn && (
               <div style={{textAlign:"center",padding:20}}>
                 <Icon n="camera" size="48px" />
