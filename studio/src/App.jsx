@@ -7093,7 +7093,7 @@ export default function App() {
             {/* ─── WHATSAPP ─── */}
             {tab === "whatsapp" && (
               <div className="nk-page" style={{padding:"0 0 40px"}}>
-                <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
+                <div style={{display:"flex",gap:24,alignItems:"flex-start",flexWrap:"wrap"}}>
 
                   {/* Left: step controls */}
                   <div style={{flex:"0 0 260px"}}>
@@ -7111,10 +7111,6 @@ export default function App() {
                       onClick={uploadAllCards} disabled={uploadingCards}>
                       {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
                     </button>
-                    <StorageMeter key={uploadingCards ? "busy" : "idle"} quotaMb={access.settings.storage_quota_mb}
-                      onManage={access.can("settings") ? () => goTab("settings") : null} />
-                    <div style={{height:20}} />
-
                     {/* Template */}
                     <div className="nk-sec" style={{color:N.amber}}>WhatsApp Template</div>
                     <label className="nk-label">Template Name</label>
@@ -7158,8 +7154,8 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Right: table */}
-                  <div style={{flex:1}}>
+                  {/* Middle: table */}
+                  <div style={{flex:"1 1 420px",minWidth:0}}>
                     {/* Download report — available once any WhatsApp send has finished (it reads the
                         records, not the log, so it stays after the log clears itself) */}
                     {!bulkSending && waReportReady && (
@@ -7207,6 +7203,12 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
+                  </div>
+
+                  {/* Right: storage (view only — managed in Settings → Storage) */}
+                  <div style={{flex:"0 0 240px",marginTop:-20}}>
+                    <StorageMeter key={uploadingCards ? "busy" : "idle"} quotaMb={access.settings.storage_quota_mb}
+                      onManage={access.can("settings") ? () => goTab("settings") : null} />
                   </div>
                 </div>
               </div>
