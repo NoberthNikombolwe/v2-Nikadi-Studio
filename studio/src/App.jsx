@@ -1,4 +1,5 @@
 import Logo from "./Logo";
+import { planCardSave } from "./lib/guestMerge";
 import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
@@ -4975,7 +4976,8 @@ export default function App() {
     }
   };
 
-  // Replaces this event's `event_cards` rows with `recs` (default: the current records).
+  // Saves `recs` (default: the current records) as this event's `event_cards` rows — merging
+  // onto existing cards so call answers and check-ins (a ledger) are never reset or lost.
   // Insert-then-delete rather than delete-then-insert: the new rows go in first and
   // only the rows that existed beforehand are removed, so a failed insert can never
   // leave the event with no contacts. Placeholder `sample` records are never saved.
@@ -4986,7 +4988,9 @@ export default function App() {
     const entries = recs.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample);   // keep each row's position in `recs`
     const toSave  = entries.map(({ r }) => r);
     if (!toSave.length) { showToast("No contacts to save", "info"); return; }
-    const { data: old, error: readErr } = await supabase.from("event_cards").select("id").eq("event_id", eventId);
+    const { data: old, error: readErr } = await supabase.from("event_cards")
+      .select("id,name,card_type,phone,wa_status,sms_status,call_status,call_comment,call_updated_at,call_by,scan_count,max_scans,last_scanned_at")
+      .eq("event_id", eventId);
     if (readErr) { showToast("Cards save error: " + readErr.message, "warn"); return; }
     const toRow = r => ({
       event_id:   eventId,
@@ -4996,15 +5000,33 @@ export default function App() {
       wa_status:  r.waStatus||WA.idle,
       sms_status: r.smsStatus||SMS.pending,
     });
-    // Rows that already exist keep their id (printed QR codes carry it) and their scan /
-    // call progress: they're updated in place. New rows are inserted; rows no longer in
-    // the list are deleted last, so a failed save never loses contacts.
-    const oldIds = new Set((old || []).map(o => o.id));
-    const keep   = entries.filter(({ r }) => r.dbId && oldIds.has(r.dbId));
-    const fresh  = entries.filter(({ r }) => !(r.dbId && oldIds.has(r.dbId)));
+    // Calls and check-ins are a ledger: re-uploading a spreadsheet must never reset or
+    // delete them. planCardSave matches each row to its existing card (dbId, else phone +
+    // name, phone, or name) and updates it in place — same id (printed QR codes carry
+    // it), call answers and scans untouched. Only call/scan columns are never written
+    // here. A freshly uploaded sheet has no send statuses, so a matched card keeps its
+    // stored WhatsApp/SMS status instead of going back to "not sent".
+    const plan  = planCardSave(entries, old || []);
+    const keep  = plan.keep;
+    const fresh = plan.fresh;
     if (keep.length) {
-      const { error } = await supabase.from("event_cards").upsert(keep.map(({ r }) => ({ id: r.dbId, ...toRow(r) })));
+      const { error } = await supabase.from("event_cards").upsert(keep.map(({ r, id, old: o, matched }) => {
+        const row = { id, ...toRow(r) };
+        if (matched !== "id") {
+          if ((r.waStatus || WA.idle) === WA.idle && o.wa_status) row.wa_status = o.wa_status;
+          if ((r.smsStatus || SMS.pending) === SMS.pending && o.sms_status) row.sms_status = o.sms_status;
+        }
+        return row;
+      }));
       if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
+      // Matched rows now point at their existing card, with the statuses it already had
+      const byIdx = new Map(keep.filter(k => k.matched !== "id").map(k => [k.i, k]));
+      if (byIdx.size) setRecords(rs => rs.map((r, i) => {
+        const k = byIdx.get(i); if (!k) return r;
+        return { ...r, dbId: k.id,
+          waStatus:  (r.waStatus || WA.idle) === WA.idle ? (k.old.wa_status || r.waStatus) : r.waStatus,
+          smsStatus: (r.smsStatus || SMS.pending) === SMS.pending ? (k.old.sms_status || r.smsStatus) : r.smsStatus };
+      }));
     }
     if (fresh.length) {
       const { data: inserted, error } = await supabase.from("event_cards").insert(fresh.map(({ r }) => toRow(r))).select("id");
@@ -5015,17 +5037,27 @@ export default function App() {
         setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
       }
     }
-    const kept = new Set(keep.map(({ r }) => r.dbId));
-    const gone = (old || []).map(o => o.id).filter(id => !kept.has(id));
+    // Guests missing from the new list: delete only those with no call/check-in history.
+    // Guests with history are kept and put back on the list.
+    const gone = plan.remove;
     if (gone.length) {
       const { error: delErr } = await supabase.from("event_cards").delete().in("id", gone);
       if (delErr) { showToast("Cards saved, but removed rows could not be deleted: " + delErr.message, "warn"); return; }
     }
-    // Status-only saves (after every send) keep the same count — only log real list changes
-    if ((old?.length || 0) !== toSave.length) {
-      logHistory({ channel:"event", action:"contacts", detail:`Contact list saved: ${toSave.length} contacts (was ${old?.length || 0})` }, eventId);
+    if (plan.retained.length) {
+      setRecords(rs => [...rs, ...plan.retained.map(c => ({
+        dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
+        waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
+      }))]);
     }
-    showToast(`${toSave.length} cards saved`, "success");
+    const total = toSave.length + plan.retained.length;
+    // Status-only saves (after every send) keep the same count — only log real list changes
+    if ((old?.length || 0) !== total || fresh.length || gone.length) {
+      logHistory({ channel:"event", action:"contacts", detail:`Contact list saved: ${total} contacts (was ${old?.length || 0}; ${fresh.length} new, ${gone.length} removed, ${plan.retained.length} kept for call/check-in history)` }, eventId);
+    }
+    showToast(plan.retained.length
+      ? `${total} cards saved — ${plan.retained.length} guest${plan.retained.length === 1 ? "" : "s"} not in the new sheet kept because they have call or check-in history`
+      : `${total} cards saved — calls and check-ins kept`, plan.retained.length ? "info" : "success");
   };
 
   // Manually persists the current element layout to the loaded event's DB row

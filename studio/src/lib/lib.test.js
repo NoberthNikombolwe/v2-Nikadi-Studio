@@ -471,3 +471,30 @@ test("scanner guest list: filter, counts, source", () => {
   assert.deepEqual(guestCounts(cards), { scanned: 2, waiting: 1, sent: 2 });
   assert.equal(cardSource(cards[1]), "uploaded");
 });
+
+import { planCardSave, hasLedger } from "./guestMerge.js";
+test("re-uploading a guest list keeps calls and check-ins", () => {
+  const old = [
+    { id: "a", name: "Asha Said", phone: "0712000001", call_status: "yes", scan_count: 0 },
+    { id: "b", name: "Juma",      phone: "255712000002", scan_count: 2 },
+    { id: "c", name: "Neema",     phone: "0712000003" },                       // no ledger
+    { id: "d", name: "Old Guest", phone: "0712000004", call_comment: "Busy" },  // not in new sheet
+    { id: "e", name: "No Phone",  phone: "" },
+  ];
+  const rows = [
+    { name: "asha  said", phone: "+255 712 000 001" },   // phone + name (normalised)
+    { name: "Juma Ally",  phone: "0712000002" },          // phone only, renamed
+    { name: "Zawadi",     phone: "0712000009" },          // new
+    { name: "No Phone",   phone: "" },                    // name only
+  ];
+  const plan = planCardSave(rows.map((r, i) => ({ r, i })), old);
+  assert.deepEqual(plan.keep.map(k => [k.i, k.id, k.matched]), [[0, "a", "phone+name"], [1, "b", "phone"], [3, "e", "name"]]);
+  assert.deepEqual(plan.fresh.map(f => f.i), [2]);
+  assert.deepEqual(plan.retained.map(o => o.id), ["d"]);
+  assert.deepEqual(plan.remove, ["c"]);
+  // dbId wins
+  const p2 = planCardSave([{ r: { dbId: "c", name: "X" }, i: 0 }], old);
+  assert.deepEqual(p2.keep.map(k => k.id), ["c"]);
+  assert.equal(hasLedger({ scan_count: 1 }), true);
+  assert.equal(hasLedger({ call_comment: "  " }), false);
+});
