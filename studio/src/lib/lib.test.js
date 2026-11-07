@@ -167,8 +167,17 @@ const historyRows = [
 
 test("summariseHistory counts sends, lets late reports override, ignores bulk rows", () => {
   assert.deepEqual(summariseHistory(historyRows),
-    { cardsSent: 1, waProblems: 1, smsSent: 1, smsFailed: 1, uploads: 1, lastAt: "2026-11-04T11:00:02Z" });
-  assert.deepEqual(summariseHistory([]), { cardsSent: 0, waProblems: 0, smsSent: 0, smsFailed: 0, uploads: 0, lastAt: null });
+    { cardsSent: 1, waProblems: 1, waDelivered: 0, waRead: 0, smsSent: 1, smsFailed: 1, smsDelivered: 0, uploads: 1, lastAt: "2026-11-04T11:00:02Z" });
+  assert.deepEqual(summariseHistory([]), { cardsSent: 0, waProblems: 0, waDelivered: 0, waRead: 0, smsSent: 0, smsFailed: 0, smsDelivered: 0, uploads: 0, lastAt: null });
+  // Delivery reports: delivered / read are counted, a later failure moves a send from sent to failed
+  const reports = [
+    { channel: "sms", action: "send", status: "sent", created_at: "1" }, { channel: "sms", action: "send", status: "sent", created_at: "2" },
+    { channel: "sms", action: "status", status: "delivered", created_at: "3" }, { channel: "sms", action: "status", status: "failed", created_at: "4" },
+    { channel: "whatsapp", action: "send", status: "sent", created_at: "5" }, { channel: "whatsapp", action: "status", status: "delivered", created_at: "6" },
+    { channel: "whatsapp", action: "status", status: "read", created_at: "7" },
+  ];
+  const r = summariseHistory(reports);
+  assert.deepEqual([r.smsSent, r.smsDelivered, r.smsFailed, r.cardsSent, r.waDelivered, r.waRead, r.waProblems], [1, 1, 1, 1, 1, 1, 0]);
 });
 
 test("filterHistory filters by channel, status and text or local-format phone", () => {
@@ -517,9 +526,13 @@ test("guest import adds only new name + phone pairs", () => {
 /* ── Send logic shared with the Edge Functions ── */
 import { smsStatusFromGroup, matchSmsResults, classifyWaSend, scheduleTargets, describeTargetSkips, placeholdersIn } from "../../supabase/functions/_shared/messaging.js";
 
-test("SMS provider groupIds map to sent / delivered / failed", () => {
+test("SMS provider statuses go by the status id: group 20 alone is not 'delivered'", () => {
+  assert.equal(smsStatusFromGroup(18, 51), "sent");          // ENROUTE — the normal answer to a send
+  assert.equal(smsStatusFromGroup(20, 73), "delivered");
+  assert.equal(smsStatusFromGroup(20, 76), "failed");        // UNDELIVERABLE is group 20 too
+  assert.equal(smsStatusFromGroup(20, 77), "sent");          // ACCEPTED by the network, still on its way
+  assert.equal(smsStatusFromGroup(20), "failed");            // group 20 without an id can't be called delivered
   assert.equal(smsStatusFromGroup(18), "sent");
-  assert.equal(smsStatusFromGroup(20), "delivered");
   assert.equal(smsStatusFromGroup(19), "failed");
   assert.equal(smsStatusFromGroup(undefined), "failed");
 });
@@ -536,14 +549,21 @@ test("matchSmsResults hands out a repeated number's results in order", () => {
 
 test("classifyWaSend reads the WhatsApp provider's answer", () => {
   const body = (groupId, id, extra = {}) => JSON.stringify({ messages: [{ messageId: "m1", status: { groupId, id, ...extra } }] });
-  assert.deepEqual(classifyWaSend(200, body(18, 7)), { status: "sent", pending: true, messageId: "m1", detail: null });
-  assert.equal(classifyWaSend(200, body(20, 73)).status, "sent");
+  assert.deepEqual(classifyWaSend(200, body(18, 7)), { status: "sent", pending: true, messageId: "m1", statusId: 7, groupId: 18, statusName: null, detail: null });
+  assert.equal(classifyWaSend(200, body(20, 73)).status, "delivered");
+  assert.equal(classifyWaSend(200, body(20, 108)).status, "read");
+  assert.equal(classifyWaSend(200, body(20, 109)).status, "sent");
   assert.equal(classifyWaSend(200, body(20, 76)).status, "invalid");
+  assert.equal(classifyWaSend(200, body(20, 120)).status, "invalid");
   assert.equal(classifyWaSend(200, body(19, 111)).status, "invalid");
   assert.equal(classifyWaSend(200, body(5, 1, { name: "Recipient not registered" })).status, "invalid");
-  assert.deepEqual(classifyWaSend(200, body(5, 1, { name: "REJECTED" })), { status: "not_sent", pending: false, messageId: "m1", detail: "REJECTED" });
+  assert.equal(classifyWaSend(200, body(5, 1, { name: "REJECTED" })).detail, "REJECTED");
+  assert.equal(classifyWaSend(200, body(5, 1, { name: "REJECTED" })).status, "not_sent");
+  assert.match(classifyWaSend(200, body(22, 57)).detail, /^FAILED_NOT_ENOUGH_CREDITS — Not enough SMS credit/);
   assert.equal(classifyWaSend(422, "Number is not a WhatsApp user").status, "invalid");
-  assert.deepEqual(classifyWaSend(401, "nope"), { status: "not_sent", pending: false, messageId: null, detail: "HTTP 401: nope" });
+  assert.deepEqual(classifyWaSend(401, "nope"), { status: "not_sent", pending: false, messageId: null, statusId: null, groupId: null, statusName: null, detail: "HTTP 401: nope" });
+  // the huge messageId stays exact (JSON.parse alone would round it)
+  assert.equal(classifyWaSend(200, '{"messages":[{"messageId":7391827364512378881,"status":{"groupId":18,"id":51}}]}').messageId, "7391827364512378881");
   assert.equal(classifyWaSend(200, "<html>").detail, "Invalid JSON response");
 });
 
@@ -861,4 +881,154 @@ test("camera: a wide laptop picture and a square one also cover the box", () => 
   assert.equal(scanBoxSide(420, 747, 420), 294);
   assert.equal(scanBoxSide(0), 210);                // box not measured yet → a safe default
   assert.equal(scanBoxSide(40), 50);                // the library's minimum
+});
+
+/* ── Delivery reports (NextSMS docs: Statuses, Get delivery reports, Delivery callback) ── */
+import { PROVIDER_STATUS, deliveryStateOf, statusReason, parseProviderJson, smsSendResult, matchSmsMessages, waCardStatus,
+  historyStatusOf, eatToIso, parseDeliveryReports, parseDeliveryCallback, reportsQueries, WA_NOT_ON_WHATSAPP } from "../../supabase/functions/_shared/messaging.js";
+
+test("every provider status id has the right state", () => {
+  const ids = (state) => Object.entries(PROVIDER_STATUS).filter(([, s]) => s.state === state).map(([id]) => Number(id)).sort((a, b) => a - b);
+  assert.deepEqual(ids("sent"), [50, 51, 52, 77, 88, 109]);
+  assert.deepEqual(ids("delivered"), [73]);
+  assert.deepEqual(ids("read"), [108]);
+  assert.equal(ids("failed").length, Object.keys(PROVIDER_STATUS).length - 8);
+  assert.equal(deliveryStateOf(76, 20), "failed");
+  assert.equal(deliveryStateOf("73", "20"), "delivered");     // the webhook sends ids as text
+  assert.equal(deliveryStateOf(999, 18), "sent");             // unknown id: the group decides
+  assert.equal(deliveryStateOf(999, 22), "failed");
+  assert.equal(deliveryStateOf(999, 20), null);
+  assert.equal(deliveryStateOf(null, null), null);
+  assert.equal(statusReason(76), "UNDELIVERABLE — Cannot be delivered — the number may not exist");
+  assert.equal(statusReason(999, "SOMETHING_NEW"), "SOMETHING_NEW");
+  assert.deepEqual(WA_NOT_ON_WHATSAPP, [76, 111, 120]);
+});
+
+test("send answers keep the provider's huge messageId exact and read each number's result", () => {
+  const raw = '{"messages":[{"to":"255712000001","status":{"groupId":18,"groupName":"PENDING","id":51,"name":"ENROUTE (SENT)"},"messageId":7391827364512378881,"smsCount":1},'
+    + '{"to":"255712000002","status":{"groupId":19,"id":58,"name":"FAILED_SENDER"},"sendReference":7391827364512378880,"smsCount":0}]}';
+  const data = parseProviderJson(raw);
+  assert.equal(data.messages[0].messageId, "7391827364512378881");
+  assert.equal(data.messages[1].sendReference, "7391827364512378880");
+  const [a, b, c] = matchSmsMessages(["0712000001", "0712000002", "0712000003"], data.messages).map(smsSendResult);
+  assert.deepEqual(a, { status: "sent", missing: false, messageId: "7391827364512378881", statusId: 51, groupId: 18, statusName: "ENROUTE (SENT)", reason: null });
+  assert.equal(b.status, "failed");
+  assert.equal(b.messageId, null);
+  assert.equal(b.reason, "FAILED_SENDER — Sender ID not registered on that network");
+  assert.deepEqual([c.status, c.missing], ["failed", true]);
+});
+
+test("card and History statuses for each delivery state", () => {
+  assert.equal(waCardStatus("read", 108), "read");
+  assert.equal(waCardStatus("delivered", 73), "delivered");
+  assert.equal(waCardStatus("sent", 109), "sent");
+  assert.equal(waCardStatus("failed", 120), "invalid");
+  assert.equal(waCardStatus("failed", 114), "notSent");
+  assert.equal(historyStatusOf("whatsapp", "failed", 76), "invalid");
+  assert.equal(historyStatusOf("whatsapp", "failed", 79), "not_sent");
+  assert.equal(historyStatusOf("whatsapp", "read", 108), "read");
+  assert.equal(historyStatusOf("sms", "delivered", 73), "delivered");
+  assert.equal(historyStatusOf("sms", "failed", 74), "failed");
+  // every History status used here is one buildLogRow accepts
+  for (const st of ["read", "delivered", "sent", "invalid", "not_sent", "failed"]) {
+    assert.doesNotThrow(() => buildLogRow("e1", { channel: "sms", action: "status", status: st }));
+  }
+});
+
+test("delivery reports, the webhook payload and the report lookups", () => {
+  assert.equal(eatToIso("2026-10-20 10:15:07"), "2026-10-20T10:15:07+03:00");
+  assert.equal(eatToIso("2026-10-20 10:15"), "2026-10-20T10:15:00+03:00");
+  assert.equal(eatToIso(""), null);
+  const reports = parseDeliveryReports('{"results":[{"messageId":"7391827364512378881","sentAt":"2026-10-20 10:15:00","doneAt":"2026-10-20 10:15:07",'
+    + '"to":"255712345678","status":{"groupId":20,"groupName":"DELIVERED","id":73,"name":"DELIVERED"},"delivery":"DELIVERED"},'
+    + '{"messageId":7391827364512378999,"status":{"groupId":20,"id":76,"name":"UNDELIVERABLE"}},{"to":"x"},{"messageId":"1"}]}');
+  assert.deepEqual(reports, [
+    { message_id: "7391827364512378881", status_id: 73, group_id: 20, status_name: "DELIVERED", done_at: "2026-10-20T10:15:07+03:00" },
+    { message_id: "7391827364512378999", status_id: 76, group_id: 20, status_name: "UNDELIVERABLE", done_at: null },
+  ]);
+  assert.deepEqual(parseDeliveryReports("not json"), []);
+  assert.deepEqual(parseDeliveryReports({ results: null }), []);
+  assert.deepEqual(parseDeliveryCallback({ token: "t", messageId: "7391827364512378881", status: "DELIVERED", id: "73" }),
+    { kind: "status", message_id: "7391827364512378881", status_id: 73, status_name: "DELIVERED" });
+  assert.deepEqual(parseDeliveryCallback({ token: "t", messageId: "5", response: "Yes", payload: "confirm-1", text: "Yes" }),
+    { kind: "reply", message_id: "5", text: "Yes" });
+  assert.deepEqual(parseDeliveryCallback({ token: "t" }), { kind: "ping" });
+  assert.deepEqual(parseDeliveryCallback(null), { kind: "ping" });
+  const ids = Array.from({ length: 120 }, (_, i) => String(1000 + i));
+  const qs = reportsQueries([...ids, ids[0], "", null], "whatsapp");
+  assert.equal(qs.length, 3);
+  assert.ok(qs[0].startsWith("?channel=whatsapp&size=200&messageId=1000&messageId=1001"));
+  assert.equal(qs[0].match(/messageId=/g).length, 50);
+  assert.equal(qs[2].match(/messageId=/g).length, 20);
+  assert.deepEqual(reportsQueries([]), []);
+});
+
+test("SQL delivery_state() matches PROVIDER_STATUS exactly", () => {
+  const sql = fs.readFileSync(new URL("../../supabase-roles-settings-scan.sql", import.meta.url), "utf8");
+  const fn = sql.slice(sql.indexOf("FUNCTION public.delivery_state"), sql.indexOf("$$;", sql.indexOf("FUNCTION public.delivery_state")));
+  const fromSql = {};
+  for (const [, ids, state] of fn.matchAll(/WHEN p_id IN \(([\d,]+)\) THEN '(\w+)'/g)) ids.split(",").forEach(id => { fromSql[Number(id)] = state; });
+  const fromJs = Object.fromEntries(Object.entries(PROVIDER_STATUS).map(([id, s]) => [Number(id), s.state]));
+  assert.deepEqual(fromSql, fromJs);
+  assert.match(fn, /WHEN p_group = 18 THEN 'sent'/);
+  assert.match(fn, /WHEN p_group IN \(19,22\) THEN 'failed'/);
+});
+
+/* ── Delivery results in the app ── */
+import { indexDeliveries, extraStatusOf, deliveryNote, guestStatusCounts, deliveryCounts, failureReasons, filterDeliveries,
+  deliveryExportRows, parseProviderLogs, providerLogsQuery } from "./deliveries.js";
+
+const dRows = [
+  { id: 1, channel: "sms", message_key: "main", event_card_id: "c1", phone: "255712000001", recipient_name: "Asha", status: "failed", reason: "UNDELIVERABLE — Cannot be delivered — the number may not exist", sent_at: "2026-11-07T08:00:00Z", source: "check" },
+  { id: 2, channel: "sms", message_key: "main", event_card_id: "c1", phone: "255712000001", recipient_name: "Asha", status: "delivered", sent_at: "2026-11-07T09:00:00Z", done_at: "2026-11-07T09:00:05Z", source: "callback" },
+  { id: 3, channel: "whatsapp", message_key: "card", event_card_id: "c1", phone: "255712000001", recipient_name: "Asha", status: "read", sent_at: "2026-11-07T08:30:00Z", source: "callback" },
+  { id: 4, channel: "sms", message_key: "x1", event_card_id: "c2", phone: "255712000002", recipient_name: "Juma", status: "failed", reason: "EXPIRED — Not delivered in time", message_title: "Directions", sent_at: "2026-11-07T08:10:00Z", source: "check" },
+  { id: 5, channel: "sms", message_key: "custom", phone: "255712000003", recipient_name: "Neema", status: "sent", sent_at: "2026-11-07T08:20:00Z", source: "send" },
+  { id: 6, channel: "whatsapp", message_key: "card", event_card_id: "c2", phone: "255712000002", recipient_name: "Juma", status: "failed", reason: "UNDELIVERABLE — Cannot be delivered — the number may not exist", sent_at: "2026-11-07T08:40:00Z", source: "callback" },
+];
+
+test("indexDeliveries keeps each guest's latest send; extra messages get their result on top", () => {
+  const idx = indexDeliveries(dRows);
+  assert.equal(idx.byCard.get("sms|main|c1").id, 2);          // the newer send wins
+  assert.equal(idx.byCard.get("whatsapp|card|c1").status, "read");
+  assert.equal(idx.byCard.size, 3);
+  assert.equal(extraStatusOf(idx, "x1", { name: "juma ", phone: "0712000002" }, "sent"), "failed");
+  assert.equal(extraStatusOf(idx, "x1", { name: "Other", phone: "0712000009" }, "sent"), "sent");
+  assert.equal(idx.byExtra.size, 1);                           // custom texts aren't an extra message
+  assert.match(deliveryNote(dRows[0]), /^UNDELIVERABLE — Cannot be delivered/);
+  assert.match(deliveryNote(dRows[1]), /^Delivered to the phone · /);
+  assert.equal(deliveryNote(null), "");
+});
+
+test("Reports counts, failure reasons, the delivery log filter and export", () => {
+  const g = guestStatusCounts([
+    { smsStatus: "delivered", waStatus: "read" }, { smsStatus: "sent", waStatus: "delivered" }, { smsStatus: "failed", waStatus: "invalid" },
+    { smsStatus: "pending", waStatus: "idle" }, { smsStatus: "pending", waStatus: "notSent" }, { sample: true, smsStatus: "sent" },
+  ]);
+  assert.deepEqual(g, { total: 5, sms: { delivered: 1, sent: 1, failed: 1, notSent: 2 }, wa: { read: 1, delivered: 1, sent: 0, invalid: 1, failed: 1, notSent: 1 } });
+  assert.deepEqual(deliveryCounts(dRows), { total: 6, sent: 1, delivered: 1, read: 1, failed: 3, sms: 4, whatsapp: 2 });
+  assert.deepEqual(failureReasons(dRows), [
+    { reason: "EXPIRED — Not delivered in time", channel: "sms", count: 1 },
+    { reason: "UNDELIVERABLE — Cannot be delivered — the number may not exist", channel: "sms", count: 1 },
+    { reason: "UNDELIVERABLE — Cannot be delivered — the number may not exist", channel: "whatsapp", count: 1 },
+  ]);
+  assert.deepEqual(filterDeliveries(dRows, { status: "failed" }).map(d => d.id), [1, 4, 6]);
+  assert.deepEqual(filterDeliveries(dRows, { channel: "whatsapp" }).map(d => d.id), [3, 6]);
+  assert.deepEqual(filterDeliveries(dRows, { q: "directions" }).map(d => d.id), [4]);
+  assert.deepEqual(filterDeliveries(dRows, { q: "0712 000 003" }).map(d => d.id), [5]);
+  assert.deepEqual(filterDeliveries(dRows, { q: "expired" }).map(d => d.id), [4]);
+  const [row] = deliveryExportRows([dRows[0]]);
+  assert.deepEqual([row.Phone, row.Channel, row.Status, row.Reason, row["Updated by"]], ["+255712000001", "SMS", "Failed", dRows[0].reason, "check"]);
+});
+
+test("the NextSMS account log: query and rows", () => {
+  assert.equal(providerLogsQuery({ since: "2026-11-07", until: "2026-11-07", channel: "whatsapp", to: "0712 000 001", offset: 200 }),
+    "?sentSince=2026-11-07&sentUntil=2026-11-07&channel=whatsapp&to=255712000001&limit=200&offset=200");
+  assert.equal(providerLogsQuery({ since: "2026-11-01" }), "?sentSince=2026-11-01&limit=200");
+  const rows = parseProviderLogs('{"results":[{"messageId":7391827364512378881,"to":"255712345678","from":"NIKADI","channel":"Internet SMS","sentAt":"2026-11-07 10:15:00","doneAt":"2026-11-07 10:15:07","smsCount":1,"status":{"groupId":20,"id":76,"name":"UNDELIVERABLE"},"delivery":"UNDELIVERABLE"},'
+    + '{"messageId":"5","to":"255712000001","sentAt":"2026-11-07 10:16:00","status":{"groupId":18,"id":51,"name":"ENROUTE"},"delivery":null}]}');
+  assert.equal(rows.length, 2);
+  assert.deepEqual([rows[0].messageId, rows[0].state, rows[0].reason, rows[0].sentAt], ["7391827364512378881", "failed", "UNDELIVERABLE — Cannot be delivered — the number may not exist", "2026-11-07T10:15:00+03:00"]);
+  assert.deepEqual([rows[1].state, rows[1].doneAt], ["sent", null]);
+  assert.deepEqual(parseProviderLogs("oops"), []);
 });

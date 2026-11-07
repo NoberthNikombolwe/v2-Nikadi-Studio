@@ -19,13 +19,14 @@ A web application for designing, managing, and distributing personalised event i
 11. [Step 7 — Build for Production](#step-7--build-for-production)
 12. [Step 8 — Deploy the Messaging Edge Functions (Production Only)](#step-8--deploy-the-messaging-edge-functions-production-only)
 13. [Step 9 — Turn On Scheduled Sends](#step-9--turn-on-scheduled-sends)
-14. [Features](#features)
-15. [SMS Integration](#sms-integration)
-16. [WhatsApp Integration](#whatsapp-integration)
-17. [Scheduled Sends](#scheduled-sends)
-18. [Card Design System](#card-design-system)
-19. [Database Tables](#database-tables)
-20. [Known Limitations](#known-limitations)
+14. [Step 10 — Turn On Delivery Reports](#step-10--turn-on-delivery-reports)
+15. [Features](#features)
+16. [SMS Integration](#sms-integration)
+17. [WhatsApp Integration](#whatsapp-integration)
+18. [Scheduled Sends](#scheduled-sends)
+19. [Card Design System](#card-design-system)
+20. [Database Tables](#database-tables)
+21. [Known Limitations](#known-limitations)
 
 ---
 
@@ -357,6 +358,56 @@ select status_code, content from net._http_response order by created desc limit 
 
 ---
 
+## Step 10 — Turn On Delivery Reports
+
+Sending only tells you NextSMS **accepted** a message ("Sent"). Whether it reached the phone comes later, as a delivery report: **Delivered**, **Read** (WhatsApp) or **Failed**, with the reason (e.g. "UNDELIVERABLE — the number may not exist"). The app collects these reports in three ways:
+
+- **Webhook (instant):** NextSMS posts each result to the `delivery-webhook` function.
+- **Server check:** every 5 minutes, `run-schedules` asks NextSMS for messages still waiting. This covers missed webhooks; NextSMS doesn't retry them.
+- **"Check delivery now"** in the Reports tab.
+
+Every send is stored with its NextSMS message id in `message_deliveries`. Each result updates the guest's status and is written to the event History. The cron job also needs the Step 9 setup (pg_cron, pg_net, the Vault secrets and `CRON_SECRET`).
+
+### 10.1 — Run the schema
+
+Run the latest `supabase-schema.sql` (Step 5). It adds the delivery table and functions, and the cron job `nikadi-sync-deliveries`.
+
+### 10.2 — Set the webhook token and deploy
+
+Make a long random **Verify Token**, for example `[guid]::NewGuid().ToString("N")` in PowerShell. Then:
+
+```bash
+npx supabase secrets set NEXTSMS_CALLBACK_TOKEN=<the-token> --project-ref <your-project-ref>
+npx supabase functions deploy delivery-webhook --project-ref <your-project-ref> --no-verify-jwt
+# Redeploy these three too, so they record message ids and allow the reports / log lookups
+npx supabase functions deploy run-schedules --project-ref <your-project-ref> --no-verify-jwt
+npx supabase functions deploy send-sms      --project-ref <your-project-ref> --no-verify-jwt
+npx supabase functions deploy send-wa       --project-ref <your-project-ref> --no-verify-jwt
+```
+
+### 10.3 — Point NextSMS at the webhook
+
+In the NextSMS dashboard go to **Customer Profile** (top-right menu) → **Customization** → **Webhooks**, and set:
+
+- **Delivery Callback URL:** `https://<your-project-ref>.supabase.co/functions/v1/delivery-webhook`
+- **Verify Token:** the same token as `NEXTSMS_CALLBACK_TOKEN`
+
+NextSMS sends a test request when you save. The function answers it with 200. Only messages sent **after** you save get webhooks; older ones are picked up by the server check (for up to 3 days after sending).
+
+### 10.4 — Check it works
+
+Send an SMS to your own number, and one to a number that doesn't exist (for example `255700000000`). Within a minute or so, the Reports tab shows the first as **Delivered** and the second as **Failed**, with the reason. The Delivery log lists both with "via webhook" or "via check". If nothing changes:
+
+```sql
+select status, status_name, source, sent_at, done_at, checks from message_deliveries order by sent_at desc limit 10;
+select status_code, content from net._http_response order by created desc limit 5;   -- the server checks
+```
+
+- **The row is missing:** `record_message_sends` isn't installed (run the schema), or `send-sms` / `send-wa` weren't redeployed.
+- **The row stays `sent` with `checks` growing:** NextSMS hasn't reported yet. Check that its URL and token match.
+
+---
+
 ## Features
 
 ### Events
@@ -457,12 +508,17 @@ Numbers that are not 11–15 digits after normalising are treated as invalid and
 
 ### SMS Status Values
 
-| Status | groupId from API | Meaning |
+NextSMS status **ids** decide the status, not the group. Group 20 holds both DELIVERED and failures such as UNDELIVERABLE, so the group alone can't tell. The full table is `PROVIDER_STATUS` in `supabase/functions/_shared/messaging.js`, mirrored by `delivery_state()` in SQL.
+
+| Status | NextSMS status ids | Meaning |
 |---|---|---|
 | Pending | — | Not yet sent |
-| Sent | 18 | Message accepted and enroute to operator |
-| Delivered | 20 | Confirmed delivery to handset |
-| Failed | 19 or 22 | Rejected or failed |
+| Sent (waiting) | 50, 51 ENROUTE, 52, 77 ACCEPTED, 88; WhatsApp 109 SENT | Accepted by NextSMS, waiting for the delivery report. This is the normal answer to a send. |
+| Delivered | 73 | On the phone |
+| Read (WhatsApp) | 108 | Opened |
+| Failed | 74 EXPIRED, 75, 76 UNDELIVERABLE, 78, 79 REJECTED, 80 SKIPPED, 112, 114, 120; every 19 / 22 id (e.g. 58 FAILED_SENDER, 57 no credit) | Not delivered. The reason is shown in the badge tooltip, the Reports tab and History. |
+
+On WhatsApp, 76, 111 and 120 show as **Not on WhatsApp**.
 
 ### CORS Note
 
@@ -478,7 +534,7 @@ WhatsApp messages are sent as **template messages with the personalised card as 
 
 1. **Upload cards** — each contact's card is rendered, compressed to JPEG and uploaded to the public `wa-cards` Storage bucket. The public URL is kept on the contact. (Available as ☁ **Upload** per row on both the WhatsApp and Batch & Send tabs, or **Upload All Cards**.)
 2. **Send** — the template (e.g. `Mwaliko`) is sent with that URL as the header image, one contact at a time with a 1 s delay.
-3. **Track** — the API's status codes are mapped to `Sent`, `Invalid` (number not on WhatsApp) or `Not Sent`; pending messages are re-checked in the background to catch late rejections. A `.xlsx` report can be downloaded after a bulk send.
+3. **Track** — the send answer is usually `Sent`, meaning it is on its way. The delivery report then moves it to `Delivered`, `Read`, `Not on WhatsApp` or `Not Sent`, through the webhook, the server check and quick checks right after sending (Step 10). A `.xlsx` report can be downloaded after a bulk send.
 
 Progress for uploads, WhatsApp sends and SMS sends appears in a floating log panel in the bottom-left corner. It never moves the page, stays while a run is still in progress, and disappears by itself 5 seconds after the run finishes (✕ closes it sooner). Toast notifications also stay for 5 seconds. The per-contact status columns and the WhatsApp report keep the results after the log is gone.
 
@@ -607,7 +663,11 @@ Append-only history (signed-in users can add and read rows, never edit or delete
 - **Single-file architecture** — the UI and state live in `src/App.jsx` (pure logic is being moved to `src/lib/`). This works for a focused internal tool but will need splitting if the codebase grows.
 - **No per-user data ownership** — authentication is Google sign-in via Supabase and RLS requires a signed-in user, but every signed-in user can see every event. Restrict who can sign in (Step 5) until ownership is added.
 - **QR codes are not signed** — a card's QR encodes only `Name=…;TypeCard=…`, so it can be reproduced by anyone and must not be treated as proof of entitlement. QR images are generated by `api.qrserver.com`, which therefore receives each guest's name and card type.
-- **Scheduled WhatsApp sends are paced** — about 25–30 cards a minute (1 s between messages, as in the app), so a 500-guest send takes around 20 minutes. Late delivery reports aren't polled for scheduled sends.
-- **Delivery status is best-effort** — SMS `Delivered` comes from the API's synchronous response; for asynchronous delivery reports you would need a webhook. WhatsApp rejections are polled for about 40 s after sending.
+- **Scheduled WhatsApp sends are paced** — about 25–30 cards a minute (1 s between messages, as in the app), so a 500-guest send takes around 20 minutes.
+- **Delivery reports have limits:**
+  - They arrive by webhook as soon as NextSMS has them. The server check covers any it missed, for 3 days after sending.
+  - A message still waiting after 3 days stays "Sent (waiting)". Look it up in the NextSMS log.
+  - Webhooks work only for messages sent after the callback URL was saved in the NextSMS dashboard.
+  - Extra SMS messages keep their delivery result in `message_deliveries`; the app shows it on top of the message's stored statuses.
 - **Card images are kept forever** — files in `wa-cards` are never cleaned up; they are public by URL so the WhatsApp provider can fetch them.
 - **No rate limiting on the Edge Functions** — they require sign-in and an allowlisted endpoint, but a signed-in user can still send as many messages as the provider account allows.

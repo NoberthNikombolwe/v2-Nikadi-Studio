@@ -41,30 +41,125 @@ export const placeholdersIn = (text = "") => [...new Set([...String(text).matchA
 // Placeholders the server can fill on its own: only these are stored on event_cards
 export const CARD_PLACEHOLDERS = ["name", "cardType", "phone"];
 
+/* ── Provider status codes (NextSMS API docs → "Statuses") ── */
+
+// Every status id the provider uses: its group, name, what it means for a guest's message
+// and the reason in plain words. Always go by the id, not the name — some names repeat
+// (ACCEPTED is both 52 and 77). state:
+//   "sent"      still on its way, no final result yet
+//   "delivered" on the phone          "read"   opened on WhatsApp
+//   "failed"    final — not delivered (the meaning says why)
+// supabase-roles-settings-scan.sql delivery_state() mirrors the state column; a test compares them.
+const S = (group, name, state, meaning) => ({ group, name, state, meaning });
+export const PROVIDER_STATUS = {
+  50:  S(18, "PENDING_WAITING_DELIVERY", "sent", "Waiting for the mobile network to deliver it"),
+  51:  S(18, "ENROUTE", "sent", "Sent, waiting for the delivery report"),
+  52:  S(18, "ACCEPTED", "sent", "Accepted, waiting for its send time"),
+  88:  S(18, "DISPATCHED", "sent", "Handed to the mobile network"),
+  112: S(18, "DISCARDED", "failed", "Dropped by the network — send it again later"),
+  73:  S(20, "DELIVERED", "delivered", "Delivered to the phone"),
+  74:  S(20, "EXPIRED", "failed", "Not delivered in time — the phone may be off or out of coverage"),
+  75:  S(20, "DELETED", "failed", "Deleted before it was delivered"),
+  76:  S(20, "UNDELIVERABLE", "failed", "Cannot be delivered — the number may not exist"),
+  77:  S(20, "ACCEPTED", "sent", "Accepted by the network, on its way"),
+  78:  S(20, "UNKNOWN", "failed", "The network gave no result"),
+  79:  S(20, "REJECTED", "failed", "Refused by the network"),
+  80:  S(20, "SKIPPED", "failed", "Skipped because of operator downtime — send it again later"),
+  108: S(20, "READ", "read", "Opened on WhatsApp"),
+  109: S(20, "SENT", "sent", "Sent to WhatsApp, not yet on the phone"),
+  114: S(20, "SPAM_RATE_LIMIT", "failed", "Held back by WhatsApp (sending limit)"),
+  120: S(20, "FAILED", "failed", "WhatsApp could not deliver it — check the number uses WhatsApp"),
+  57:  S(22, "FAILED_NOT_ENOUGH_CREDITS", "failed", "Not enough SMS credit"),
+  58:  S(22, "FAILED_SENDER", "failed", "Sender ID not registered on that network"),
+  53:  S(19, "REJECTED_NETWORK", "failed", "Network not supported"),
+  54:  S(19, "REJECTED_PREFIX_MISSING", "failed", "Number has no country code"),
+  55:  S(19, "REJECTED_DND", "failed", "The number blocks promotional messages (DND)"),
+  56:  S(19, "REJECTED_SOURCE", "failed", "Sender ID not approved"),
+  59:  S(19, "REJECTED_DESTINATION", "failed", "Number blocked or unsubscribed"),
+  60:  S(19, "REJECTED_PREPAID_PACKAGE_EXPIRED", "failed", "SMS package expired"),
+  61:  S(19, "REJECTED_DESTINATION_NOT_REGISTERED", "failed", "Test account: this number is not registered"),
+  62:  S(19, "REJECTED_ROUTE_NOT_AVAILABLE", "failed", "No route to this network"),
+  63:  S(19, "REJECTED_FLOODING_FILTER", "failed", "Too many messages to this number in an hour"),
+  64:  S(19, "REJECTED_SYSTEM_ERROR", "failed", "Provider system error"),
+  65:  S(19, "REJECTED_DUPLICATE_MESSAGE_ID", "failed", "Duplicate message"),
+  66:  S(19, "REJECTED_INVALID_UDH", "failed", "Invalid message format"),
+  67:  S(19, "REJECTED_MESSAGE_TOO_LONG", "failed", "Message too long"),
+  68:  S(19, "MISSING_TO", "failed", "No number given"),
+  69:  S(19, "REJECTED_INVALID_DESTINATION", "failed", "Invalid number"),
+  107: S(19, "REJECTED_PRICE_NOT_DEFINED", "failed", "No price set for this network"),
+  110: S(19, "REJECTED_EXCEEDED_MESSAGE_LIMIT", "failed", "Message limit reached"),
+  111: S(19, "REJECTED_MISSING_OUTLET", "failed", "No active WhatsApp account or route for this send"),
+};
+// Ids that mean "this number is not on WhatsApp" for a WhatsApp send
+export const WA_NOT_ON_WHATSAPP = [76, 111, 120];
+
+const toInt = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
+// The state of a status: by id, else by group (18 = still on its way, 19 / 22 = failed);
+// null when it can't be told (an unknown id in group 20)
+export const deliveryStateOf = (id, groupId) => {
+  const s = PROVIDER_STATUS[toInt(id)];
+  if (s) return s.state;
+  const g = toInt(groupId);
+  return g === 18 ? "sent" : g === 19 || g === 22 ? "failed" : null;
+};
+
+// "UNDELIVERABLE — Cannot be delivered — the number may not exist" ("" when nothing is known)
+export const statusReason = (id, name) => {
+  const s = PROVIDER_STATUS[toInt(id)];
+  return [s?.name || (name ? String(name) : ""), s?.meaning || ""].filter(Boolean).join(" — ");
+};
+
+// Parses a provider answer keeping every messageId / sendReference exact. They are numbers of
+// ~19 digits, which JSON.parse would round (7391827364512378881 → 7391827364512379000), so
+// they would never match the delivery reports, which give them as text.
+export const parseProviderJson = (text) =>
+  JSON.parse(String(text ?? "").replace(/("(?:messageId|sendReference)"\s*:\s*)(-?\d+(?:\.\d+)?)/g, "$1\"$2\""));
+
 /* ── SMS provider results ── */
 
-// messaging-service.co.tz SMS status groups: 18 = accepted (sent), 20 = delivered.
-// Anything else (or no result) counts as failed.
-export const smsStatusFromGroup = (groupId) => groupId === 20 ? "delivered" : groupId === 18 ? "sent" : "failed";
+// One SMS send result (a messages[] entry of /text/single or /text/multi):
+// → { status: "sent" | "delivered" | "failed", missing, messageId (text), statusId, groupId, statusName, reason }
+// The normal answer is "sent" (group 18, e.g. 51 ENROUTE): the delivery report tells the rest.
+// `missing` = the provider said nothing about this number.
+export const smsSendResult = (msg) => {
+  if (!msg || typeof msg !== "object") {
+    return { status: "failed", missing: true, messageId: null, statusId: null, groupId: null, statusName: null, reason: "No result from the SMS provider" };
+  }
+  const st = msg.status || {};
+  const state = deliveryStateOf(st.id, st.groupId);
+  const status = state === "delivered" || state === "read" ? "delivered" : state === "sent" ? "sent" : "failed";
+  return {
+    status, missing: false,
+    messageId: msg.messageId !== undefined && msg.messageId !== null && msg.messageId !== "" ? String(msg.messageId) : null,
+    statusId: toInt(st.id), groupId: toInt(st.groupId), statusName: st.name ? String(st.name) : null,
+    reason: status === "failed" ? (statusReason(st.id, st.name) || "Not accepted by the SMS provider") : null,
+  };
+};
 
-// Matches a /text/multi response back to the numbers that were sent, in order. The
-// provider echoes each recipient's number; when a number was sent more than once its
-// results are handed out in order, one per recipient. Returns one groupId per phone
-// (undefined when the provider reported nothing for it).
-export const matchSmsResults = (phones = [], respMessages = []) => {
+// Old helper kept for callers that only need the word: sent / delivered / failed
+export const smsStatusFromGroup = (groupId, id) => smsSendResult({ status: { groupId, id } }).status;
+
+// Matches a /text/multi response back to the numbers that were sent, in order. The provider
+// echoes each recipient's number; a number sent more than once gets its results in order,
+// one per recipient. → one messages[] entry per phone (undefined when nothing came back).
+export const matchSmsMessages = (phones = [], respMessages = []) => {
   const queues = new Map();
   (Array.isArray(respMessages) ? respMessages : []).forEach(m => {
-    const k = String(m?.to);
+    const k = normalisePhone(String(m?.to ?? ""));
     if (!queues.has(k)) queues.set(k, []);
     queues.get(k).push(m);
   });
-  return phones.map(p => queues.get(normalisePhone(p))?.shift()?.status?.groupId);
+  return phones.map(p => queues.get(normalisePhone(p))?.shift());
 };
+// The groupId of each matched message (kept for older callers)
+export const matchSmsResults = (phones = [], respMessages = []) => matchSmsMessages(phones, respMessages).map(m => m?.status?.groupId);
 
 /* ── WhatsApp provider results ── */
-
-const WA_SENT_IDS    = [73, 109, 77];          // DELIVERED_TO_HANDSET / SENT_TO_OPERATOR / DELIVERED_TO_OPERATOR
-const WA_INVALID_IDS = [75, 76, 78, 79, 80];   // UNDELIVERABLE …
 
 // True when the provider's text says the number isn't on WhatsApp
 export const waInvalidHint = (t = "") => {
@@ -75,30 +170,93 @@ export const waInvalidHint = (t = "") => {
 };
 
 // Reads the provider's answer to POST /api/whatsapp/v2/text/single (HTTP status + raw body).
-// → { status: "sent" | "invalid" | "not_sent", pending, messageId, detail }
-//   groupId 18 = accepted but still pending (counts as sent; a late report may reject it),
-//   20 + 73/109/77 = sent, 20 + 75–80 / 19 + 111 / "not registered" text = not on WhatsApp.
+// → { status: "sent" | "delivered" | "read" | "invalid" | "not_sent", pending, messageId,
+//     statusId, groupId, statusName, detail }
+// "sent" + pending: accepted, the delivery report (webhook / check) tells the rest.
+// "invalid": the number isn't on WhatsApp (76 / 111 / 120, or the provider says so).
 export const classifyWaSend = (httpStatus, rawText = "") => {
+  const none = { messageId: null, statusId: null, groupId: null, statusName: null };
   if (!(httpStatus >= 200 && httpStatus < 300)) {
     if ((httpStatus === 422 || httpStatus === 400) && waInvalidHint(rawText)) {
-      return { status: "invalid", pending: false, messageId: null, detail: "number not on WhatsApp" };
+      return { ...none, status: "invalid", pending: false, detail: "number not on WhatsApp" };
     }
-    return { status: "not_sent", pending: false, messageId: null, detail: `HTTP ${httpStatus}: ${rawText}` };
+    return { ...none, status: "not_sent", pending: false, detail: `HTTP ${httpStatus}: ${rawText}` };
   }
   let data;
-  try { data = JSON.parse(rawText); } catch { return { status: "not_sent", pending: false, messageId: null, detail: "Invalid JSON response" }; }
+  try { data = parseProviderJson(rawText); } catch { return { ...none, status: "not_sent", pending: false, detail: "Invalid JSON response" }; }
   const msg   = data?.messages?.[0];
-  const grp   = msg?.status?.groupId;
-  const id    = msg?.status?.id;
-  const sName = msg?.status?.name || "";
-  const sDesc = msg?.status?.description || "";
-  const messageId = msg?.messageId ?? null;
-  if (grp === 18) return { status: "sent", pending: true, messageId, detail: null };
-  if (grp === 20 && WA_SENT_IDS.includes(id)) return { status: "sent", pending: false, messageId, detail: null };
-  if ((grp === 20 && WA_INVALID_IDS.includes(id)) || (grp === 19 && id === 111) || waInvalidHint(sName) || waInvalidHint(sDesc)) {
-    return { status: "invalid", pending: false, messageId, detail: "number not on WhatsApp" };
+  const st    = msg?.status || {};
+  const grp   = toInt(st.groupId);
+  const id    = toInt(st.id);
+  const sName = st.name || "";
+  const base  = { messageId: msg?.messageId != null && msg.messageId !== "" ? String(msg.messageId) : null, statusId: id, groupId: grp, statusName: sName || null };
+  const state = deliveryStateOf(id, grp);
+  if (state === "read") return { ...base, status: "read", pending: false, detail: null };
+  if (state === "delivered") return { ...base, status: "delivered", pending: false, detail: null };
+  if (state === "sent") return { ...base, status: "sent", pending: true, detail: null };
+  if (WA_NOT_ON_WHATSAPP.includes(id) || waInvalidHint(sName) || waInvalidHint(st.description)) {
+    return { ...base, status: "invalid", pending: false, detail: "number not on WhatsApp" };
   }
-  return { status: "not_sent", pending: false, messageId, detail: sName || `groupId ${grp}` };
+  return { ...base, status: "not_sent", pending: false, detail: (state === "failed" && statusReason(id, sName)) || sName || `groupId ${grp}` };
+};
+
+// A WhatsApp guest's card status (event_cards.wa_status) for a delivery state
+export const waCardStatus = (state, statusId) =>
+  state === "read" ? "read" : state === "delivered" ? "delivered" : state === "sent" ? "sent"
+    : WA_NOT_ON_WHATSAPP.includes(toInt(statusId)) ? "invalid" : "notSent";
+
+// The History status (event_logs.status) for a delivery state
+export const historyStatusOf = (channel, state, statusId) => channel === "whatsapp"
+  ? ({ read: "read", delivered: "delivered", sent: "sent" })[state] || (WA_NOT_ON_WHATSAPP.includes(toInt(statusId)) ? "invalid" : "not_sent")
+  : ({ delivered: "delivered", read: "delivered", sent: "sent" })[state] || "failed";
+
+/* ── Delivery reports and the delivery webhook ── */
+
+// "2026-10-20 10:15:07" (East Africa Time, as the provider writes it) → ISO time, or null
+export const eatToIso = (t) => {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)$/.exec(String(t || "").trim());
+  return m ? `${m[1]}T${m[2].length === 5 ? `${m[2]}:00` : m[2]}+03:00` : null;
+};
+
+// GET /api/v2/reports answer → [{ message_id, status_id, group_id, status_name, done_at }]
+// (rows without a messageId or any status are dropped). Accepts the raw text or parsed JSON.
+export const parseDeliveryReports = (data) => {
+  let obj = data;
+  if (typeof data === "string") { try { obj = parseProviderJson(data); } catch { return []; } }
+  return (Array.isArray(obj?.results) ? obj.results : [])
+    .filter(r => r && r.messageId !== undefined && r.messageId !== null && r.messageId !== "")
+    .map(r => ({
+      message_id: String(r.messageId),
+      status_id: toInt(r.status?.id),
+      group_id: toInt(r.status?.groupId),
+      status_name: r.status?.name ? String(r.status.name) : (r.delivery ? String(r.delivery) : null),
+      done_at: eatToIso(r.doneAt),
+    }))
+    .filter(r => r.status_id !== null || r.group_id !== null);
+};
+
+// One delivery webhook call (the account's Delivery Callback URL) →
+//   { kind: "status", message_id, status_id, status_name }   a delivery result
+//   { kind: "reply",  message_id, text }                     a WhatsApp button reply
+//   { kind: "ping" }                                         no messageId (e.g. the dashboard's test)
+export const parseDeliveryCallback = (body) => {
+  if (!body || typeof body !== "object" || body.messageId === undefined || body.messageId === null || body.messageId === "") return { kind: "ping" };
+  const message_id = String(body.messageId);
+  if (body.response !== undefined || body.payload !== undefined || (body.text !== undefined && body.id === undefined && body.status === undefined)) {
+    return { kind: "reply", message_id, text: String(body.response ?? body.text ?? body.payload ?? "").slice(0, 500) };
+  }
+  return { kind: "status", message_id, status_id: toInt(body.id), status_name: body.status ? String(body.status) : null };
+};
+
+// Query strings for GET /api/v2/reports: up to 50 messageIds each (messageId is repeated —
+// looking reports up by id never "uses them up", unlike a call without messageId)
+export const reportsQueries = (ids = [], channel = "sms", perCall = 50) => {
+  const uniq = [...new Set((ids || []).map(v => String(v ?? "")).filter(Boolean))];
+  const out = [];
+  for (let i = 0; i < uniq.length; i += perCall) {
+    out.push(`?channel=${encodeURIComponent(channel)}&size=200&` + uniq.slice(i, i + perCall).map(id => `messageId=${encodeURIComponent(id)}`).join("&"));
+  }
+  return out;
 };
 
 /* ── Who a scheduled send goes to ── */
@@ -128,7 +286,8 @@ export const scheduleTargets = (cards = [], { channel = "sms", audience = "all",
     if (audience === "confirmed"    && c.call_status !== "yes") { skipped.audience++; continue; }
     if (audience === "not_declined" && c.call_status === "no")  { skipped.audience++; continue; }
     if (audience === "not_sent") {
-      const done = channel === "sms" ? (c.sms_status === "sent" || c.sms_status === "delivered") : c.wa_status === "sent";
+      const done = channel === "sms" ? (c.sms_status === "sent" || c.sms_status === "delivered")
+        : (c.wa_status === "sent" || c.wa_status === "delivered" || c.wa_status === "read");
       if (done) { skipped.audience++; continue; }
     }
     if (!String(c.phone ?? "").trim()) { skipped.noPhone++; continue; }

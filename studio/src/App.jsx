@@ -1,10 +1,13 @@
 import Logo from "./Logo";
 import { planCardSave, splitImport } from "./lib/guestMerge";
-import { useState, useRef, useCallback, useEffect, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
-import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, smsStatusFromGroup, matchSmsResults, classifyWaSend } from "./lib/messages";
+import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult, matchSmsMessages,
+  parseProviderJson, waCardStatus, parseDeliveryReports, reportsQueries, statusReason } from "./lib/messages";
+import { DELIVERY_STATES, DELIVERY_SOURCES, indexDeliveries, extraStatusOf, deliveryNote, guestStatusCounts, deliveryCounts, failureReasons,
+  filterDeliveries, deliveryExportRows, parseProviderLogs, providerLogsQuery } from "./lib/deliveries";
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
 import ScanPanel from "./ScanPanel";
@@ -705,7 +708,9 @@ const defaultElements = () => [
   { id:"cardtype", label:"Card Type", type:"text", field:"cardType", x:220, y:200, fontSize:13, color:"#2563b0", bold:false, align:"center", fontFamily:"Plus Jakarta Sans" },
   { id:"qr",       label:"QR Code",   type:"qr",                     x:300, y:95,  size:120 },
 ];
-const WA  = { idle:"idle", sending:"sending", sent:"sent", notSent:"notSent", invalid:"invalid" };
+const WA  = { idle:"idle", sending:"sending", sent:"sent", delivered:"delivered", read:"read", notSent:"notSent", invalid:"invalid" };
+// A WhatsApp card that went out: sent (waiting for the report), delivered or read
+const waDone = (s) => s === WA.sent || s === WA.delivered || s === WA.read;
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 // A saved card's uploaded image (event_cards.card_url), so uploaded cards survive a reload
 // and scheduled WhatsApp sends can attach them
@@ -885,17 +890,34 @@ async function exportCard(bgImage, bgSize, elements, record) {
 }
 
 /* ── Small components ─────────────────────────────────────────────────── */
-// Colored status pill for a record's WhatsApp send status (idle/sending/sent/notSent/invalid)
-function WaBadge({ status }) {
+// Colored status pill for a record's WhatsApp status. "Sent" = on its way (waiting for the
+// delivery report); the report then says Delivered / Read, or Not on WhatsApp. `reason` (the
+// latest delivery note) becomes the tooltip.
+function WaBadge({ status, reason }) {
   const styles = {
-    idle:    { cls:"badge-idle",    icon:"circle", label:"Not Sent", extra:{} },
-    sending: { cls:"badge-testing", icon:"loader", label:"Sending…", extra:{} },
-    sent:    { cls:"badge-sent",    icon:"check", label:"Sent",     extra:{} },
-    notSent: { cls:"badge-no",      icon:"xCircle", label:"Not Sent", extra:{background:N.redBg,color:N.red,border:`1px solid ${alpha(N.red,"44")}`} },
-    invalid: { cls:"badge-testing", icon:"alert", label:"Invalid",  extra:{background:N.amberBg,color:N.amber,border:`1px solid ${alpha(N.amber,"44")}`} },
+    idle:      { cls:"badge-idle",    icon:"circle",  label:"Not Sent", extra:{} },
+    sending:   { cls:"badge-testing", icon:"loader",  label:"Sending…", extra:{} },
+    sent:      { cls:"badge-sent",    icon:"arrowUp", label:"Sent",     extra:{} },
+    delivered: { cls:"badge-yes",     icon:"check",   label:"Delivered", extra:{} },
+    read:      { cls:"badge-purple",  icon:"checks",  label:"Read",     extra:{} },
+    notSent:   { cls:"badge-no",      icon:"xCircle", label:"Not Sent", extra:{background:N.redBg,color:N.red,border:`1px solid ${alpha(N.red,"44")}`} },
+    invalid:   { cls:"badge-testing", icon:"alert",   label:"Not on WhatsApp", extra:{background:N.amberBg,color:N.amber,border:`1px solid ${alpha(N.amber,"44")}`} },
   };
   const { cls, icon, label, extra } = styles[status] || styles.idle;
-  return <span className={`nk-badge ${cls}`} style={extra}><Icon n={icon} /> {label}</span>;
+  const tip = reason || (status === "sent" ? "Sent — waiting for the delivery report" : undefined);
+  return <span className={`nk-badge ${cls}`} style={extra} title={tip}><Icon n={icon} /> {label}</span>;
+}
+
+// Colored status pill for a record's SMS status: Sent (waiting for the delivery report),
+// Delivered, Failed or Pending (not sent yet); `reason` becomes the tooltip
+function SmsBadge({ status, reason }) {
+  const s = {
+    [SMS.delivered]: ["badge-yes", "check", "Delivered"],
+    [SMS.sent]:      ["badge-sent", "arrowUp", "Sent"],
+    [SMS.failed]:    ["badge-no", "xCircle", "Failed"],
+  }[status] || ["badge-idle", "circle", "Pending"];
+  const tip = reason || (status === SMS.sent ? "Sent — waiting for the delivery report" : undefined);
+  return <span className={`nk-badge ${s[0]}`} title={tip}><Icon n={s[1]} /> {s[2]}</span>;
 }
 
 // Compact icon-style action button used inside table rows (WA/SMS/download/edit actions)
@@ -952,9 +974,7 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
       </td>
       <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
       <td>
-        <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
-          {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
-        </span>
+        <SmsBadge status={rec.smsStatus} reason={rec.smsReason} />
       </td>
       <td>
         <div className="nk-row-actions">
@@ -4174,6 +4194,310 @@ function FeedbackTab({ access, events, askDialog, showToast }) {
   );
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   DELIVERY REPORTS — useDeliveries() (the open event's message_deliveries,
+   live) and <ReportsTab>: guests' real SMS / WhatsApp results, failure
+   reasons, the delivery log, and the NextSMS account log. Results come from
+   the delivery webhook, the server check and "Check delivery now".
+   Pure logic in src/lib/deliveries.js.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+// The open event's delivery results, kept live with realtime. `onChange(row)` sees every live
+// insert / update (the app uses it to move guests' badges). `missing` = the delivery SQL (§11)
+// isn't installed yet.
+function useDeliveries(eventId, onChange) {
+  const [rows, setRows] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [missing, setMissing] = useState(false);
+  const [error, setError] = useState(null);
+  const onChangeRef = useRef(onChange);
+  useEffect(() => { onChangeRef.current = onChange; });
+  const load = async () => {
+    if (!supabase || !eventId) { setRows([]); setLoaded(false); return; }
+    const { data, error: e } = await supabase.from("message_deliveries").select("*")
+      .eq("event_id", eventId).order("sent_at", { ascending: false }).limit(3000);
+    if (e) {
+      const notSetUp = /message_deliveries|schema cache|does not exist/i.test(e.message);
+      setMissing(notSetUp); setError(notSetUp ? null : e.message); setRows([]); setLoaded(true);
+      return;
+    }
+    setMissing(false); setError(null); setRows(data || []); setLoaded(true);
+  };
+  useEffect(() => {
+    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
+    if (!supabase || !eventId) return;
+    const ch = supabase.channel(`deliveries-${eventId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_deliveries", filter: `event_id=eq.${eventId}` }, (p) => {
+        if (p.eventType === "DELETE") { setRows(rs => rs.filter(r => r.id !== p.old.id)); return; }
+        const row = p.new;
+        setRows(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [row, ...rs]);
+        onChangeRef.current?.(row);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
+  return { rows, loaded, missing, error, load };
+}
+
+// Status pill for one delivery (sent = waiting, delivered, read, failed)
+const DeliveryBadge = ({ state, title }) => {
+  const s = DELIVERY_STATES[state];
+  if (!s) return <span className="nk-badge badge-idle">{state || "—"}</span>;
+  return <span className={`nk-badge ${s.badge}`} title={title || s.hint}><Icon n={s.icon} /> {s.label}</span>;
+};
+
+const fmtShort = (t) => (t ? new Date(t).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
+
+// A group of numbered tiles, e.g. SMS: Delivered / Waiting / Failed / Not sent
+function StatGroup({ title, icon, items }) {
+  return (
+    <div style={{flex:"1 1 300px",minWidth:0}}>
+      <div style={{fontSize:12,fontWeight:700,color:N.textMid,marginBottom:8}}><Icon n={icon} /> {title}</div>
+      <div className="nk-stats" style={{marginBottom:0}}>
+        {items.map(([label, value, color, hint]) => (
+          <div key={label} className="nk-stat" style={{borderColor:alpha(color,"33")}} title={hint}>
+            <div className="nk-stat-num" style={{color}}>{value}</div>
+            <div className="nk-stat-label">{label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// The NextSMS account log (GET /api/v2/logs through the send-sms proxy): every message the
+// account sent, any event, newest first. Loaded on demand; 200 rows per page.
+function ProviderLog({ fetchLogs, today }) {
+  const [form, setForm] = useState({ since: today, until: today, channel: "all", to: "" });
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [offset, setOffset] = useState(0);
+  const [more, setMore] = useState(false);
+  const load = async (from = 0) => {
+    setBusy(true); setError(null);
+    try {
+      const text = await fetchLogs(providerLogsQuery({ ...form, offset: from }));
+      const page = parseProviderLogs(text);
+      setRows(rs => (from && rs ? [...rs, ...page] : page));
+      setOffset(from + page.length); setMore(page.length >= 200);
+    } catch (e) { setError(e.message); if (!from) setRows([]); }
+    finally { setBusy(false); }
+  };
+  const setF = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  return (
+    <div>
+      <div style={{fontSize:12,color:N.textDim,marginBottom:10}}>
+        Every message your NextSMS account sent — from any event, the app or elsewhere — with its delivery result, as NextSMS records it.
+      </div>
+      <form style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end",marginBottom:12}} onSubmit={(e) => { e.preventDefault(); load(0); }}>
+        <div><label className="nk-label">From</label><input type="date" className="nk-input" style={{marginBottom:0}} value={form.since} max={form.until || undefined} onChange={setF("since")} /></div>
+        <div><label className="nk-label">To</label><input type="date" className="nk-input" style={{marginBottom:0}} value={form.until} min={form.since || undefined} onChange={setF("until")} /></div>
+        <div><label className="nk-label">Channel</label>
+          <select className="nk-select" style={{marginBottom:0,width:"auto"}} value={form.channel} onChange={setF("channel")}>
+            <option value="all">All</option><option value="sms">SMS</option><option value="whatsapp">WhatsApp</option>
+          </select>
+        </div>
+        <div style={{flex:"1 1 160px"}}><label className="nk-label">Phone</label><input className="nk-input" style={{marginBottom:0}} placeholder="e.g. 0712 345 678" value={form.to} onChange={setF("to")} /></div>
+        <button type="submit" className="nk-btn nk-btn-primary" disabled={busy}>{busy ? <><Icon n="loader" /> Loading…</> : <><Icon n="search" /> Show log</>}</button>
+      </form>
+      {error && <EmptyState compact tone="warn" icon="alert" title="Could not load the NextSMS log" text={error} />}
+      {rows === null ? (
+        <EmptyState compact icon="history" title="Pick the days and press Show log" text="The log is read from NextSMS each time." />
+      ) : !rows.length && !error ? (
+        <EmptyState compact icon="inbox" title="No messages in these days" />
+      ) : rows.length ? (
+        <>
+          <div className="nk-table-wrap">
+            <table className="nk-table">
+              <thead><tr>{["Sent", "To", "From", "Channel", "Status", "Reason", "Done"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={`${r.messageId}-${i}`}>
+                    <td>{fmtShort(r.sentAt)}</td>
+                    <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12}}>{r.to ? `+${r.to}` : "—"}</td>
+                    <td>{r.from || "—"}</td>
+                    <td>{r.channel || "—"}</td>
+                    <td><DeliveryBadge state={r.state} title={r.statusName} /></td>
+                    <td>{r.reason || (r.state === "sent" ? "Waiting for the delivery report" : "")}</td>
+                    <td>{fmtShort(r.doneAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {more && <button className="nk-btn nk-btn-ghost" style={{marginTop:10}} onClick={() => load(offset)} disabled={busy}><Icon n="arrowDown" /> Load more</button>}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+// Reports tab: the guests' real SMS / WhatsApp results (live), why messages failed, the full
+// delivery log of the event, and the NextSMS account log
+function ReportsTab({ eventName, records, deliveries, canCheck, checking, onCheck, onDownload, canSeeLog, fetchLogs, smsNote, waNote, today }) {
+  const [view, setView] = useState("guests");
+  const [filters, setFilters] = useState({ q: "", channel: "all", status: "all" });
+  const guests = records.filter(r => !r.sample);
+  const g = guestStatusCounts(records);
+  const all = deliveryCounts(deliveries.rows);
+  const reasons = failureReasons(deliveries.rows);
+  const waiting = deliveries.rows.filter(d => d.status === "sent" && d.message_id).length;
+  const log = filterDeliveries(deliveries.rows, filters);
+  const setF = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+  const exportLog = async () => {
+    const XLSX = await loadXlsx();
+    const ws = XLSX.utils.json_to_sheet(deliveryExportRows(log));
+    ws["!cols"] = [{ wch: 18 }, { wch: 24 }, { wch: 16 }, { wch: 10 }, { wch: 20 }, { wch: 11 }, { wch: 22 }, { wch: 50 }, { wch: 18 }, { wch: 10 }, { wch: 20 }, { wch: 22 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Delivery log");
+    XLSX.writeFile(wb, `${(eventName || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_")}_Delivery_Log_${today}.xlsx`);
+  };
+
+  return (
+    <div className="nk-page" style={{padding:"0 0 40px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:12}}>
+        <div>
+          <div style={{fontSize:18,fontWeight:700,color:N.text}}>{eventName || "Event"} — Delivery report</div>
+          <div style={{fontSize:12,color:N.textDim,marginTop:2}}>
+            {guests.length} guests · results update by themselves as NextSMS reports them{waiting ? ` · ${waiting} still waiting` : ""}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button className="nk-btn nk-btn-ghost" onClick={onCheck} disabled={!canCheck || checking || deliveries.missing || !waiting}
+            title={waiting ? "Ask NextSMS now for the results still waiting" : "Nothing is waiting for a delivery report"}>
+            {checking ? <><Icon n="loader" /> Checking…</> : <><Icon n="refresh" /> Check delivery now</>}
+          </button>
+          <button className="nk-btn nk-btn-success" onClick={onDownload}><Icon n="download" /> Download report (.xlsx)</button>
+        </div>
+      </div>
+
+      {deliveries.missing && (
+        <div className="nk-banner" role="note" style={{marginBottom:16}}>
+          <span><Icon n="info" /></span>
+          <span><strong>Delivery reports aren't set up yet.</strong> The statuses below are what each send returned. Run the latest supabase-schema.sql and set up the delivery webhook (README → Step 10) to see delivered, read and failed results.</span>
+        </div>
+      )}
+      {deliveries.error && <EmptyState compact tone="warn" icon="alert" title="Could not load delivery results" text={deliveries.error} />}
+
+      <div style={{display:"flex",gap:20,flexWrap:"wrap",marginBottom:16}}>
+        <StatGroup title="SMS (main message)" icon="sms" items={[
+          ["Delivered", g.sms.delivered, N.green, "Delivered to the phone"],
+          ["Waiting",   g.sms.sent,      N.teal,  "Sent — waiting for the delivery report"],
+          ["Failed",    g.sms.failed,    N.red,   "Refused or not delivered — see the reasons"],
+          ["Not sent",  g.sms.notSent,   N.textDim, "Not sent yet"],
+        ]} />
+        <StatGroup title="WhatsApp card" icon="whatsapp" items={[
+          ["Read",            g.wa.read,      N.purple, "Opened on WhatsApp"],
+          ["Delivered",       g.wa.delivered, N.green,  "On the phone"],
+          ["Waiting",         g.wa.sent,      N.sky,    "Sent — waiting for the delivery report"],
+          ["Not on WhatsApp", g.wa.invalid,   N.amber,  "The number doesn't use WhatsApp"],
+          ["Not sent",        g.wa.failed + g.wa.notSent, N.textDim, "Not sent yet, or the send failed"],
+        ]} />
+      </div>
+
+      {!!all.total && (
+        <div style={{fontSize:12,color:N.textMid,marginBottom:12}}>
+          <Icon n="history" /> All messages for this event (reminders, extra messages and schedules too): <b>{all.total}</b> sent ·{" "}
+          <span style={{color:N.green}}>{all.delivered} delivered</span> · <span style={{color:N.purple}}>{all.read} read</span> ·{" "}
+          <span style={{color:N.teal}}>{all.sent} waiting</span> · <span style={{color:N.red}}>{all.failed} failed</span>
+        </div>
+      )}
+
+      {!!reasons.length && (
+        <div style={{padding:"10px 14px",borderRadius:10,background:N.redBg,border:`1px solid ${alpha(N.red,"33")}`,marginBottom:16}}>
+          <div style={{fontSize:12,fontWeight:700,color:N.red,marginBottom:6}}><Icon n="alert" /> Why messages failed</div>
+          {reasons.slice(0, 8).map(r => (
+            <div key={`${r.channel}|${r.reason}`} style={{fontSize:12,color:N.text,display:"flex",gap:8,padding:"2px 0"}}>
+              <b style={{minWidth:28,textAlign:"right",color:N.red}}>{r.count}</b>
+              <span style={{color:N.textDim,minWidth:70}}>{r.channel === "whatsapp" ? "WhatsApp" : "SMS"}</span>
+              <span>{r.reason}</span>
+            </div>
+          ))}
+          <div style={{fontSize:11,color:N.textDim,marginTop:6}}>Failed guests are included again the next time you press Send All (new only).</div>
+        </div>
+      )}
+
+      <div style={{display:"flex",gap:6,marginBottom:12,flexWrap:"wrap"}} role="tablist">
+        {[["guests", "Guests", "users"], ["log", `Delivery log${deliveries.rows.length ? ` (${deliveries.rows.length})` : ""}`, "history"],
+          ...(canSeeLog ? [["provider", "NextSMS log", "database"]] : [])].map(([k, l, ic]) => (
+          <button key={k} type="button" role="tab" aria-selected={view === k} style={segStyle(view === k)} onClick={() => setView(k)}><Icon n={ic} /> {l}</button>
+        ))}
+      </div>
+
+      {view === "guests" && (
+        <div className="nk-table-wrap">
+          <table className="nk-table">
+            <thead><tr>{["#", "Name", "Card Type", "Phone", "WhatsApp", "SMS"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+            <tbody>
+              {guests.map((rec, i) => (
+                <tr key={rec.dbId || i}>
+                  <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i + 1}</td>
+                  <td style={{fontWeight:600}}>{rec.name}</td>
+                  <td style={{fontSize:12,color:N.textMid}}>{rec.cardType}</td>
+                  <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>{rec.phone ? `+${normalisePhone(rec.phone)}` : "—"}</td>
+                  <td><WaBadge status={rec.waStatus || WA.idle} reason={waNote(rec)} /></td>
+                  <td><SmsBadge status={rec.smsStatus} reason={smsNote(rec)} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!guests.length && <EmptyState compact icon="users" title="No guests yet" />}
+        </div>
+      )}
+
+      {view === "log" && (
+        deliveries.missing ? <EmptyState compact icon="database" title="Delivery log not set up yet" text="Run the latest supabase-schema.sql (README → Step 10)." /> : (
+          <>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+              <input className="nk-input" style={{marginBottom:0,flex:"1 1 200px",maxWidth:320}} placeholder="Search guest, phone, message or reason…"
+                value={filters.q} onChange={e => setF("q", e.target.value)} aria-label="Search the delivery log" />
+              <div style={{display:"flex",gap:4}} role="radiogroup" aria-label="Channel">
+                {[["all", "All"], ["sms", "SMS"], ["whatsapp", "WhatsApp"]].map(([k, l]) => (
+                  <button key={k} type="button" role="radio" aria-checked={filters.channel === k} style={segStyle(filters.channel === k)} onClick={() => setF("channel", k)}>{l}</button>
+                ))}
+              </div>
+              <select className="nk-select" style={{marginBottom:0,width:"auto"}} value={filters.status} onChange={e => setF("status", e.target.value)} aria-label="Status">
+                <option value="all">Any status</option>
+                {Object.entries(DELIVERY_STATES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <button className="nk-btn nk-btn-ghost" onClick={exportLog} disabled={!log.length}><Icon n="download" /> Excel</button>
+            </div>
+            {!deliveries.loaded ? <EmptyState compact loading title="Loading the delivery log…" />
+              : !log.length ? <EmptyState compact icon="inbox" title={deliveries.rows.length ? "No message matches" : "No messages sent yet"}
+                  text={deliveries.rows.length ? "Change the filters to see more." : "Every SMS and WhatsApp sent from now on is listed here with its delivery result."} />
+              : (
+                <div className="nk-table-wrap">
+                  <table className="nk-table">
+                    <thead><tr>{["Sent", "Guest", "Phone", "Channel", "Message", "Status", "Reason / note", "Done", "Via"].map(h => <th key={h}>{h}</th>)}</tr></thead>
+                    <tbody>
+                      {log.slice(0, 500).map(d => (
+                        <tr key={d.id}>
+                          <td>{fmtShort(d.sent_at)}</td>
+                          <td style={{fontWeight:600}}>{d.recipient_name || "—"}</td>
+                          <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12}}>{d.phone ? `+${d.phone}` : "—"}</td>
+                          <td><Icon n={d.channel === "whatsapp" ? "whatsapp" : "sms"} /> {d.channel === "whatsapp" ? "WhatsApp" : "SMS"}</td>
+                          <td>{d.message_title || "—"}</td>
+                          <td><DeliveryBadge state={d.status} title={d.status_name || undefined} /></td>
+                          <td>{d.status === "failed" ? (d.reason || d.status_name || "") : d.reply_text ? `Replied: ${d.reply_text}` : (d.status_name || "")}</td>
+                          <td>{fmtShort(d.done_at)}</td>
+                          <td>{DELIVERY_SOURCES[d.source] || d.source}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {log.length > 500 && <div style={{fontSize:11,color:N.textDim,padding:8}}>Showing the newest 500 of {log.length} — use the filters or the Excel export for the rest.</div>}
+                </div>
+              )}
+          </>
+        )
+      )}
+
+      {view === "provider" && canSeeLog && <ProviderLog fetchLogs={fetchLogs} today={today} />}
+    </div>
+  );
+}
+
 function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const [commenting, setCommenting] = useState(null);
@@ -5362,7 +5686,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
                       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
                         {[
                           ["Contacts",   d.cards.length,                                                         N.textMid],
-                          ["WA sent",    count(c => c.wa_status === WA.sent),                                    N.green],
+                          ["WA sent",    count(c => waDone(c.wa_status)),                                        N.green],
                           ["WA invalid", count(c => c.wa_status === WA.invalid),                                 N.amber],
                           ["SMS sent",   count(c => c.sms_status === SMS.sent || c.sms_status === SMS.delivered), N.teal],
                         ].map(([l, v, c]) => (
@@ -5792,6 +6116,33 @@ export default function App() {
   /* ── CRM: leads → follow-ups → customers → events ── */
   /* ── Access: my role, permissions and Settings data ── */
   const access = useAccess({ userId, email: user?.email, showToast });
+
+  /* ── Delivery results (message_deliveries) ── */
+  // The open event's delivery results, live: the webhook / server check / "Check delivery now"
+  // move each send to delivered / read / failed and the guests' badges follow. Only a guest's
+  // latest send of the main SMS / the card changes their status; extra messages show their
+  // result on top (deliveryIndex.byExtra) without rewriting the message's stored statuses.
+  const deliveryIndexRef = useRef(null);
+  const applyDelivery = (d) => {
+    if (!d?.event_card_id) return;
+    const isMain = d.channel === "sms" && d.message_key === MAIN_MSG;
+    const isCard = d.channel === "whatsapp" && d.message_key === "card";
+    if (!isMain && !isCard) return;
+    const latest = deliveryIndexRef.current?.byCard.get(`${d.channel}|${d.message_key}|${d.event_card_id}`);
+    if (latest && latest.id !== d.id && String(latest.sent_at) > String(d.sent_at)) return;   // an older send's late report
+    setRecords(rs => rs.map(r => {
+      if (r.dbId !== d.event_card_id) return r;
+      if (isMain) return { ...r, smsStatus: d.status === "read" ? SMS.delivered : d.status };
+      return r.waStatus === WA.sending ? r : { ...r, waStatus: waCardStatus(d.status, d.status_id) };
+    }));
+  };
+  const deliveries = useDeliveries(savedEventId, applyDelivery);
+  const deliveryIndex = useMemo(() => indexDeliveries(deliveries.rows), [deliveries.rows]);
+  useEffect(() => { deliveryIndexRef.current = deliveryIndex; }, [deliveryIndex]);
+  // The latest delivery note of a guest's main SMS / card / extra message (badge tooltips)
+  const smsNote   = (rec) => (rec?.dbId ? deliveryNote(deliveryIndex.byCard.get(`sms|main|${rec.dbId}`)) : "");
+  const waNote    = (rec) => (rec?.dbId ? deliveryNote(deliveryIndex.byCard.get(`whatsapp|card|${rec.dbId}`)) : "");
+  const extraNote = (msgId, rec) => deliveryNote(deliveryIndex.byExtra.get(`${msgId}|${recipientKey(rec)}`));
   const navGroups = (access.setupMissing ? NAV_GROUPS : visibleNav(NAV_GROUPS, access.matrix, access.role))
     .filter(g => !g.eventOnly || savedEventId);
   // Leave a tab that is no longer in the menu (role change, or the event was closed)
@@ -5904,7 +6255,7 @@ export default function App() {
     hasDesign:   !!(coverUrl || bgImage),
     guests:      records.filter(r => !r.sample).length,
     uploaded:    records.filter(r => r.uploadStatus === "uploaded").length,
-    waSent:      records.filter(r => r.waStatus === WA.sent).length,
+    waSent:      records.filter(r => waDone(r.waStatus)).length,
     smsSent:     records.filter(r => r.smsStatus === SMS.sent || r.smsStatus === SMS.delivered).length,
     txns:        savedEventId ? fin.txns.filter(t => t.event_id === savedEventId).length : 0,
   });
@@ -6073,7 +6424,7 @@ export default function App() {
   // "Change template" pop-up → swap the card design for the open event. Guests, SMS and
   // statuses stay; cards already uploaded/sent used the old design, so warn first.
   const changeTemplate = async (choice, { keepLayout }) => {
-    const made = records.filter(r => !r.sample && (r.uploadStatus === "uploaded" || r.waStatus === WA.sent)).length;
+    const made = records.filter(r => !r.sample && (r.uploadStatus === "uploaded" || waDone(r.waStatus))).length;
     if (made) {
       const ok = await askDialog({
         title: "Change the card template?",
@@ -6294,11 +6645,12 @@ export default function App() {
     const fresh = plan.fresh;
     if (keep.length) {
       const { error } = await supabase.from("event_cards").upsert(keep.map(({ r, id, old: o, matched }) => {
+        // Statuses of saved guests are never written from here: sends save them as they happen
+        // and delivery reports move them on (delivered / read / failed), so this browser's copy
+        // may be out of date. The guest keeps whatever the database says.
         const row = { id, ...toRow(r) };
-        if (matched !== "id") {
-          if ((r.waStatus || WA.idle) === WA.idle && o.wa_status) row.wa_status = o.wa_status;
-          if ((r.smsStatus || SMS.pending) === SMS.pending && o.sms_status) row.sms_status = o.sms_status;
-        }
+        delete row.wa_status;
+        delete row.sms_status;
         // The list in memory knows the card image; a row matched from a new sheet keeps the
         // saved image only while its name and card type are unchanged
         if (urlCol) row.card_url = r.cardUrl || (matched !== "id" && sameCardFace(r, o) ? o.card_url : null) || null;
@@ -6664,9 +7016,12 @@ export default function App() {
   const findMessage = (msgId) => msgId === MAIN_MSG ? null : extraMessagesRef.current.find(m => m.id === msgId) || null;
   // Who a message goes to, each carrying its smsStatus *for that message*: the main message
   // uses the event contacts as-is, an extra one its uploaded list or the contacts plus its own statuses
+  // An extra message's recipients carry their delivery result on top of the status stored when
+  // it was sent (the server never rewrites events.sms_messages, so the result comes from
+  // message_deliveries — extraStatusOf)
   const messageRecipients = (msg, recs = records) => !msg ? recs
-    : msg.source === "upload" ? msg.recipients
-    : recs.map(r => ({ ...r, smsStatus: msg.statuses[recipientKey(r)] || SMS.pending }));
+    : msg.source === "upload" ? msg.recipients.map(r => ({ ...r, smsStatus: extraStatusOf(deliveryIndex, msg.id, r, r.smsStatus || SMS.pending) }))
+    : recs.map(r => ({ ...r, smsStatus: extraStatusOf(deliveryIndex, msg.id, r, msg.statuses[recipientKey(r)] || SMS.pending) }));
   const activeRecipients = messageRecipients(activeExtra);
   const activeBody       = activeExtra ? activeExtra.body : smsMessage;
   const activeColumns    = activeExtra?.source === "upload" ? activeExtra.columns : csvColumns;
@@ -6866,72 +7221,126 @@ export default function App() {
       .then(({ error }) => { if (error) console.warn("Save card image:", error.message); });
   };
 
-  /* Poll delivery report until we get a terminal status (runs in background) */
-  // Re-checks a "pending" WA message's delivery report a few times (with increasing
-  // delays) to catch late rejections — e.g. the number turns out not to be on
-  // WhatsApp — after it was already optimistically marked Sent. groupId/id are the
-  // provider's status codes; see the branches below for what each combination means.
-  const pollWaStatus = async (messageId, idx, recName, dbId, phone) => {
-    const delays = [4000, 6000, 8000, 10000, 12000];
-    for (const delay of delays) {
-      await new Promise(r => setTimeout(r, delay));
-      try {
-        const res = await fetch(`${WA_BASE}/api/whatsapp/v1/reports?messageId=${messageId}&limit=1`, {
-          headers: { Authorization: `Bearer ${await getApiToken("wa")}`, Accept: "application/json" },
-        });
-        if (!res.ok) continue;
-        const data = await res.json().catch(() => null);
-        const result = data?.results?.[0];
-        if (!result) continue;
-        const grp = result.status?.groupId;
-        const rid = result.status?.id;
-        if (grp === 18) continue; // still pending, keep polling
-        if (grp === 20 && [73, 109, 77].includes(rid)) {
-          // confirmed delivered — already marked sent, nothing to do
-          return;
-        }
-        if (
-          (grp === 20 && [75, 76, 78, 79, 80].includes(rid)) ||
-          grp === 19
-        ) {
-          setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
-          setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"invalid"} : x));
-          autoSaveCard(dbId, WA.invalid);
-          logHistory({ channel:"whatsapp", action:"status", status:"invalid", name:recName, phone, title:waTemplate, detail:"Late delivery report: number not on WhatsApp" });
-          showToast(`${recName} — number not on WhatsApp`, "warn");
-          return;
-        }
-        if (grp === 22) {
-          setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
-          setBulkLog(l => l.map(x => x.name===recName ? {...x, status:"not sent"} : x));
-          autoSaveCard(dbId, WA.notSent);
-          logHistory({ channel:"whatsapp", action:"status", status:"not_sent", name:recName, phone, title:waTemplate, detail:`Late delivery report: ${result.status?.name || "not sent"}` });
-          return;
-        }
-      } catch { /* network error, retry */ }
+  // Stores each send with the provider's messageId (record_message_sends), so the delivery
+  // reports — webhook, server check, "Check delivery now" — can later move it to delivered /
+  // read / failed. For the main SMS and the WhatsApp card it also saves the guest's status in
+  // the database (the database, not this browser's memory, holds statuses). One item per
+  // number: { event_card_id, channel, message_key, message_title, recipient_name, phone,
+  // message_id, status, status_id, status_group, status_name, reason, card_status?, update_card? }.
+  // Before the delivery SQL (§11) is installed it saves the guest's status directly, as before.
+  const recordSends = (items, eventId = savedEventId) => {
+    if (!supabase || !eventId || !items.length) return;
+    const rows = items.map(it => ({ event_id: eventId, ...it, phone: it.phone ? normalisePhone(it.phone) : null }));
+    supabase.rpc("record_message_sends", { p_items: rows }).then(({ error }) => {
+      if (!error) return;
+      console.warn("Record sends:", error.message);
+      if (!/Could not find the function|does not exist|schema cache/i.test(error.message)) return;
+      rows.forEach(it => {
+        if (it.update_card === false || !it.event_card_id) return;
+        if (it.channel === "sms" && it.message_key === MAIN_MSG) autoSaveCard(it.event_card_id, undefined, it.status === "read" ? SMS.delivered : it.status);
+        if (it.channel === "whatsapp" && it.message_key === "card") autoSaveCard(it.event_card_id, it.card_status || (it.status === "failed" ? WA.notSent : it.status));
+      });
+    });
+  };
+
+  // Looks delivery reports up by messageId and applies them (apply_delivery_results), which
+  // moves the messages forwards, updates the guests and writes History. Always by messageId:
+  // a reports call without it would "use the reports up" (NextSMS docs).
+  // → { updated, delivered, read, failed, unknown }
+  const checkDeliveries = async (ids, channel) => {
+    const totals = { updated: 0, delivered: 0, read: 0, failed: 0, unknown: 0 };
+    if (!supabase) return totals;
+    const base = channel === "whatsapp" ? WA_BASE : SMS_BASE;
+    const token = await getApiToken(channel === "whatsapp" ? "wa" : "sms");
+    for (const query of reportsQueries(ids, channel)) {
+      const res = await fetch(`${base}/api/v2/reports${query}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
+      const text = await res.text().catch(() => "");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const items = parseDeliveryReports(text).map(r => ({ ...r, reason: statusReason(r.status_id, r.status_name) || null }));
+      if (!items.length) continue;
+      const { data, error } = await supabase.rpc("apply_delivery_results", { p_items: items, p_source: "check" });
+      if (error) throw new Error(error.message);
+      for (const k of Object.keys(totals)) totals[k] += Number(data?.[k]) || 0;
     }
-    // exhausted — leave as Sent (message was accepted by server)
+    return totals;
+  };
+  // Reports tab → "Check delivery now": asks NextSMS for every message of this event still
+  // waiting (sent in the last 7 days), then re-reads the guests' statuses
+  const [checkingDeliveries, setCheckingDeliveries] = useState(false);
+  const checkEventDeliveries = async () => {
+    const weekAgo = Date.now() - 7 * 86_400_000;
+    const waiting = deliveries.rows.filter(d => d.status === "sent" && d.message_id && new Date(d.sent_at).getTime() > weekAgo);
+    if (!waiting.length) { showToast("Nothing is waiting for a delivery report", "info"); return; }
+    setCheckingDeliveries(true);
+    try {
+      const sum = { updated: 0, delivered: 0, read: 0, failed: 0 };
+      for (const channel of ["sms", "whatsapp"]) {
+        const ids = waiting.filter(d => d.channel === channel).map(d => d.message_id);
+        if (!ids.length) continue;
+        const t = await checkDeliveries(ids, channel);
+        for (const k of Object.keys(sum)) sum[k] += t[k];
+      }
+      await deliveries.load();
+      if (supabase && savedEventId) {
+        const { data } = await supabase.from("event_cards").select("id,wa_status,sms_status").eq("event_id", savedEventId);
+        const byId = new Map((data || []).map(c => [c.id, c]));
+        setRecords(rs => rs.map(r => {
+          const c = r.dbId && byId.get(r.dbId);
+          return c && r.waStatus !== WA.sending ? { ...r, waStatus: c.wa_status || r.waStatus, smsStatus: c.sms_status || r.smsStatus } : r;
+        }));
+      }
+      showToast(sum.updated
+        ? `${sum.updated} updated: ${sum.delivered} delivered, ${sum.read} read, ${sum.failed} failed`
+        : `No new results yet — ${waiting.length} still waiting for NextSMS`, sum.failed ? "warn" : sum.updated ? "success" : "info");
+    } catch (e) {
+      showToast(`Could not check delivery: ${e.message}`, "warn");
+    } finally {
+      setCheckingDeliveries(false);
+    }
+  };
+  // Reports tab → NextSMS log: GET /api/v2/logs through the SMS proxy (SMS view is enough)
+  const fetchProviderLogs = async (query) => {
+    const res = await fetch(`${SMS_BASE}/api/v2/logs${query}`, { headers: { Authorization: `Bearer ${await getApiToken("sms")}`, Accept: "application/json" } });
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(res.status === 404 ? "The SMS proxy doesn't allow the log yet — redeploy send-sms" : `HTTP ${res.status}`);
+    return text;
+  };
+
+  // A few quiet report checks shortly after a send (the webhook usually answers first)
+  const checkSoon = (ids, channel, delays) => {
+    const list = (ids || []).filter(Boolean);
+    if (!list.length) return;
+    delays.forEach(ms => setTimeout(() => { checkDeliveries(list, channel).catch(() => {}); }, ms));
   };
 
   /* Step 2 — Send WA using the already-uploaded cardUrl */
-  // Sends one WhatsApp template message (image header = the record's uploaded
-  // card) via messaging-service.co.tz, and interprets the provider's response
-  // status codes (groupId/id) to mark the record Sent, Invalid, or Not Sent.
-  // A "pending" (groupId 18) response kicks off pollWaStatus in the background.
-  const sendWaSingle = async (idx) => {
+  // Sends one WhatsApp template message (image header = the record's uploaded card) and reads
+  // the provider's answer (classifyWaSend, shared with scheduled sends): usually "sent", or
+  // "not on WhatsApp" at once. The send is recorded with its messageId; the delivery report
+  // (webhook, server check, quick checks from here) then moves the guest to Delivered / Read
+  // or Not on WhatsApp. `quiet` = part of Send All, which checks once at the end.
+  // → the provider's messageId (or null)
+  const sendWaSingle = async (idx, { quiet = false } = {}) => {
     const rec = records[idx];
-    if (rec.waStatus === WA.sending) return;   // a request for this row is already in flight
-    if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return; }
-    if (!isValidPhone(rec.phone)) { showToast(`Invalid phone number for ${rec.name}`, "warn"); return; }
-    if (!rec.cardUrl) { showToast(`Upload card first for ${rec.name}`, "warn"); return; }
-    if (!waTemplate)  { showToast("Select a template first", "warn"); return; }
-    if (rec.waStatus === WA.sent && !(await confirmResend(rec.name, "this card on WhatsApp"))) return;
+    if (rec.waStatus === WA.sending) return null;   // a request for this row is already in flight
+    if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return null; }
+    if (!isValidPhone(rec.phone)) { showToast(`Invalid phone number for ${rec.name}`, "warn"); return null; }
+    if (!rec.cardUrl) { showToast(`Upload card first for ${rec.name}`, "warn"); return null; }
+    if (!waTemplate)  { showToast("Select a template first", "warn"); return null; }
+    if (waDone(rec.waStatus) && !(await confirmResend(rec.name, "this card on WhatsApp"))) return null;
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sending} : r));
     setBulkLog(l => {
       const exists = l.find(x => x.name === rec.name);
       return exists ? l.map(x => x.name===rec.name ? {...x, status:"sending"} : x)
                     : [...l, { name:rec.name, status:"sending" }];
     });
+    const record = (r, card) => recordSends([{
+      event_card_id: rec.dbId || null, channel: "whatsapp", message_key: "card", message_title: waTemplate,
+      recipient_name: rec.name, phone: rec.phone, message_id: r.messageId || null,
+      status: ["sent", "delivered", "read"].includes(r.status) ? r.status : "failed",
+      status_id: r.statusId ?? null, status_group: r.groupId ?? null, status_name: r.statusName || null,
+      reason: ["sent", "delivered", "read"].includes(r.status) ? null : (r.detail || null), card_status: card,
+    }]);
     try {
       const reqBody = {
         to:       [Number(normalisePhone(rec.phone))],
@@ -6949,76 +7358,72 @@ export default function App() {
         body: JSON.stringify(reqBody),
       });
       const rawText = await res.text().catch(() => "");
-
-      const markSent = () => {
-        setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.sent} : r));
-        setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"sent"} : x));
-        autoSaveCard(rec.dbId, WA.sent);
-        logHistory({ channel:"whatsapp", action:"send", status:"sent", name:rec.name, phone:rec.phone, title:waTemplate });
-        showToast(`WA sent to ${rec.name}`, "success");
-      };
-      const markInvalid = (reason) => {
-        setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.invalid} : r));
-        setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"invalid"} : x));
-        autoSaveCard(rec.dbId, WA.invalid);
-        logHistory({ channel:"whatsapp", action:"send", status:"invalid", name:rec.name, phone:rec.phone, title:waTemplate, detail:reason });
-        showToast(`${rec.name} — ${reason}`, "warn");
-      };
-
-      // classifyWaSend (shared with scheduled sends) reads the provider's groupId/id codes
       const result = classifyWaSend(res.status, rawText);
-      if (result.status === "sent") {
-        markSent();
-        // PENDING — accepted by API; marked Sent now, poll in background for a late rejection
-        if (result.pending && result.messageId) pollWaStatus(result.messageId, idx, rec.name, rec.dbId, rec.phone);
+      const ok = result.status === "sent" || result.status === "delivered" || result.status === "read";
+      const card = ok ? waCardStatus(result.status, result.statusId) : result.status === "invalid" ? WA.invalid : WA.notSent;
+      setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus: card} : r));
+      setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status: ok ? "sent" : result.status === "invalid" ? "invalid" : "not sent"} : x));
+      record(result, card);
+      logHistory({ channel:"whatsapp", action:"send", status: result.status, name:rec.name, phone:rec.phone, title:waTemplate, detail: ok ? undefined : result.detail });
+      if (ok) {
+        if (!quiet) showToast(`WA sent to ${rec.name}`, "success");
+        if (!quiet && result.pending && result.messageId) checkSoon([result.messageId], "whatsapp", [5000, 15000, 40000]);
       } else if (result.status === "invalid") {
-        markInvalid(result.detail);
+        showToast(`${rec.name} — ${result.detail}`, "warn");
       } else {
-        throw new Error(result.detail);
+        showToast(`WA failed for ${rec.name}: ${result.detail}`, "warn");
       }
+      return ok ? result.messageId : null;
     } catch (err) {
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, waStatus:WA.notSent} : r));
       setBulkLog(l => l.map(x => x.name===rec.name ? {...x, status:"not sent"} : x));
-      autoSaveCard(rec.dbId, WA.notSent);
+      record({ status: "not_sent", detail: err.message }, WA.notSent);
       logHistory({ channel:"whatsapp", action:"send", status:"not_sent", name:rec.name, phone:rec.phone, title:waTemplate, detail:err.message });
       showToast(`WA failed for ${rec.name}: ${err.message}`, "warn");
+      return null;
     }
   };
 
   // Sends the WhatsApp card to every record that has a valid phone and an uploaded
   // card, one at a time with a 1s pacing delay. Skips contacts already sent, asks in a
   // modal first (a bulk send costs credits and can't be recalled) — including whether to
-  // skip or include repeated numbers — then saves the resulting statuses to
-  // `event_cards` if an event is loaded.
+  // skip or include repeated numbers. Delivery reports for the whole batch are checked
+  // shortly after the last send.
   const sendWaAll = async () => {
     if (bulkSending) return;
     const targets = await pickBulkRecipients({
       title:    "Send WhatsApp cards",
       emptyMsg: "Nothing to send — upload cards first.",
-      options:  { isDone: r => r.waStatus === WA.sent, isEligible: r => !!r.cardUrl },
+      options:  { isDone: r => waDone(r.waStatus), isEligible: r => !!r.cardUrl },
     });
     if (!targets) return;
     setBulkSending(true);
     setBulkLog(targets.map(({rec}) => ({ name:rec.name, status:"sending" })));
+    const ids = [];
     for (const {index} of targets) {
-      await sendWaSingle(index);
+      const id = await sendWaSingle(index, { quiet: true });
+      if (id) ids.push(id);
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
     setBulkSending(false);
-    showToast(`Done — ${targets.length} WA messages dispatched`, "success");
-    const waNow = (s) => targets.filter(({index}) => recordsRef.current[index]?.waStatus === s).length;
+    showToast(`Done — ${targets.length} WA messages dispatched. Delivery reports will update each guest.`, "success");
+    const waNow = (pred) => targets.filter(({index}) => pred(recordsRef.current[index]?.waStatus)).length;
     logHistory({ channel:"whatsapp", action:"bulk", title:waTemplate,
-      detail:`${targets.length} cards: ${waNow(WA.sent)} sent, ${waNow(WA.invalid)} invalid, ${waNow(WA.notSent)} not sent` });
-    // recordsRef is current here: the 1s pacing delay above lets React flush the status updates
+      detail:`${targets.length} cards: ${waNow(waDone)} sent, ${waNow(s => s === WA.invalid)} not on WhatsApp, ${waNow(s => s === WA.notSent)} not sent` });
+    checkSoon(ids, "whatsapp", [10000, 60000]);
+    // recordsRef is current here: the 1s pacing delay above lets React flush the status updates.
+    // (Statuses are already saved per send; this stores any guests not saved yet.)
     if (savedEventId) await saveCards(savedEventId, recordsRef.current);
   };
 
   // Exports an Excel (.xlsx) report of WhatsApp send status per record, named after the event
   const downloadWaReport = async () => {
     const statusLabel = {
-      [WA.sent]:    "Sent",
-      [WA.invalid]: "Invalid",
-      [WA.notSent]: "Not Sent",
+      [WA.sent]:      "Sent (waiting)",
+      [WA.delivered]: "Delivered",
+      [WA.read]:      "Read",
+      [WA.invalid]:   "Not on WhatsApp",
+      [WA.notSent]:   "Not Sent",
       [WA.sending]: "Sending",
       [WA.idle]:    "Not Sent",
     };
@@ -7039,18 +7444,20 @@ export default function App() {
 
   // Exports one Excel sheet with both WhatsApp and SMS status per record, named after the event
   const downloadFullReport = async () => {
-    const waLabel  = { [WA.sent]:"Sent", [WA.invalid]:"Invalid", [WA.notSent]:"Not Sent", [WA.sending]:"Sending", [WA.idle]:"Not Sent" };
-    const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
-    const rows = records.map(r => ({
+    const waLabel  = { [WA.sent]:"Sent (waiting)", [WA.delivered]:"Delivered", [WA.read]:"Read", [WA.invalid]:"Not on WhatsApp", [WA.notSent]:"Not Sent", [WA.sending]:"Sending", [WA.idle]:"Not Sent" };
+    const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent (waiting)", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
+    const rows = records.filter(r => !r.sample).map(r => ({
       "Name":       r.name     || "",
       "Card Type":  r.cardType || "",
       "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
       "WA Status":  waLabel[r.waStatus]   || "Not Sent",
+      "WA Detail":  waNote(r),
       "SMS Status": smsLabel[r.smsStatus] || "Pending",
+      "SMS Detail": smsNote(r),
     }));
     const XLSX = await loadXlsx();
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:14 }, { wch:14 }];
+    ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:16 }, { wch:44 }, { wch:16 }, { wch:44 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Send Report");
     const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
@@ -7110,8 +7517,9 @@ export default function App() {
     setSmsBalanceLoading(false);
   };
 
-  // Sends a single SMS to one record (rendered from the SMS template) and updates
-  // its smsStatus from the provider's response groupId (18=sent, 20=delivered).
+  // Sends a single SMS to one record (rendered from the SMS template). The provider's answer
+  // is normally "sent" (on its way); the delivery report later says delivered or failed, with
+  // the reason. The send is recorded with its messageId (recordSends) and checked ~20 s later.
   // Guarded against double-clicks (in-flight set) and accidental re-sends (confirm).
   // `msgId` picks the message (default: the main one, as the Batch & Send tab uses); `idx`
   // is the row in that message's recipient list.
@@ -7129,6 +7537,12 @@ export default function App() {
         && !(await confirmResend(rec.name, msg ? `"${msg.title}"` : "this SMS"))) return;
     smsInFlight.current.add(flightKey);
     setSmsLog(l => [...l, { name: rec.name, status: "sending" }]);
+    const title = msg ? msg.title : "Main message";
+    const record = (r) => recordSends([{
+      event_card_id: rec.dbId || null, channel: "sms", message_key: msg ? msg.id : MAIN_MSG, message_title: title,
+      recipient_name: rec.name, phone: rec.phone, message_id: r.messageId, status: r.status, status_id: r.statusId,
+      status_group: r.groupId, status_name: r.statusName, reason: r.reason,
+    }]);
     try {
       const res = await fetch(`${SMS_API}/text/single`, {
         method: "POST",
@@ -7144,24 +7558,24 @@ export default function App() {
           flash: 0,
         }),
       });
+      const text = await res.text().catch(() => "");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const logStatus = smsStatusFromGroup(data?.messages?.[0]?.status?.groupId);
-      if (logStatus !== "failed") {
-        const status = logStatus === "delivered" ? SMS.delivered : SMS.sent;
-        setMessageStatuses(msgId, recs, new Map([[idx, status]]));
-        logHistory({ channel:"sms", action:"send", status:logStatus, name:rec.name, phone:rec.phone, title: msg ? msg.title : "Main message" });
-        setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: logStatus } : x));
-        if (!msg) autoSaveCard(rec.dbId, undefined, status);
-        showToast(`SMS ${logStatus} to ${rec.name}`, "success");
-      } else {
-        throw new Error(data?.messages?.[0]?.status?.name || "Unexpected status");
-      }
+      let data;
+      try { data = parseProviderJson(text); } catch { throw new Error("Invalid answer from the SMS provider"); }
+      const r = smsSendResult(data?.messages?.[0]);
+      const status = r.status === "delivered" ? SMS.delivered : r.status === "sent" ? SMS.sent : SMS.failed;
+      setMessageStatuses(msgId, recs, new Map([[idx, status]]));
+      setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: r.status } : x));
+      record(r);
+      logHistory({ channel:"sms", action:"send", status:r.status, name:rec.name, phone:rec.phone, title, detail: r.reason || undefined });
+      if (r.status === "failed") showToast(`SMS not sent to ${rec.name}: ${r.reason}`, "warn");
+      else showToast(r.status === "delivered" ? `SMS delivered to ${rec.name}` : `SMS sent to ${rec.name} — waiting for the delivery report`, "success");
+      if (r.status === "sent") checkSoon([r.messageId], "sms", [20000]);
     } catch (err) {
       setSmsLog(l => l.map(x => x.name === rec.name ? { ...x, status: "failed" } : x));
       setMessageStatuses(msgId, recs, new Map([[idx, SMS.failed]]));
-      logHistory({ channel:"sms", action:"send", status:"failed", name:rec.name, phone:rec.phone, title: msg ? msg.title : "Main message", detail:err.message });
-      if (!msg) autoSaveCard(rec.dbId, undefined, SMS.failed);
+      record({ messageId: null, status: "failed", statusId: null, groupId: null, statusName: null, reason: err.message });
+      logHistory({ channel:"sms", action:"send", status:"failed", name:rec.name, phone:rec.phone, title, detail:err.message });
       showToast(`SMS failed for ${rec.name}: ${err.message}`, "warn");
     } finally {
       smsInFlight.current.delete(flightKey);
@@ -7169,10 +7583,10 @@ export default function App() {
   };
 
   // Sends SMS to every record with a valid phone number in one bulk API call, then maps
-  // the per-recipient results back onto `records` by matching normalised phone numbers,
-  // and saves the updated statuses if an event is loaded. Skips contacts already sent and
-  // asks in a modal first (it costs credits) — including whether to skip or include
-  // repeated numbers. `msgId` picks which message (and so which recipient list) is sent.
+  // each number's answer back onto its recipient (matching normalised phone numbers) and
+  // records every send with its messageId, so the delivery reports update each guest. Skips
+  // contacts already sent and asks in a modal first (it costs credits) — including whether to
+  // skip or include repeated numbers. `msgId` picks which message (and so which recipient list) is sent.
   const sendAllSms = async (msgId = MAIN_MSG) => {
     if (smsSending) return;
     const msg = findMessage(msgId);
@@ -7206,29 +7620,37 @@ export default function App() {
         },
         body: JSON.stringify({ messages, flash: 0 }),
       });
+      const text = await res.text().catch(() => "");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const respMsgs = data?.messages || [];
+      let data;
+      try { data = parseProviderJson(text); } catch { throw new Error("Invalid answer from the SMS provider"); }
       // The provider echoes each recipient's number. If a number was sent more than once
       // (user chose "Send duplicates too"), its results are handed out in order, one per record.
-      const groupIds = matchSmsResults(targets.map(({rec}) => rec.phone), respMsgs);
-      const statusOf = (grp) => ({ delivered: SMS.delivered, sent: SMS.sent })[smsStatusFromGroup(grp)] || SMS.failed;
+      const results = matchSmsMessages(targets.map(({rec}) => rec.phone), data?.messages || []).map(smsSendResult);
+      const statusOf = (r) => r.status === "delivered" ? SMS.delivered : r.status === "sent" ? SMS.sent : SMS.failed;
       // index → new smsStatus, only for recipients the provider actually reported on
-      const updates = new Map(targets.flatMap(({index}, n) => groupIds[n] === undefined ? [] : [[index, statusOf(groupIds[n])]]));
+      const updates = new Map(targets.flatMap(({index}, n) => results[n].missing ? [] : [[index, statusOf(results[n])]]));
       if (msg) setMessageStatuses(msgId, recs, updates);   // extra message: its own statuses, saved at once
       else {
         applyResults = (rs) => rs.map((r, i) => updates.has(i) ? { ...r, smsStatus: updates.get(i) } : r);
         setRecords(applyResults);
       }
-      setSmsLog(targets.map(({rec}, n) => ({ name: rec.name, status: smsStatusFromGroup(groupIds[n]) })));
-      const sentCount = respMsgs.filter(m => smsStatusFromGroup(m.status?.groupId) !== "failed").length;
+      setSmsLog(targets.map(({rec}, n) => ({ name: rec.name, status: results[n].status })));
+      recordSends(targets.map(({rec}, n) => ({
+        event_card_id: rec.dbId || null, channel: "sms", message_key: msg ? msg.id : MAIN_MSG, message_title: msgTitle,
+        recipient_name: rec.name, phone: rec.phone, message_id: results[n].messageId, status: results[n].status,
+        status_id: results[n].statusId, status_group: results[n].groupId, status_name: results[n].statusName,
+        reason: results[n].reason, update_card: !results[n].missing,
+      })));
+      const sentCount = results.filter(r => r.status !== "failed").length;
+      const refused = targets.length - sentCount;
       targets.forEach(({rec}, n) => logHistory({
         channel:"sms", action:"send", name:rec.name, phone:rec.phone, title:msgTitle,
-        status: smsStatusFromGroup(groupIds[n]),
-        detail: groupIds[n] === undefined ? "No result from the SMS provider" : undefined,
+        status: results[n].status, detail: results[n].reason || undefined,
       }));
-      logHistory({ channel:"sms", action:"bulk", title:msgTitle, detail:`${sentCount}/${targets.length} SMS sent` });
-      showToast(`Done — ${sentCount}/${targets.length} SMS sent`, "success");
+      logHistory({ channel:"sms", action:"bulk", title:msgTitle, detail:`${sentCount}/${targets.length} SMS sent${refused ? ` · ${refused} not sent` : ""} — delivery reports follow` });
+      showToast(`Done — ${sentCount}/${targets.length} SMS sent${refused ? `, ${refused} not sent` : ""}. Delivery reports will update each guest.`, refused ? "warn" : "success");
+      checkSoon(results.map(r => (r.status === "sent" ? r.messageId : null)), "sms", [20000, 90000]);
     } catch (err) {
       setSmsLog(targets.map(({rec}) => ({ name: rec.name, status: "failed" })));
       targets.forEach(({rec}) => logHistory({ channel:"sms", action:"send", status:"failed", name:rec.name, phone:rec.phone, title:msgTitle, detail:err.message }));
@@ -7237,6 +7659,7 @@ export default function App() {
     }
     setSmsSending(false);
     // `records` in this closure is pre-send; apply the same updates to the latest list
+    // (statuses are already saved per send — this stores any guests not saved yet)
     if (!msg && savedEventId) await saveCards(savedEventId, applyResults(recordsRef.current));
   };
 
@@ -7253,7 +7676,7 @@ export default function App() {
 
   // Exports an Excel (.xlsx) report of SMS status per recipient of the selected message, named after the event
   const downloadSmsReport = async () => {
-    const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
+    const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent (waiting)", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
     const rows = activeRecipients.map(r => ({
       "Name":       r.name     || "",
       "Card Type":  r.cardType || "",
@@ -7270,10 +7693,10 @@ export default function App() {
   };
 
   /* ── Counts ── */
-  const waSentCount    = records.filter(r=>r.waStatus===WA.sent).length;
+  const waSentCount    = records.filter(r=>waDone(r.waStatus)).length;
   const waInvalidCount = records.filter(r=>r.waStatus===WA.invalid).length;
   const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
-  const waReportReady  = records.some(r=>r.waStatus===WA.sent||r.waStatus===WA.invalid||r.waStatus===WA.notSent);
+  const waReportReady  = records.some(r=>waDone(r.waStatus)||r.waStatus===WA.invalid||r.waStatus===WA.notSent);
   const smsReportReady = activeRecipients.some(r=>r.smsStatus && r.smsStatus!==SMS.pending);   // reads statuses, not the log, so it outlives the log
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
@@ -8388,9 +8811,7 @@ export default function App() {
                                 <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{buildSmsMsg(rec, activeBody)}</div>
                               </td>
                               <td>
-                                <span className={`nk-badge ${rec.smsStatus===SMS.delivered?"badge-yes":rec.smsStatus===SMS.sent?"badge-sent":rec.smsStatus===SMS.failed?"badge-no":"badge-idle"}`}>
-                                  {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
-                                </span>
+                                <SmsBadge status={rec.smsStatus} reason={activeExtra ? extraNote(activeExtra.id, rec) : smsNote(rec)} />
                               </td>
                               <td>{rec.phone?<Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>sendSmsToOne(i, activeMsgId)} label="Send this SMS to the contact"><Icon n="sms" /> Send</Sb>:<span style={{fontSize:11,color:N.textDim}}>—</span>}</td>
                             </tr>
@@ -8498,7 +8919,7 @@ export default function App() {
                                   {rec.uploadStatus==="uploaded"?<><Icon n="check" /> Ready</>:rec.uploadStatus==="uploading"?<><Icon n="loader" /> Uploading</>:rec.uploadStatus==="failed"?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
                                 </span>
                               </td>
-                              <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
+                              <td><WaBadge status={rec.waStatus||WA.idle} reason={waNote(rec)} /></td>
                               <td>
                                 <div className="nk-row-actions">
                                   <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
@@ -8532,68 +8953,10 @@ export default function App() {
             )}
 
             {tab === "reports" && (
-              <div className="nk-page" style={{padding:"0 0 40px"}}>
-                {/* Header */}
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20,flexWrap:"wrap",gap:12}}>
-                  <div>
-                    <div style={{fontSize:18,fontWeight:700,color:N.text}}>{eventData.username||"Event"} — Send Report</div>
-                    <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{records.length} recipients · {new Date().toLocaleDateString("en-GB")}</div>
-                  </div>
-                  <button className="nk-btn nk-btn-success" onClick={downloadFullReport}
-                    style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={{fontSize:16}}><Icon n="download" /></span> Download Report (.xlsx)
-                  </button>
-                </div>
-
-                {/* Stats */}
-                <div className="nk-stats" style={{marginBottom:20}}>
-                  {[
-                    ["Total",        records.length,                                                                        N.textMid],
-                    ["WA Sent",      records.filter(r=>r.waStatus===WA.sent).length,                                       N.green],
-                    ["WA Invalid",   records.filter(r=>r.waStatus===WA.invalid).length,                                    N.amber],
-                    ["WA Not Sent",  records.filter(r=>r.waStatus===WA.notSent||r.waStatus===WA.idle).length,              N.textDim],
-                    ["SMS Sent",     records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length,        N.teal],
-                    ["SMS Pending",  records.filter(r=>r.smsStatus===SMS.pending).length,                                  N.textDim],
-                  ].map(([l,v,c])=>(
-                    <div key={l} className="nk-stat" style={{borderColor:alpha(c,"33")}}>
-                      <div className="nk-stat-num" style={{color:c}}>{v}</div>
-                      <div className="nk-stat-label">{l}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Table */}
-                <div className="nk-table-wrap">
-                  <table className="nk-table">
-                    <thead>
-                      <tr>{["#","Name","Card Type","Phone","WA Status","SMS Status"].map(h=><th key={h}>{h}</th>)}</tr>
-                    </thead>
-                    <tbody>
-                      {records.map((rec,i)=>{
-                        const smsColor = rec.smsStatus===SMS.delivered?N.green:rec.smsStatus===SMS.sent?N.teal:rec.smsStatus===SMS.failed?N.red:N.textDim;
-                        return (
-                          <tr key={i}>
-                            <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i+1}</td>
-                            <td style={{fontWeight:600}}>{rec.name}</td>
-                            <td style={{fontSize:12,color:N.textMid}}>{rec.cardType}</td>
-                            <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>
-                              {rec.phone ? `+${normalisePhone(rec.phone)}` : <span style={{color:N.textDim}}>—</span>}
-                            </td>
-                            <td>
-                              <WaBadge status={rec.waStatus||WA.idle} />
-                            </td>
-                            <td>
-                              <span style={{fontSize:12,color:smsColor,fontWeight:600}}>
-                                {rec.smsStatus===SMS.delivered?<><Icon n="check" /> Delivered</>:rec.smsStatus===SMS.sent?<><Icon n="arrowUp" /> Sent</>:rec.smsStatus===SMS.failed?<><Icon n="xCircle" /> Failed</>:<><Icon n="circle" /> Pending</>}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <ReportsTab eventName={eventData.username} records={records} deliveries={deliveries} today={ymd(new Date())}
+                canCheck={access.can("sms") || access.can("whatsapp")} checking={checkingDeliveries} onCheck={checkEventDeliveries}
+                onDownload={downloadFullReport} canSeeLog={access.can("sms")} fetchLogs={fetchProviderLogs}
+                smsNote={smsNote} waNote={waNote} />
             )}
 
             {/* ─── HISTORY ─── */}
@@ -8639,8 +9002,11 @@ export default function App() {
                     <div className="nk-stats" style={{marginBottom:16}}>
                       {[
                         ["Cards sent (WA)",  sum.cardsSent,  N.green],
+                        ["WA delivered",     sum.waDelivered, N.green],
+                        ["WA read",          sum.waRead,     N.purple],
                         ["WA problems",      sum.waProblems, N.amber],
                         ["SMS sent",         sum.smsSent,    N.teal],
+                        ["SMS delivered",    sum.smsDelivered, N.green],
                         ["SMS failed",       sum.smsFailed,  N.red],
                         ["Cards uploaded",   sum.uploads,    N.sky],
                       ].map(([l,v,c])=>(
@@ -8756,7 +9122,7 @@ export default function App() {
                     <thead><tr>{["#","Name","Card Type","Phone","WA Status","SMS","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
                       {records.map((rec,i)=>(
-                        <RecordRow key={i} rec={rec} idx={i}
+                        <RecordRow key={i} rec={{ ...rec, smsReason: smsNote(rec), waReason: waNote(rec) }} idx={i}
                           onEdit={editRecord} onUpload={uploadCardWithToast} onSendWa={sendWaSingle} onDownload={downloadCard}
                           onSendSms={sendSmsToOne}
                           isActive={activeIdx===i}
@@ -8847,7 +9213,7 @@ export default function App() {
 
               {activeRecord.phone && (
                 <button className="nk-btn nk-btn-success nk-btn-full" onClick={()=>sendWaSingle(activeIdx)} disabled={activeRecord.waStatus===WA.sending}>
-                  {activeRecord.waStatus===WA.sending ? <><Icon n="loader" /> Sending…</> : activeRecord.waStatus===WA.sent ? <><Icon n="check" /> WA Sent</> : <><Icon n="whatsapp" /> Send via WhatsApp</>}
+                  {activeRecord.waStatus===WA.sending ? <><Icon n="loader" /> Sending…</> : waDone(activeRecord.waStatus) ? <><Icon n="check" /> {activeRecord.waStatus === WA.read ? "WA Read" : activeRecord.waStatus === WA.delivered ? "WA Delivered" : "WA Sent"}</> : <><Icon n="whatsapp" /> Send via WhatsApp</>}
                 </button>
               )}
 

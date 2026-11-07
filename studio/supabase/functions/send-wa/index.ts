@@ -8,6 +8,7 @@ Deno.serve(createProxy({
   tokenEnv: ["WA_BEARER_TOKEN", "SMS_BEARER_TOKEN"],
   routes: [
     { method: "POST", path: "/api/whatsapp/v2/text/single" },
-    { method: "GET",  path: "/api/whatsapp/v1/reports" },
+    // Delivery reports by messageId (channel=whatsapp) — the documented v2 route
+    { method: "GET",  path: "/api/v2/reports" },
   ],
 }));

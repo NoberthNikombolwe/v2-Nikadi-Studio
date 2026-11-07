@@ -17,11 +17,12 @@ export const HISTORY_ACTIONS = {
   send: "Sent", status: "Delivery report", upload: "Card upload", bulk: "Bulk send",
   create: "Event created", update: "Event updated", contacts: "Contacts changed",
   call: "Guest call", team: "Team changed", income: "Income recorded", txn_edit: "Transaction edited", expense: "Expense recorded", remove: "Transaction removed",
-  schedule: "Schedule changed",
+  schedule: "Schedule changed", reply: "Guest reply",
 };
 
 // Display order + tone (UI maps tone → colour) for each status
 export const HISTORY_STATUSES = {
+  read:      { label: "Read",      tone: "good" },
   delivered: { label: "Delivered", tone: "good" },
   sent:      { label: "Sent",      tone: "good" },
   ok:        { label: "OK",        tone: "info" },
@@ -72,16 +73,25 @@ export const filterHistory = (rows, { channel = "all", status = "all", q = "" } 
 
 // Headline numbers for the History tab. Counts individual sends only (bulk summary rows
 // and event changes are excluded), so "cards sent" = WhatsApp sends that went through and
-// weren't later reported undeliverable.
+// weren't later reported undeliverable. Delivery reports (action "status") add the
+// delivered / read counts, and a failure reported later moves a send from sent to failed.
 export const summariseHistory = (rows) => {
-  const s = { cardsSent: 0, waProblems: 0, smsSent: 0, smsFailed: 0, uploads: 0, lastAt: null };
+  const s = { cardsSent: 0, waProblems: 0, waDelivered: 0, waRead: 0, smsSent: 0, smsFailed: 0, smsDelivered: 0, uploads: 0, lastAt: null };
   for (const r of rows) {
     if (!s.lastAt || r.created_at > s.lastAt) s.lastAt = r.created_at;
-    const ok = r.status === "sent" || r.status === "delivered";
+    const ok = r.status === "sent" || r.status === "delivered" || r.status === "read";
     if (r.channel === "whatsapp" && r.action === "send")   ok ? s.cardsSent++ : s.waProblems++;
-    // A late delivery report overrides that card's earlier "sent"
-    if (r.channel === "whatsapp" && r.action === "status" && !ok) { s.waProblems++; s.cardsSent = Math.max(0, s.cardsSent - 1); }
+    if (r.channel === "whatsapp" && r.action === "status") {
+      if (r.status === "delivered") s.waDelivered++;
+      else if (r.status === "read") s.waRead++;
+      // A late failure report overrides that card's earlier "sent"
+      else if (!ok) { s.waProblems++; s.cardsSent = Math.max(0, s.cardsSent - 1); }
+    }
     if (r.channel === "sms" && r.action === "send")        ok ? s.smsSent++   : s.smsFailed++;
+    if (r.channel === "sms" && r.action === "status") {
+      if (r.status === "delivered") s.smsDelivered++;
+      else if (r.status === "failed") { s.smsFailed++; s.smsSent = Math.max(0, s.smsSent - 1); }
+    }
     if (r.channel === "card" && r.action === "upload" && r.status === "ok") s.uploads++;
   }
   return s;

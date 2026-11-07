@@ -9,10 +9,13 @@
 //   2. the first time, the recipients are fixed (scheduleTargets, the same rules the app
 //      shows in its preview) and stored in message_run_targets
 //   3. SMS go out 100 per request (/text/multi); WhatsApp one by one with a 1 s pause
-//   4. after every batch: history rows (event_logs), guest statuses for main-SMS / card
-//      sends, and save_run_progress(), which also says stop when the run was cancelled
-//      or its schedule paused
+//   4. after every batch: history rows (event_logs), each send with the provider's messageId
+//      (record_message_sends — it also sets the guest's status for main-SMS / card sends, and
+//      the delivery reports later move it to delivered / read / failed), and
+//      save_run_progress(), which also says stop when the run was cancelled or paused
 //   5. finish_schedule_run() closes the run and updates the schedule's counts
+// The body {"task":"deliveries"} (a second pg_cron job) instead checks the delivery reports of
+// messages still waiting — see deliveries.ts.
 // Responses carry counts only — never phone numbers or message text.
 //
 // Deploy: npx supabase functions deploy run-schedules --no-verify-jwt
@@ -21,48 +24,28 @@
 // provided by the platform.
 
 import { UPSTREAM, cleanToken } from "./proxy.ts";
-import { scheduleTargets, describeTargetSkips, matchSmsResults, smsStatusFromGroup, classifyWaSend } from "./messaging.js";
+import { scheduleTargets, describeTargetSkips, matchSmsMessages, smsSendResult, classifyWaSend, parseProviderJson, waCardStatus } from "./messaging.js";
+import { json, sameSecret, clip, restClient, type Row } from "./db.ts";
+import { syncDeliveries } from "./deliveries.ts";
+
+export { sameSecret };
 
 const BUDGET_MS = 35_000;            // + one request's timeout stays under pg_net's 60 s
 const UPSTREAM_TIMEOUT_MS = 20_000;
-const DB_TIMEOUT_MS = 15_000;
 const SMS_BATCH = 100;
 const WA_GAP_MS = 1_000;             // same pacing as Send All in the app
 
-type Row = Record<string, any>;
 export type SchedulerOptions = {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   budgetMs?: number;
 };
 
-const json = (status: number, body: unknown): Response =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-
-// Compares two secrets in constant time (no early exit on the first different character)
-export const sameSecret = (a: string, b: string): boolean => {
-  if (!a || !b || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-};
-
-const clip = (v: unknown, max: number) => (v === undefined || v === null || v === "" ? null : String(v).slice(0, max));
-
-// PostgREST calls with the service role key
+// The schedule tables, through PostgREST with the service role key
 const database = (url: string, key: string) => {
-  const call = async (path: string, init: RequestInit = {}, prefer?: string): Promise<any> => {
-    const res = await fetch(`${url}/rest/v1/${path}`, {
-      ...init,
-      headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...(prefer ? { Prefer: prefer } : {}) },
-      signal: AbortSignal.timeout(DB_TIMEOUT_MS),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`Database error ${res.status}: ${text.slice(0, 200)}`);
-    return text ? JSON.parse(text) : null;
-  };
-  const rpc = (fn: string, args: Row) => call(`rpc/${fn}`, { method: "POST", body: JSON.stringify(args) });
+  const { call, rpc } = restClient(url, key);
   return {
+    rest: { call, rpc },
     claim: async (): Promise<Row | null> => {
       const rows = await rpc("claim_schedule_run", {});
       return Array.isArray(rows) && rows[0] ? rows[0] : null;
@@ -80,14 +63,31 @@ const database = (url: string, key: string) => {
         .then((ok) => ok === true),
     finish: (runId: string, status: "done" | "failed", detail: string) =>
       rpc("finish_schedule_run", { p_run_id: runId, p_status: status, p_detail: detail }),
-    cardStatuses: (items: Row[]) => (items.length ? rpc("set_card_send_statuses", { p_items: items }) : Promise.resolve(0)),
-    logs: (rows: Row[]) => (rows.length ? call("event_logs", { method: "POST", body: JSON.stringify(rows) }, "return=minimal") : Promise.resolve(null)),
+    // Writes made AFTER the messages went out never throw: if they did, the batch would not be
+    // marked as sent, and the next minute would send the same messages again.
+    // recordSends: each send with its messageId; before the delivery SQL (§11) exists it falls
+    // back to setting the guests' statuses directly, as before.
+    recordSends: async (items: Row[]) => {
+      if (!items.length) return;
+      try {
+        await rpc("record_message_sends", { p_items: items });
+      } catch (e) {
+        if (!/Database error 404|Could not find the function/i.test((e as Error).message)) return;
+        const cards = items.filter((it) => it.update_card !== false && it.event_card_id
+            && ((it.channel === "sms" && it.message_key === "main") || (it.channel === "whatsapp" && it.message_key === "card")))
+          .map((it) => it.channel === "sms" ? { id: it.event_card_id, sms_status: it.status === "read" ? "delivered" : it.status }
+            : { id: it.event_card_id, wa_status: it.card_status || "notSent" });
+        if (cards.length) await rpc("set_card_send_statuses", { p_items: cards }).catch(() => null);
+      }
+    },
+    logs: async (rows: Row[]) => {
+      if (!rows.length) return;
+      await call("event_logs", { method: "POST", body: JSON.stringify(rows) }, "return=minimal").catch(() => null);
+    },
   };
 };
 type Db = ReturnType<typeof database>;
 
-// The browser's WA status values (App.jsx `WA`) and the history's status names
-const WA_CARD_STATUS: Record<string, string> = { sent: "sent", invalid: "invalid", not_sent: "notSent" };
 
 export const createScheduler = (opts: SchedulerOptions = {}) => async (req: Request): Promise<Response> => {
   const now = opts.now ?? Date.now;
@@ -105,6 +105,14 @@ export const createScheduler = (opts: SchedulerOptions = {}) => async (req: Requ
   const db = database(url, key);
   const started = now();
   const outOfTime = () => now() - started >= budget;
+  const task = await req.json().then((b) => b?.task).catch(() => null);
+  if (task === "deliveries") {
+    try {
+      return json(200, { ok: true, deliveries: await syncDeliveries(db.rest, { outOfTime }) });
+    } catch (e) {
+      return json(500, { error: (e as Error).message });
+    }
+  }
   const runs: Row[] = [];
   try {
     while (!outOfTime()) {
@@ -168,11 +176,18 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
       await db.progress(id, next, sent, failed, skipped, true);   // hand the lease back; next minute carries on
       return summary("continues");
     }
-    const logs: Row[] = [], cards: Row[] = [];
+    const logs: Row[] = [], sends: Row[] = [];
+    // One delivery record per number (the reports / webhook update it later)
+    const sendRow = (t: Row, extra: Row) => ({
+      event_id: run.event_id, event_card_id: t.id || null, channel: isSms ? "sms" : "whatsapp",
+      message_key: isSms ? (run.message_key || "custom") : (run.wa_image ? "card" : "text"),
+      message_title: clip(run.title, 120), recipient_name: clip(t.name, 200), phone: t.phone,
+      schedule_run_id: id, created_by: run.created_by || null, ...extra,
+    });
     let batch: Row[];
     if (isSms) {
       batch = list.slice(next, next + SMS_BATCH);
-      let groupIds: (number | undefined)[] = batch.map(() => undefined);
+      let answers: (Row | undefined)[] = batch.map(() => undefined);
       let problem = "";
       try {
         const res = await fetch(`${UPSTREAM}/api/sms/v2/text/multi`, {
@@ -183,17 +198,21 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json().catch(() => null);
-        groupIds = matchSmsResults(batch.map((t) => t.phone), data?.messages || []);
+        const text = await res.text();
+        let data: Row | null = null;
+        try { data = parseProviderJson(text); } catch { data = null; }
+        answers = matchSmsMessages(batch.map((t) => t.phone), data?.messages || []);
       } catch (e) {
         problem = (e as Error).message;
       }
       batch.forEach((t, n) => {
-        const status = smsStatusFromGroup(groupIds[n]);
-        if (status === "failed") failed++; else sent++;
-        logs.push(logRow(t, "send", status, problem ? `${runLabel} — ${problem}`
-          : groupIds[n] === undefined ? `${runLabel} — no result from the SMS provider` : runLabel));
-        if (updatesStatus && t.id && groupIds[n] !== undefined) cards.push({ id: t.id, sms_status: status });
+        const r = smsSendResult(answers[n]);
+        if (r.status === "failed") failed++; else sent++;
+        const why = problem || (r.missing ? "no result from the SMS provider" : r.reason);
+        logs.push(logRow(t, "send", r.status, why ? `${runLabel} — ${why}` : runLabel));
+        // No answer at all: the message may still have gone out, so the guest's status stays
+        sends.push(sendRow(t, { message_id: r.messageId, status: r.status, status_id: r.statusId, status_group: r.groupId,
+          status_name: r.statusName, reason: why || null, update_card: updatesStatus && !problem && !r.missing }));
       });
     } else {
       batch = [list[next]];
@@ -213,13 +232,18 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
       } catch (e) {
         result = { status: "not_sent", detail: (e as Error).message };
       }
-      if (result.status === "sent") sent++; else failed++;
+      const ok = result.status === "sent" || result.status === "delivered" || result.status === "read";
+      if (ok) sent++; else failed++;
       logs.push(logRow(t, "send", result.status, result.detail ? `${runLabel} — ${result.detail}` : runLabel));
-      if (updatesStatus && t.id) cards.push({ id: t.id, wa_status: WA_CARD_STATUS[result.status] || "notSent" });
+      const state = ok ? result.status : "failed";
+      sends.push(sendRow(t, { message_id: result.messageId || null, status: state, status_id: result.statusId ?? null,
+        status_group: result.groupId ?? null, status_name: result.statusName || null, reason: ok ? null : (result.detail || null),
+        card_status: ok ? waCardStatus(state, result.statusId) : (result.status === "invalid" ? "invalid" : "notSent"),
+        update_card: updatesStatus }));
     }
     next += batch.length;
     await db.logs(logs);
-    await db.cardStatuses(cards);
+    await db.recordSends(sends);
     if (!(await db.progress(id, next, sent, failed, skipped))) return summary("stopped");   // cancelled or paused
     if (!isSms && next < list.length) await sleep(WA_GAP_MS);
   }

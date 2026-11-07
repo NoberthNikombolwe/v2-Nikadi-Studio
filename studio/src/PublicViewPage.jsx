@@ -118,8 +118,15 @@ export default function PublicViewPage({ eventId }) {
     border:`1px solid ${on ? N.sky : N.border}`, background: on ? alpha(N.sky, "1a") : "transparent", color: on ? N.sky : N.textMid });
   const th = { textAlign:"left", padding:"10px 12px", fontSize:11, textTransform:"uppercase", letterSpacing:.5, color:N.textDim, borderBottom:`1px solid ${N.border}`, whiteSpace:"nowrap" };
   const td = { padding:"9px 12px", borderBottom:`1px solid ${N.border}`, fontSize:13, whiteSpace:"nowrap", maxWidth:280, overflow:"hidden", textOverflow:"ellipsis" };
-  const sentPill = (s) => !s || /idle|pending/i.test(s) ? <span style={{color:N.textDim}}>—</span>
-    : <Pill tone={/fail|invalid|not_sent/i.test(s) ? "bad" : "good"}>{s.replace(/_/g, " ")}</Pill>;
+  // WhatsApp / SMS status in words: sent = waiting for the delivery report, then delivered /
+  // read, or failed / not on WhatsApp
+  const SENT_LABEL = { sent: ["Sent (waiting)", "info"], delivered: ["Delivered", "good"], read: ["Read", "good"], failed: ["Failed", "bad"],
+    invalid: ["Not on WhatsApp", "warn"], notSent: ["Not sent", "bad"], not_sent: ["Not sent", "bad"], sending: ["Sending", "info"] };
+  const sentPill = (s) => {
+    if (!s || /^(idle|pending)$/i.test(s)) return <span style={{color:N.textDim}}>—</span>;
+    const [label, tone] = SENT_LABEL[s] || [s.replace(/_/g, " "), "info"];
+    return <Pill tone={tone}>{label}</Pill>;
+  };
 
   return (
     <div style={page}><div style={box}>

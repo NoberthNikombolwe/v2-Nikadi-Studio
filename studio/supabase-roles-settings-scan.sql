@@ -14,6 +14,7 @@
 --   8. Storage usage and clearing card images
 --   9. Message schedules (SMS / WhatsApp sent later by pg_cron + run-schedules)
 --  10. Feedback from users about the system
+--  11. Delivery reports (every send's provider id + its delivered / read / failed result)
 -- =====================================================================
 
 -- ─────────────────────────────────────────────────────────────────────
@@ -1138,6 +1139,265 @@ CREATE POLICY p_feedback_update ON app_feedback FOR UPDATE TO authenticated
   WITH CHECK (public.has_perm('feedback', TRUE) OR created_by = lower(auth.jwt() ->> 'email'));
 CREATE POLICY p_feedback_delete ON app_feedback FOR DELETE TO authenticated
   USING (public.my_role() = 'superuser');
+
+-- ─────────────────────────────────────────────────────────────────────
+-- 11. DELIVERY REPORTS — what really happened to every SMS / WhatsApp sent.
+--     Each send is stored with the provider's messageId. The final result
+--     arrives from the delivery webhook (delivery-webhook function), from a
+--     check every few minutes (run-schedules, task "deliveries") or from
+--     "Check delivery now" in the app. Results only move forwards (sent →
+--     delivered → read, or sent → failed) and update the guest's own status
+--     for the main SMS / the WhatsApp card.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS message_deliveries (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  message_id      TEXT UNIQUE,                       -- the provider's messageId (NULL when refused at send)
+  event_id        UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  event_card_id   UUID REFERENCES event_cards(id) ON DELETE SET NULL,
+  channel         TEXT NOT NULL CHECK (channel IN ('sms','whatsapp')),
+  message_key     TEXT NOT NULL DEFAULT 'custom',    -- 'main' | an extra message id | 'custom' | 'card' | 'text'
+  message_title   TEXT,
+  recipient_name  TEXT,
+  phone           TEXT,
+  schedule_run_id UUID REFERENCES message_schedule_runs(id) ON DELETE SET NULL,
+  status          TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent','delivered','read','failed')),
+  status_id       INT,                               -- the provider's status id (NextSMS "Statuses")
+  status_group    INT,
+  status_name     TEXT,
+  reason          TEXT,                              -- why it failed, in words
+  sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  done_at         TIMESTAMPTZ,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  source          TEXT NOT NULL DEFAULT 'send' CHECK (source IN ('send','callback','check')),
+  reply_text      TEXT,                              -- a WhatsApp button reply
+  replied_at      TIMESTAMPTZ,
+  checked_at      TIMESTAMPTZ,                       -- last time its report was looked up
+  checks          INT NOT NULL DEFAULT 0,
+  created_by      TEXT DEFAULT (auth.jwt() ->> 'email')
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_event   ON message_deliveries(event_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deliveries_card    ON message_deliveries(event_card_id, channel, message_key, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON message_deliveries(sent_at) WHERE status = 'sent';
+
+ALTER TABLE message_deliveries ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.message_deliveries FROM anon, authenticated;
+GRANT SELECT ON public.message_deliveries TO authenticated;
+GRANT ALL ON public.message_deliveries TO service_role;
+DROP POLICY IF EXISTS p_deliveries_select ON message_deliveries;
+CREATE POLICY p_deliveries_select ON message_deliveries FOR SELECT TO authenticated
+  USING (public.has_perm(channel, FALSE) AND public.can_see_event(event_id));
+
+-- A provider status id → sent / delivered / read / failed (NULL = can't tell). Mirrors
+-- PROVIDER_STATUS in supabase/functions/_shared/messaging.js — a test compares them, so keep
+-- one WHEN per line.
+CREATE OR REPLACE FUNCTION public.delivery_state(p_id INT, p_group INT DEFAULT NULL) RETURNS TEXT
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE
+    WHEN p_id IN (50,51,52,77,88,109) THEN 'sent'
+    WHEN p_id IN (73) THEN 'delivered'
+    WHEN p_id IN (108) THEN 'read'
+    WHEN p_id IN (53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,74,75,76,78,79,80,107,110,111,112,114,120) THEN 'failed'
+    WHEN p_group = 18 THEN 'sent'
+    WHEN p_group IN (19,22) THEN 'failed'
+    ELSE NULL END
+$$;
+
+-- Records sends as they happen (the app and scheduled sends). One item per number:
+--   { event_id, event_card_id?, channel, message_key, message_title, recipient_name, phone,
+--     message_id?, status?, status_id?, status_group?, status_name?, reason?, card_status?,
+--     update_card?, schedule_run_id?, created_by? }
+-- For the main SMS (message_key 'main') and the WhatsApp card ('card') it also sets the guest's
+-- sms_status / wa_status, so the database — not a browser's memory — holds the status
+-- (update_card: false skips that, e.g. when the provider gave no answer at all).
+CREATE OR REPLACE FUNCTION public.record_message_sends(p_items JSONB) RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  it        JSONB;
+  v_n       INT := 0;
+  v_event   UUID;
+  v_card    UUID;
+  v_channel TEXT;
+  v_key     TEXT;
+  v_state   TEXT;
+  v_wa      TEXT;
+  v_service BOOLEAN := COALESCE(auth.role(), '') = 'service_role';
+  v_email   TEXT := auth.jwt() ->> 'email';
+BEGIN
+  FOR it IN SELECT * FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) LOOP
+    v_event   := NULLIF(it ->> 'event_id', '')::UUID;
+    v_channel := it ->> 'channel';
+    v_card    := NULLIF(it ->> 'event_card_id', '')::UUID;
+    v_key     := left(COALESCE(NULLIF(it ->> 'message_key', ''), 'custom'), 64);
+    IF v_event IS NULL OR v_channel IS NULL OR v_channel NOT IN ('sms','whatsapp') THEN RAISE EXCEPTION 'Not a valid send record'; END IF;
+    IF NOT v_service AND NOT (public.has_perm(v_channel, TRUE) AND public.can_see_event(v_event)) THEN
+      RAISE EXCEPTION 'Your role cannot record % sends for this event', CASE v_channel WHEN 'sms' THEN 'SMS' ELSE 'WhatsApp' END;
+    END IF;
+    IF v_card IS NOT NULL AND NOT EXISTS (SELECT 1 FROM event_cards c WHERE c.id = v_card AND c.event_id = v_event) THEN v_card := NULL; END IF;
+    v_state := COALESCE(NULLIF(it ->> 'status', ''), public.delivery_state(NULLIF(it ->> 'status_id', '')::INT, NULLIF(it ->> 'status_group', '')::INT), 'failed');
+    IF v_state NOT IN ('sent','delivered','read','failed') THEN v_state := 'failed'; END IF;
+
+    INSERT INTO message_deliveries (message_id, event_id, event_card_id, channel, message_key, message_title, recipient_name, phone,
+                                    schedule_run_id, status, status_id, status_group, status_name, reason, done_at, source, created_by)
+    VALUES (NULLIF(it ->> 'message_id', ''), v_event, v_card, v_channel, v_key, left(it ->> 'message_title', 120), left(it ->> 'recipient_name', 200),
+            left(it ->> 'phone', 20), NULLIF(it ->> 'schedule_run_id', '')::UUID, v_state, NULLIF(it ->> 'status_id', '')::INT,
+            NULLIF(it ->> 'status_group', '')::INT, left(it ->> 'status_name', 80), left(it ->> 'reason', 300),
+            CASE WHEN v_state IN ('delivered','read','failed') THEN NOW() END, 'send',
+            COALESCE(NULLIF(it ->> 'created_by', ''), v_email))
+    ON CONFLICT (message_id) DO NOTHING;
+
+    IF NOT COALESCE((it ->> 'update_card')::BOOLEAN, TRUE) THEN
+      NULL;                                          -- keep the guest's status as it is
+    ELSIF v_card IS NOT NULL AND v_channel = 'sms' AND v_key = 'main' THEN
+      UPDATE event_cards c SET sms_status = CASE v_state WHEN 'read' THEN 'delivered' ELSE v_state END, sent_at = NOW() WHERE c.id = v_card;
+    ELSIF v_card IS NOT NULL AND v_channel = 'whatsapp' AND v_key = 'card' THEN
+      v_wa := NULLIF(it ->> 'card_status', '');
+      IF v_wa IS NULL OR v_wa NOT IN ('sent','delivered','read','invalid','notSent') THEN
+        v_wa := CASE v_state WHEN 'failed' THEN 'notSent' ELSE v_state END;
+      END IF;
+      UPDATE event_cards c SET wa_status = v_wa, sent_at = NOW() WHERE c.id = v_card;
+    END IF;
+    v_n := v_n + 1;
+  END LOOP;
+  RETURN v_n;
+END $$;
+
+-- Applies delivery results (webhook, server check or "Check delivery now"). One item per message:
+--   { message_id, status_id, group_id?, status_name?, reason?, done_at? }
+-- Only forwards: sent → delivered / read / failed, delivered → read. The guest's own status changes
+-- only for the main SMS / the card, and only when this is that guest's latest send of it. Each
+-- change is written to the event History. Signed-in callers only touch events they can see.
+-- → { updated, delivered, read, failed, unknown }
+CREATE OR REPLACE FUNCTION public.apply_delivery_results(p_items JSONB, p_source TEXT DEFAULT 'check') RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  it        JSONB;
+  d         message_deliveries%ROWTYPE;
+  v_id      INT;
+  v_group   INT;
+  v_state   TEXT;
+  v_name    TEXT;
+  v_reason  TEXT;
+  v_done    TIMESTAMPTZ;
+  v_log     TEXT;
+  v_service BOOLEAN := COALESCE(auth.role(), '') = 'service_role';
+  v_src     TEXT := CASE WHEN p_source IN ('callback','check') THEN p_source ELSE 'check' END;
+  n_upd INT := 0; n_del INT := 0; n_read INT := 0; n_fail INT := 0; n_unknown INT := 0;
+BEGIN
+  FOR it IN SELECT * FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) LOOP
+    SELECT * INTO d FROM message_deliveries m WHERE m.message_id = NULLIF(it ->> 'message_id', '') FOR UPDATE;
+    IF NOT FOUND OR (NOT v_service AND NOT (public.has_perm(d.channel, FALSE) AND public.can_see_event(d.event_id))) THEN
+      n_unknown := n_unknown + 1; CONTINUE;
+    END IF;
+    v_id    := NULLIF(it ->> 'status_id', '')::INT;
+    v_group := NULLIF(it ->> 'group_id', '')::INT;
+    v_state := public.delivery_state(v_id, v_group);
+    IF v_state IS NULL OR NOT ((d.status = 'sent' AND v_state <> 'sent') OR (d.status = 'delivered' AND v_state = 'read')) THEN
+      CONTINUE;                                      -- nothing new, or it would go backwards
+    END IF;
+    v_name   := COALESCE(NULLIF(it ->> 'status_name', ''), d.status_name);
+    v_reason := NULLIF(it ->> 'reason', '');
+    v_done   := COALESCE(NULLIF(it ->> 'done_at', '')::TIMESTAMPTZ, NOW());
+    UPDATE message_deliveries m SET status = v_state, status_id = v_id, status_group = COALESCE(v_group, m.status_group),
+           status_name = left(v_name, 80), reason = CASE WHEN v_state = 'failed' THEN left(COALESCE(v_reason, v_name), 300) END,
+           done_at = v_done, updated_at = NOW(), source = v_src
+     WHERE m.id = d.id;
+
+    IF d.event_card_id IS NOT NULL
+       AND ((d.channel = 'sms' AND d.message_key = 'main') OR (d.channel = 'whatsapp' AND d.message_key = 'card'))
+       AND NOT EXISTS (SELECT 1 FROM message_deliveries n WHERE n.event_card_id = d.event_card_id AND n.channel = d.channel
+                          AND n.message_key = d.message_key AND n.sent_at > d.sent_at) THEN
+      IF d.channel = 'sms' THEN
+        UPDATE event_cards c SET sms_status = CASE v_state WHEN 'read' THEN 'delivered' ELSE v_state END WHERE c.id = d.event_card_id;
+      ELSE
+        UPDATE event_cards c SET wa_status = CASE v_state WHEN 'failed' THEN CASE WHEN v_id IN (76,111,120) THEN 'invalid' ELSE 'notSent' END ELSE v_state END
+         WHERE c.id = d.event_card_id;
+      END IF;
+    END IF;
+
+    v_log := CASE WHEN d.channel = 'whatsapp'
+                  THEN CASE v_state WHEN 'failed' THEN CASE WHEN v_id IN (76,111,120) THEN 'invalid' ELSE 'not_sent' END ELSE v_state END
+                  ELSE CASE v_state WHEN 'read' THEN 'delivered' ELSE v_state END END;
+    INSERT INTO event_logs (event_id, channel, action, status, recipient_name, recipient_phone, message_title, detail, user_email)
+    VALUES (d.event_id, d.channel, 'status', v_log, d.recipient_name, d.phone, d.message_title,
+            left('Delivery report: ' || COALESCE(CASE WHEN v_state = 'failed' THEN COALESCE(v_reason, v_name) ELSE v_name END, v_state)
+                 || ' (' || CASE v_src WHEN 'callback' THEN 'webhook' ELSE 'checked' END || ')', 500),
+            'delivery report');
+    n_upd := n_upd + 1;
+    IF v_state = 'delivered' THEN n_del := n_del + 1; ELSIF v_state = 'read' THEN n_read := n_read + 1; ELSIF v_state = 'failed' THEN n_fail := n_fail + 1; END IF;
+  END LOOP;
+  RETURN jsonb_build_object('updated', n_upd, 'delivered', n_del, 'read', n_read, 'failed', n_fail, 'unknown', n_unknown);
+END $$;
+
+-- A WhatsApp button reply (e.g. "Yes, I'll come") from the webhook: kept on the message and
+-- written to the event History
+CREATE OR REPLACE FUNCTION public.record_delivery_reply(p_message_id TEXT, p_text TEXT) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  d message_deliveries%ROWTYPE;
+BEGIN
+  UPDATE message_deliveries m SET reply_text = left(p_text, 500), replied_at = NOW(), updated_at = NOW()
+   WHERE m.message_id = p_message_id
+  RETURNING * INTO d;
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+  INSERT INTO event_logs (event_id, channel, action, status, recipient_name, recipient_phone, message_title, detail, user_email)
+  VALUES (d.event_id, d.channel, 'reply', 'ok', d.recipient_name, d.phone, d.message_title, left('Replied: ' || COALESCE(p_text, ''), 500), 'guest reply');
+  RETURN TRUE;
+END $$;
+
+-- The messages whose report should be looked up now (server check), stamped as checked.
+-- Still waiting and under 3 days old; checked every 4 minutes in their first hour, every
+-- 30 minutes until a day old, then every 3 hours.
+CREATE OR REPLACE FUNCTION public.claim_pending_deliveries(p_limit INT DEFAULT 200)
+RETURNS TABLE (message_id TEXT, channel TEXT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  RETURN QUERY
+  WITH due AS (
+    SELECT m.id FROM message_deliveries m
+     WHERE m.status = 'sent' AND m.message_id IS NOT NULL AND m.sent_at > NOW() - INTERVAL '3 days'
+       AND (m.checked_at IS NULL OR m.checked_at < NOW() - CASE WHEN m.sent_at > NOW() - INTERVAL '1 hour' THEN INTERVAL '4 minutes'
+                                                               WHEN m.sent_at > NOW() - INTERVAL '1 day'  THEN INTERVAL '30 minutes'
+                                                               ELSE INTERVAL '3 hours' END)
+     ORDER BY m.checked_at NULLS FIRST, m.sent_at
+     LIMIT LEAST(GREATEST(COALESCE(p_limit, 200), 1), 1000)
+     FOR UPDATE SKIP LOCKED
+  )
+  UPDATE message_deliveries m SET checked_at = NOW(), checks = m.checks + 1
+    FROM due WHERE m.id = due.id
+  RETURNING m.message_id, m.channel;
+END $$;
+
+REVOKE ALL ON FUNCTION public.record_message_sends(JSONB), public.apply_delivery_results(JSONB, TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.record_message_sends(JSONB), public.apply_delivery_results(JSONB, TEXT) TO authenticated, service_role;
+REVOKE ALL ON FUNCTION public.record_delivery_reply(TEXT, TEXT), public.claim_pending_deliveries(INT) FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_delivery_reply(TEXT, TEXT), public.claim_pending_deliveries(INT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.delivery_state(INT, INT) TO authenticated, service_role;
+
+-- Every 5 minutes, but only while a message is due a check, ask run-schedules to look up
+-- delivery reports (same Vault URL and secret as the schedules job in section 9)
+DO $outer$
+BEGIN
+  PERFORM cron.schedule('nikadi-sync-deliveries', '*/5 * * * *', $job$
+    SELECT net.http_post(
+      url     := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'nikadi_project_url') || '/functions/v1/run-schedules',
+      headers := jsonb_build_object(
+                   'Content-Type', 'application/json',
+                   'x-cron-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'nikadi_cron_secret')),
+      body    := '{"task":"deliveries"}'::jsonb,
+      timeout_milliseconds := 60000)
+    WHERE EXISTS (
+      SELECT 1 FROM public.message_deliveries m
+       WHERE m.status = 'sent' AND m.message_id IS NOT NULL AND m.sent_at > NOW() - INTERVAL '3 days'
+         AND (m.checked_at IS NULL OR m.checked_at < NOW() - CASE WHEN m.sent_at > NOW() - INTERVAL '1 hour' THEN INTERVAL '4 minutes'
+                                                                 WHEN m.sent_at > NOW() - INTERVAL '1 day'  THEN INTERVAL '30 minutes'
+                                                                 ELSE INTERVAL '3 hours' END))
+  $job$);
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'Delivery checks: could not set up pg_cron (%). Turn on pg_cron and pg_net under Database → Extensions, then run this file again.', SQLERRM;
+END $outer$;
+
+-- Live delivery results in the app
+DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_deliveries; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 
 -- Live updates for the Scanner tab across devices
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE event_cards; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
