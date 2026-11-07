@@ -825,3 +825,40 @@ test("camera: a quick double tap opens one camera", async () => {
   await camera.stop();
   assert.equal(dev.holder, null);
 });
+
+/* ── Door scanner camera: picture centred in the square box, code not squashed ── */
+import { coverSize, scanBoxSide, SCAN_FRAME } from "./camera.js";
+
+// What html5-qrcode does with the sizes (html5-qrcode.js setupUi / foreverScan): a scan square
+// centred on the video element, mapped to camera pixels by videoWidth/clientWidth, videoHeight/clientHeight
+const libraryScanArea = (video, client, side) => {
+  const x = (client.width - side) / 2, y = (client.height - side) / 2;
+  const wr = video.width / client.width, hr = video.height / client.height;
+  return { sx: x * wr, sy: y * hr, sw: side * wr, sh: side * hr, squash: (side * hr) / (side * wr) };
+};
+
+test("camera: a tall phone picture covers the square box, centred, with the scan area in the middle", () => {
+  const box = 328;                                  // a phone: 360 px screen minus the card padding
+  const phone = { width: 720, height: 1280 };
+  const size = coverSize(phone.width, phone.height, box, box);
+  assert.deepEqual(size, { width: 328, height: 583 });
+  const side = scanBoxSide(box, size.width, size.height);
+  assert.equal(side, Math.floor(box * SCAN_FRAME));
+  // The video is centred on the box, so the scan square's top in box coordinates is:
+  const topInBox = (size.height - side) / 2 - (size.height - box) / 2;
+  assert.ok(Math.abs(topInBox - box * 0.15) < 1, "scan area starts 15% down the box, like the drawn frame");
+  const area = libraryScanArea(phone, size, side);
+  assert.ok(Math.abs(area.squash - 1) < 0.01, "the code is read square, not squashed");
+  assert.ok(Math.abs(area.sx + area.sw / 2 - phone.width / 2) < 1 && Math.abs(area.sy + area.sh / 2 - phone.height / 2) < 1, "centre of the camera picture");
+  // The old layout squeezed the video into the square (client 328×328): the code was read 1.78× squashed
+  assert.ok(libraryScanArea(phone, { width: box, height: box }, 229).squash > 1.7);
+});
+
+test("camera: a wide laptop picture and a square one also cover the box", () => {
+  assert.deepEqual(coverSize(1280, 720, 420, 420), { width: 747, height: 420 });
+  assert.deepEqual(coverSize(640, 640, 300, 300), { width: 300, height: 300 });
+  assert.equal(coverSize(0, 0, 300, 300), null);    // no picture yet
+  assert.equal(scanBoxSide(420, 747, 420), 294);
+  assert.equal(scanBoxSide(0), 210);                // box not measured yet → a safe default
+  assert.equal(scanBoxSide(40), 50);                // the library's minimum
+});

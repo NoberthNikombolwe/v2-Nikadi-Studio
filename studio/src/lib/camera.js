@@ -21,6 +21,27 @@
 export const CAM_SCANNING = 2;   // Html5QrcodeScannerState.SCANNING
 export const CAM_PAUSED = 3;     // Html5QrcodeScannerState.PAUSED
 
+// ── Fitting the camera picture into the square scan box ──
+// A phone camera picture is tall (e.g. 720×1280), a laptop's is wide. The QR library centres
+// its scan area on the video element and maps screen pixels to camera pixels as
+// videoWidth / clientWidth and videoHeight / clientHeight. So the video must keep its own
+// shape (or the code is read squashed) and be centred on the box (or the scan area lands
+// off-centre — at the bottom on phones). coverSize gives that size: the video's shape,
+// just big enough to cover the box; the box crops the rest.
+export const coverSize = (videoW, videoH, boxW, boxH) => {
+  if (!(videoW > 0 && videoH > 0 && boxW > 0 && boxH > 0)) return null;
+  const scale = Math.max(boxW / videoW, boxH / videoH);
+  return { width: Math.round(videoW * scale), height: Math.round(videoH * scale) };
+};
+
+// The scan frame is this share of the box, centred (ScanPanel's .sp-frame CSS uses the same 70%)
+export const SCAN_FRAME = 0.7;
+
+// Side of the square the library reads: the frame drawn on screen, never bigger than the
+// video, and at least the library's 50 px minimum
+export const scanBoxSide = (boxSide, viewW = Infinity, viewH = Infinity) =>
+  Math.max(50, Math.floor(Math.min((boxSide || 300) * SCAN_FRAME, viewW, viewH)));
+
 export const createCamera = ({ create, release = () => {}, nextFrame = () => Promise.resolve() }) => {
   let instance = null;     // the library object of the current scan
   let starting = null;     // promise of a start in progress

@@ -3,7 +3,7 @@ import Icon from "./Icon";
 import { N, alpha } from "./lib/theme";
 import { parseQrPayload, SCAN_REASON } from "./lib/scan";
 import { scanStatus, remaining, peopleLabel } from "./lib/cardRules";
-import { createCamera } from "./lib/camera";
+import { createCamera, coverSize, scanBoxSide } from "./lib/camera";
 
 // The door check-in screen, shared by the staff Scanner tab (App.jsx) and the public,
 // code-protected Scan page (PublicScanPage.jsx). It only talks to the outside through
@@ -44,8 +44,15 @@ const camErrorText = (e) => {
 const CSS = `
   .sp-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
   .sp-card { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; padding: 16px; }
-  .sp-cam { width: 100%; aspect-ratio: 1; max-height: 420px; border-radius: 12px; overflow: hidden; background: ${N.navy900}; display: grid; place-items: center; color: ${N.textDim}; }
-  .sp-cam video { width: 100% !important; height: 100% !important; object-fit: cover; }
+  /* The camera box: always square and centred, and small enough to fit a short phone screen */
+  .sp-cam { position: relative; width: 100%; max-width: min(420px, 58vh); margin: 0 auto; aspect-ratio: 1; border-radius: 12px;
+    overflow: hidden; background: ${N.navy900}; display: grid; place-items: center; color: ${N.textDim}; }
+  /* The library's own box (it sets position: relative inline, hence !important) fills ours */
+  .sp-feed { position: absolute !important; inset: 0; overflow: hidden; }
+  /* The video keeps its own shape (sized in JS by coverSize) and is centred; the box crops the rest */
+  .sp-feed video { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: none; }
+  /* The library centres its shading on the whole video, which is off-centre in our box — we draw our own frame */
+  .sp-feed #qr-shaded-region { display: none !important; }
   .sp-result { border-radius: 14px; padding: 20px; text-align: center; border: 2px solid; }
   .sp-result-icon { width: 64px; height: 64px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 30px; color: #fff; margin-bottom: 10px; }
   .sp-name { font-size: 22px; font-weight: 800; color: ${N.text}; word-break: break-word; }
@@ -64,11 +71,20 @@ const CSS = `
   .nk-spin { animation: spSpin .9s linear infinite; } @keyframes spSpin { to { transform: rotate(360deg); } }
   /* "It's working": a glowing line sweeps up and down over the camera while it looks for a code */
   .sp-scanning { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+  /* The scan frame: 70% of the box, centred — exactly the area read (SCAN_FRAME in lib/camera.js);
+     everything outside it is darkened */
+  .sp-frame { position: absolute; top: 15%; left: 15%; width: 70%; height: 70%; border-radius: 14px;
+    box-shadow: 0 0 0 100vmax rgba(0,0,0,.45); }
+  .sp-corner { position: absolute; width: 30px; height: 30px; border: 4px solid ${N.green}; }
+  .sp-corner.tl { top: -2px; left: -2px; border-right: 0; border-bottom: 0; border-top-left-radius: 14px; }
+  .sp-corner.tr { top: -2px; right: -2px; border-left: 0; border-bottom: 0; border-top-right-radius: 14px; }
+  .sp-corner.bl { bottom: -2px; left: -2px; border-right: 0; border-top: 0; border-bottom-left-radius: 14px; }
+  .sp-corner.br { bottom: -2px; right: -2px; border-left: 0; border-top: 0; border-bottom-right-radius: 14px; }
   .sp-laser { position: absolute; left: 6%; right: 6%; top: 8%; height: 3px; border-radius: 3px;
     background: linear-gradient(90deg, transparent, ${N.green} 15%, ${N.green} 85%, transparent);
     box-shadow: 0 0 10px 2px ${alpha(N.green, "aa")}, 0 0 28px 6px ${alpha(N.green, "55")};
     animation: spLaser 2.2s ease-in-out infinite alternate; }
-  @keyframes spLaser { from { top: 8%; } to { top: 92%; } }
+  @keyframes spLaser { from { top: 4%; } to { top: 96%; } }
   /* white on dark glass on purpose: it sits over the live camera picture, whatever the theme */
   .sp-scan-tag { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px;
     padding: 4px 10px; border-radius: 999px; background: rgba(0,0,0,.55); color: #fff; font: 600 12px 'Plus Jakarta Sans', sans-serif; white-space: nowrap; }
@@ -112,6 +128,23 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
     return () => { document.removeEventListener("visibilitychange", onHide); camera.stop(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- stopCam only touches the controller and state setters
 
+  // As soon as the camera picture's shape is known (loadedmetadata — always before the
+  // library measures the video on "playing"), size the video to cover the square box while
+  // keeping its shape (coverSize), so the scan area is centred and the code isn't squashed.
+  // Media events don't bubble, so this listens in the capture phase.
+  useEffect(() => {
+    const box = document.getElementById(camId);
+    if (!box) return;
+    const fit = (e) => {
+      const v = e.target;
+      if (!v || v.tagName !== "VIDEO") return;
+      const size = coverSize(v.videoWidth, v.videoHeight, box.clientWidth, box.clientHeight);
+      if (size) { v.style.width = `${size.width}px`; v.style.height = `${size.height}px`; }
+    };
+    box.addEventListener("loadedmetadata", fit, true);
+    return () => box.removeEventListener("loadedmetadata", fit, true);
+  }, [camId]);
+
   // Turns the camera on and waits for one QR code (the controller stops it after the read)
   const startCam = async () => {
     if (disabled || camera.busy) return;
@@ -120,7 +153,11 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
     try {
       const r = await camera.start({
         constraints: { facingMode: "environment" },
-        config: { fps: 10, qrbox: { width: 230, height: 230 } },
+        // Read exactly the frame drawn on screen: 70% of the box, centred
+        config: { fps: 10, qrbox: (viewW, viewH) => {
+          const side = scanBoxSide(document.getElementById(camId)?.clientWidth, viewW, viewH);
+          return { width: side, height: side };
+        } },
         onCode: (text) => { setCamOn(false); setCamReady(false); onQr(text); },
       });
       if (r === "started") setCamReady(true);
@@ -203,7 +240,7 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
       <div className="sp-wrap">
         <div className="sp-card">
           <div className="sp-cam" style={{position:"relative"}}>
-            <div id={camId} style={{width:"100%",height:"100%",display:camOn ? "block" : "none"}} />
+            <div id={camId} className="sp-feed" style={{display:camOn ? "block" : "none"}} />
             {camOn && !camReady && (
               <div style={{position:"absolute",inset:0,display:"grid",placeItems:"center",color:N.textDim,fontSize:13}} role="status">
                 <span><Icon n="loader" /> Opening the camera…</span>
@@ -211,7 +248,10 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
             )}
             {camOn && camReady && (
               <div className="sp-scanning" role="status" aria-label="Scanning for a QR code">
-                <div className="sp-laser" />
+                <div className="sp-frame">
+                  <span className="sp-corner tl" /><span className="sp-corner tr" /><span className="sp-corner bl" /><span className="sp-corner br" />
+                  <div className="sp-laser" />
+                </div>
                 <div className="sp-scan-tag"><span className="sp-scan-dot" /> Scanning — hold the QR code in view</div>
               </div>
             )}
