@@ -50,6 +50,36 @@ export const fmtRun = (date, refYear = new Date().getFullYear()) => {
   return `${DAY_SHORT[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}${year} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 };
 
+// ── This device's clock against the server's ──
+// The server refuses a send time that has passed by ITS clock, and sends by it too, so the
+// form checks times against the server's time. A phone's clock can be minutes off — or
+// hours, when its time zone is wrong — and then the times would be refused or sent late.
+export const CLOCK_NOTE_MS  = 60_000;         // a minute or more off: say so in the form
+export const CLOCK_BLOCK_MS = 15 * 60_000;    // 15 minutes or more: no saving until it is fixed
+
+// The device clock's error from one request: the server's time minus the device's time
+// halfway through the request, in ms (+ = the device is behind). null if it can't be told.
+export const clockOffset = (serverTime, sentAt, receivedAt) => {
+  const s = Date.parse(serverTime);
+  return Number.isFinite(s) && Number.isFinite(sentAt) && Number.isFinite(receivedAt) ? Math.round(s - (sentAt + receivedAt) / 2) : null;
+};
+
+// The server's time now, given the device's time and the clock offset (null = unknown → device time)
+export const serverNow = (offsetMs, deviceNow = Date.now()) => new Date(deviceNow + (Number(offsetMs) || 0));
+
+// What to tell the user about this device's clock: null when it is right (under a minute
+// off), else { block, text }. `now` is the server's time.
+export const clockProblem = (offsetMs, now = new Date()) => {
+  if (offsetMs == null || !(Math.abs(offsetMs) >= CLOCK_NOTE_MS)) return null;
+  const m = Math.round(Math.abs(offsetMs) / 60_000), h = Math.floor(m / 60), r = m % 60;
+  const size = h ? (r ? `${h} h ${r} min` : `${h} h`) : `${m} min`;
+  const off = `This device's clock is ${size} ${offsetMs > 0 ? "behind" : "ahead of"} the server's clock`;
+  const at = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return Math.abs(offsetMs) >= CLOCK_BLOCK_MS
+    ? { block: true, text: `${off} (it is ${at} now). The sends would go out at the wrong time — set the device to automatic date, time and time zone, then open this again.` }
+    : { block: false, text: `${off} — it is ${at} now, and send times are checked against that.` };
+};
+
 // A new schedule: one send tomorrow at 09:00; the weekly fields start this week and, when
 // the event has a date, stop on it
 export const defaultScheduleForm = (now = new Date(), eventDate = null) => {
@@ -107,12 +137,16 @@ export const buildRunTimes = (form = {}, now = new Date()) => {
 };
 
 // Checks the whole schedule pop-up. → { errors: { field: message }, warnings: [text], runs }
-//   ctx: { now, eventDate, channel: "sms" | "whatsapp", title, body (SMS text), waTemplate }
+//   ctx: { now (the server's time — see serverNow), clockOffset (ms, null = unknown),
+//          eventDate, channel: "sms" | "whatsapp", title, body (SMS text), waTemplate }
 // Error keys: title, body, waTemplate, dates, date_<i>, startDate, time, weekdays,
-// everyWeeks, count, until, runs.
+// everyWeeks, count, until, runs, clock.
 export const validateSchedule = (form = {}, ctx = {}) => {
   const now = ctx.now || new Date();
   const errors = {}, warnings = [];
+  const clock = clockProblem(ctx.clockOffset, now);
+  if (clock?.block) errors.clock = clock.text;
+  else if (clock) warnings.push(clock.text);
   const today = ymd(now);
   const title = String(ctx.title ?? "").trim();
   if (!title) errors.title = "Give the schedule a name, e.g. Reminder";
@@ -162,7 +196,7 @@ export const validateSchedule = (form = {}, ctx = {}) => {
   }
 
   const { runs, passed } = buildRunTimes(form, now);
-  const formOk = !Object.keys(errors).some(k => k !== "title" && k !== "body" && k !== "waTemplate");
+  const formOk = !Object.keys(errors).some(k => !["title", "body", "waTemplate", "clock"].includes(k));
   if (formOk) {
     if (!runs.length) errors.runs = "No send is left — every time falls in the past or outside the chosen dates";
     else if (runs.length > MAX_SCHEDULE_RUNS) errors.runs = `That makes more than ${MAX_SCHEDULE_RUNS} sends — pick fewer days or an earlier last day`;

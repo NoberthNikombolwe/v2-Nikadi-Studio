@@ -831,6 +831,14 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
    WHERE s.id = p_id
 $$;
 
+-- The server's clock. The schedule form checks send times against it (and warns when the
+-- device's clock is off), because save_message_schedule refuses times that have passed by
+-- this clock and run-schedules sends by it — a phone's clock can be minutes or hours off.
+CREATE OR REPLACE FUNCTION public.server_time() RETURNS TIMESTAMPTZ
+LANGUAGE sql STABLE SET search_path = public AS $$ SELECT now() $$;
+REVOKE ALL ON FUNCTION public.server_time() FROM public;
+GRANT EXECUTE ON FUNCTION public.server_time() TO authenticated;
+
 -- Creates a schedule with its send times, or (p_id set) edits one: the fields change and
 -- the sends still waiting are replaced by p_run_times; sends already made stay as they were.
 -- p_fields: title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern.

@@ -1091,3 +1091,46 @@ test("groupOfTab and sectionTab: a section opens the page used last there", () =
   assert.equal(sectionTab(studio, { Studio: "whatsapp" }), "whatsapp");
   assert.equal(sectionTab(studio, { Studio: "finance" }), "design");   // not in the section (any more)
 });
+
+// ── schedules: the device clock against the server's ──
+import { clockOffset, serverNow, clockProblem, CLOCK_BLOCK_MS } from "./schedule.js";
+
+test("clockOffset measures how far the device clock is off, from one request", () => {
+  const sent = Date.parse("2026-11-08T10:00:00Z"), got = sent + 400;          // 0.4 s round trip
+  assert.equal(clockOffset("2026-11-08T10:05:00.200+00:00", sent, got), 5 * 60_000);   // device 5 min behind
+  assert.equal(clockOffset("2026-11-08T09:58:00.200Z", sent, got), -2 * 60_000);       // device 2 min ahead
+  assert.equal(clockOffset("not a time", sent, got), null);
+  assert.equal(clockOffset(null, sent, got), null);
+  assert.equal(serverNow(5 * 60_000, sent).toISOString(), "2026-11-08T10:05:00.000Z");
+  assert.equal(serverNow(null, sent).getTime(), sent);
+});
+
+test("clockProblem: nothing under a minute, a note for minutes, a block for a wrong time zone", () => {
+  const now = new Date(2026, 10, 8, 10, 7);
+  assert.equal(clockProblem(null, now), null);
+  assert.equal(clockProblem(30_000, now), null);
+  const note = clockProblem(4 * 60_000, now);
+  assert.equal(note.block, false);
+  assert.match(note.text, /4 min behind the server's clock — it is 10:07 now/);
+  const zone = clockProblem(-3 * 3600_000, now);
+  assert.equal(zone.block, true);
+  assert.match(zone.text, /3 h ahead of the server's clock \(it is 10:07 now\).*automatic date, time and time zone/);
+  assert.match(clockProblem(-(80 * 60_000), now).text, /1 h 20 min ahead/);
+  assert.equal(clockProblem(CLOCK_BLOCK_MS - 60_000, now).block, false);
+});
+
+test("a schedule is checked against the server's time, not the device's", () => {
+  // The device shows 10:00 but the server says 10:05: a send at 10:03 has passed
+  const device = new Date(2026, 10, 8, 10, 0), offset = 5 * 60_000;
+  const form = { mode: "dates", dates: [{ date: "2026-11-08", time: "10:03" }] };
+  const ctx = { channel: "sms", title: "Reminder", body: "Hi {name}" };
+  assert.equal(validateSchedule(form, { ...ctx, now: device }).errors.date_0, undefined);
+  const v = validateSchedule(form, { ...ctx, now: serverNow(offset, device.getTime()), clockOffset: offset });
+  assert.equal(v.errors.date_0, "This time has passed — pick a later one");
+  assert.ok(v.warnings.some(w => /5 min behind/.test(w)));
+  // hours off: saving is blocked until the device is fixed
+  const later = { mode: "dates", dates: [{ date: "2026-11-09", time: "09:00" }] };
+  const blocked = validateSchedule(later, { ...ctx, now: serverNow(-3 * 3600_000, device.getTime()), clockOffset: -3 * 3600_000 });
+  assert.match(blocked.errors.clock, /3 h ahead/);
+  assert.equal(blocked.runs.length, 1);
+});

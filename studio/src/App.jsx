@@ -27,7 +27,7 @@ import { PACKAGE_OPTIONS, EVENT_TYPES, TZ_REGIONS, LEAD_STATUSES, OPEN_STATUSES,
          leadToRow, eventFromLead, matchCustomer, localDate, followupDue, filterLeads, sortLeads, summariseLeads } from "./lib/crm";
 import { MAX_SCHEDULE_RUNS, MAX_EVERY_WEEKS, WEEKDAYS, CARD_PLACEHOLDERS, AUDIENCE_LABEL, SCHEDULE_STATUS, RUN_STATUS, scheduleTargets, describeTargetSkips,
   validateSchedule, describeSchedule, defaultScheduleForm, formForEdit, patternOf, parseLocal, fmtRun, ymd, smsParts, estimateSms, audienceOptions, nextRun,
-  filterSchedules, summariseSchedules } from "./lib/schedule";
+  filterSchedules, summariseSchedules, clockOffset, serverNow } from "./lib/schedule";
 import { FEEDBACK_KINDS, FEEDBACK_STATUSES, FEEDBACK_MAX, validateFeedback, deviceSummary, feedbackToRow, filterFeedback, summariseFeedback, feedbackExportRows } from "./lib/feedback";
 import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory, HISTORY_CHANNELS, HISTORY_ACTIONS, HISTORY_STATUSES } from "./lib/history";
 
@@ -3383,6 +3383,29 @@ function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit
   );
 }
 
+// The server's clock against this device's (clockOffset in src/lib/schedule.js): the offset in
+// ms (+ = the device is behind), or null while unknown or when the database has no
+// server_time() yet (then the device's clock is used). Measured once and kept for 10 minutes;
+// remeasure() asks again (after the server refused a time).
+let serverClock = null;   // { offset, at } — shared by every schedule pop-up
+const DEVICE_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
+function useServerClock() {
+  const [offset, setOffset] = useState(() => serverClock?.offset ?? null);
+  const [asked, setAsked] = useState(0);
+  useEffect(() => {
+    if (!supabase || (!asked && serverClock && Date.now() - serverClock.at < 10 * 60_000)) return;
+    let off = false;
+    const sent = Date.now();
+    supabase.rpc("server_time").then(({ data, error }) => {
+      const o = error ? null : clockOffset(data, sent, Date.now());
+      serverClock = { offset: o, at: Date.now() };
+      if (!off) setOffset(o);
+    });
+    return () => { off = true; };
+  }, [asked]);
+  return [offset, () => setAsked(n => n + 1)];
+}
+
 // New / edit schedule pop-up. Every send time is checked as you type — a date or time that
 // has already passed is refused — and the preview shows who it goes to and what it costs.
 function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMessages, defaultSender, senderIds,
@@ -3390,6 +3413,10 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
   const isSms = channel === "sms";
   const [now, setNow] = useState(() => new Date());
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 30_000); return () => clearInterval(t); }, []);
+  // Send times are checked against the server's clock: it is the one that refuses passed
+  // times and sends, and a phone's clock can be minutes (or, with the wrong time zone, hours) off
+  const [clockOff, remeasureClock] = useServerClock();
+  const nowServer = serverNow(clockOff, now.getTime());
   const [title, setTitle] = useState(initial?.title || "Reminder");
   const firstMsg = smsMessages[0] || { key: MAIN_MSG, title: "Main SMS", body: "" };
   const [messageKey, setMessageKey] = useState(initial?.message_key || firstMsg.key);
@@ -3417,14 +3444,14 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
 
   const audiences = audienceOptions({ channel, messageKey, image });
   const aud = audiences.some(o => o.value === audience) ? audience : "all";
-  const v = validateSchedule(form, { now, eventDate, channel, title, body, waTemplate: template });
+  const v = validateSchedule(form, { now: nowServer, clockOffset: clockOff, eventDate, channel, title, body, waTemplate: template });
   const shown = tried ? v.errors : Object.fromEntries(Object.entries(v.errors).filter(([k]) => !["title", "body", "waTemplate", "weekdays"].includes(k)));
   const hasErrors = Object.keys(v.errors).length > 0;
   const picked = cards ? scheduleTargets(cards, { channel, audience: aud, image, body }) : null;
   const guests = picked?.targets.length ?? 0;
   const parts = isSms ? Math.max(1, ...(picked?.targets || []).map(t => smsParts(t.text))) : 1;
   const cost = estimateSms(v.runs.length, guests, parts);
-  const today = ymd(now);
+  const today = ymd(nowServer);
   const setF = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
   const setRow = (i, k, val) => setForm(f => ({ ...f, dates: f.dates.map((r, j) => j === i ? { ...r, [k]: val } : r) }));
   const toggleDay = (d) => setForm(f => ({ ...f, weekdays: f.weekdays.includes(d) ? f.weekdays.filter(x => x !== d) : [...f.weekdays, d] }));
@@ -3442,8 +3469,9 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
 
   const save = async () => {
     setTried(true);
-    const fresh = validateSchedule(form, { now: new Date(), eventDate, channel, title, body, waTemplate: template });
-    if (Object.keys(fresh.errors).length) { showToast("Check the highlighted fields", "warn"); return; }
+    const check = () => validateSchedule(form, { now: serverNow(clockOff), clockOffset: clockOff, eventDate, channel, title, body, waTemplate: template });
+    const fresh = check();
+    if (Object.keys(fresh.errors).length) { showToast(fresh.errors.clock ? "Fix this device's clock first" : "Check the highlighted fields", "warn"); return; }
     const n = fresh.runs.length;
     const what = isSms ? `about ${cost.messages.toLocaleString()} SMS (≈ ${cost.tsh.toLocaleString()} TSh)` : `about ${(n * guests).toLocaleString()} WhatsApp messages`;
     const ok = await askDialog({
@@ -3455,6 +3483,13 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
       actions: [{ value: "yes", label: initial ? "Save changes" : `Schedule ${plural(n, "send")}`, kind: "primary" }],
     });
     if (ok !== "yes") return;
+    // The question may have stayed open a while: a send time may have passed meanwhile
+    const again = check();
+    if (Object.keys(again.errors).length || again.runs.length !== n || again.runs[0].getTime() !== fresh.runs[0].getTime()) {
+      setNow(new Date());
+      showToast("A send time passed while the question was open — pick a later time and save again", "warn");
+      return;
+    }
     setSaving(true);
     const fields = {
       title: title.trim(), audience: aud, pattern: patternOf(form),
@@ -3467,6 +3502,13 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
       p_run_times: fresh.runs.map(d => d.toISOString()),
     });
     setSaving(false);
+    if (error && /already passed/i.test(error.message)) {
+      // The server's clock says so (save_message_schedule): say what time it is there
+      remeasureClock(); setNow(new Date());
+      showToast(`The first send (${fmtRun(fresh.runs[0])}) has already passed by the server's clock — ${clockOff == null
+        ? "this device's clock may be behind it" : `it is ${fmtRun(serverNow(clockOff))} there now`}. Pick a later time.`, "warn");
+      return;
+    }
     if (error) { showToast(`Could not save the schedule: ${error.message}`, "warn"); return; }
     logHistory({ channel, action: "schedule", title: title.trim(),
       detail: `${initial ? "Schedule changed" : "Scheduled"}: ${describeSchedule(form)} · ${plural(n, "send")} from ${fmtRun(fresh.runs[0])} · ${AUDIENCE_LABEL[aud]}` }, eventId);
@@ -3637,6 +3679,10 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
               <div style={{color: shown.runs ? N.red : N.textDim}}><Icon n={shown.runs ? "alert" : "info"} /> {shown.runs || "Pick when to send to see the dates here."}</div>
             )}
             {v.warnings.map(w => <div key={w} style={{color:N.amber}}><Icon n="alert" /> {w}</div>)}
+            {shown.clock && <div style={{color:N.red,fontWeight:600}}><Icon n="alert" /> {shown.clock}</div>}
+            <div style={{color:N.textDim,fontSize:11,marginTop:4}}>
+              <Icon n="clock" /> Times are in this device's time zone{DEVICE_ZONE ? ` (${DEVICE_ZONE})` : ""} · now {fmtRun(nowServer)}
+            </div>
           </div>
           {initial && (
             <div style={{fontSize:11,color:N.textDim,marginTop:8}}>
