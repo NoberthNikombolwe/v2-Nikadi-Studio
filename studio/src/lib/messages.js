@@ -1,6 +1,6 @@
 import { normalisePhone } from "./phone.js";
 import { fillTemplate, smsStatusFromGroup, matchSmsResults, classifyWaSend, smsSendResult, matchSmsMessages, parseProviderJson,
-  waCardStatus, parseDeliveryReports, reportsQueries, statusReason, providerErrorText } from "../../supabase/functions/_shared/messaging.js";
+  waCardStatus, parseDeliveryReports, reportsQueries, statusReason, providerErrorText, sendSmsMessages, isDuplicateRefusal } from "../../supabase/functions/_shared/messaging.js";
 
 // Helpers for an event's SMS messages. An event has its main message (events.sms_message,
 // statuses in event_cards.sms_status) plus any number of extra messages stored as JSON in
@@ -15,7 +15,7 @@ import { fillTemplate, smsStatusFromGroup, matchSmsResults, classifyWaSend, smsS
 // The provider-result readers (SMS groupIds, the multi-send matcher, the WhatsApp send
 // classifier) live there too, so a scheduled send reads results exactly like a click does.
 export { fillTemplate, smsStatusFromGroup, matchSmsResults, classifyWaSend, smsSendResult, matchSmsMessages, parseProviderJson,
-  waCardStatus, parseDeliveryReports, reportsQueries, statusReason, providerErrorText };
+  waCardStatus, parseDeliveryReports, reportsQueries, statusReason, providerErrorText, sendSmsMessages, isDuplicateRefusal };
 
 // Turns spreadsheet rows (SheetJS sheet_to_json output) into recipients. Header variants
 // map to the standard keys name / cardType / phone (case, spaces and _ ignored); every

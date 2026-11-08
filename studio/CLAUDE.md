@@ -130,6 +130,9 @@ Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) 
   - **Rules:**
     - Go by the status **id**, never the group: group 20 also holds UNDELIVERABLE.
     - **Always look reports up by messageId.** `GET /api/v2/reports` without `messageId` *consumes* the reports.
+    - **Send bulk SMS only through `sendSmsMessages`** ([_shared/messaging.js](supabase/functions/_shared/messaging.js)). It is used by Send All, the scheduler and the NextSMS hand-over.
+      - **Why:** NextSMS refuses a `/text/multi` request whose *first message* repeats the first message of any request from the last 24 hours ("Duplicate request sent within past 24 hour(s)"). This blocks re-sends, tests followed by a schedule, and daily reminders.
+      - **What it does:** it sends that message alone through `/text/single`, which has no such rule, then retries the rest.
     - Keep SQL `delivery_state()` identical to `PROVIDER_STATUS`; a test compares them.
   - **In the app:** `useDeliveries` (realtime) patches `records` live (`applyDelivery`). `deliveryIndex` gives the latest delivery per guest (badge tooltips via `smsNote` / `waNote` / `extraNote`), and overlays extra-message results (`extraStatusOf`) without rewriting `events.sms_messages`.
   - **Reports tab:** `<ReportsTab>` shows guest counts, failure reasons, the delivery log (Excel), and the NextSMS account log (`/api/v2/logs` via the `send-sms` proxy, SMS view).

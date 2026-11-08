@@ -7,6 +7,7 @@ import { buildLogRow } from "../../../src/lib/history.js";
 
 const DB = "https://proj.supabase.co/rest/v1/";
 const SMS_MULTI = "https://messaging-service.co.tz/api/sms/v2/text/multi";
+const SMS_SINGLE = "https://messaging-service.co.tz/api/sms/v2/text/single";
 const WA_SINGLE = "https://messaging-service.co.tz/api/whatsapp/v2/text/single";
 const EVENT = "11111111-1111-1111-1111-111111111111";
 
@@ -18,6 +19,7 @@ let cards: any[];
 let storedTargets: Record<string, any>;
 let progressOk: (n: number) => boolean;
 let smsReply: (body: any) => Response;
+let smsSingleReply: (body: any) => Response;
 let waReply: (body: any) => Response;
 let clock: number;
 let progress: any[], finished: any[], statuses: any[], recorded: any[], logs: any[], sleeps: number[];
@@ -46,6 +48,7 @@ beforeEach(() => {
   smsReply = (body) => new Response('{"messages":[' + body.messages.map((m: any, i: number) =>
     `{"to":${Number(m.to)},"messageId":739182736451237888${i},"status":{"groupId":18,"groupName":"PENDING","id":51,"name":"ENROUTE (SENT)"}}`).join(",") + "]}", { status: 200 });
   waReply = () => new Response(JSON.stringify({ messages: [{ messageId: "m", status: { groupId: 18, id: 7 } }] }), { status: 200 });
+  smsSingleReply = (body) => new Response(`{"messages":[{"to":${Number(body.to)},"messageId":7391827364512379999,"status":{"groupId":18,"id":51,"name":"ENROUTE (SENT)"}}]}`, { status: 200 });
   (globalThis as any).Deno = { env: { get: (k: string) => env[k] } };
   (globalThis as any).fetch = async (url: string, init: RequestInit = {}) => {
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
@@ -76,6 +79,7 @@ beforeEach(() => {
     if (url.startsWith("https://messaging-service.co.tz/api/v2/reports")) return reportsReply(url);
     if (url === `${DB}event_logs`) { logs.push(...body); return ok(undefined); }
     if (url === SMS_MULTI) { clock += 100; return smsReply(body); }
+    if (url === SMS_SINGLE) { clock += 100; return smsSingleReply(body); }
     if (url === WA_SINGLE) { clock += 100; return waReply(body); }
     return new Response("not found", { status: 404 });
   };
@@ -160,11 +164,32 @@ test("the provider failing marks the run failed with the reason", async () => {
   assert.match(finished[0].p_detail, /^0\/2 SMS sent · 2 failed \(HTTP 503: down\)/);   // the run's line says why
 });
 
-test("a refused request keeps NextSMS's own reason (e.g. a duplicate within 24 hours)", async () => {
+test("a duplicate refusal (same first message within 24 hours) is worked round: first alone, then the rest", async () => {
+  claims = [run()];
+  const dup = () => new Response('{"message":"Duplicate request sent within past 24 hour(s)"}', { status: 422 });
+  const normal = smsReply;
+  let multiCalls = 0;
+  smsReply = (body) => (++multiCalls === 1 ? dup() : normal(body));
+  await scheduler()(post());
+  const sms = upstream();
+  assert.deepEqual(sms.map(c => [c.url.split("/").pop(), c.body.messages ? c.body.messages.map((m: any) => m.to) : [c.body.to]]), [
+    ["multi", ["255712000001", "255712000002"]],   // refused: its first message repeats a recent one
+    ["single", ["255712000001"]],                  // that message alone (no duplicate rule on single)
+    ["multi", ["255712000002"]],                   // the rest, now led by another message
+  ]);
+  assert.deepEqual(sms[1].body, { from: "NIKADI", to: "255712000001", text: "Hi Asha, see you!", flash: 0 });
+  assert.equal(finished[0].p_status, "done");
+  assert.match(finished[0].p_detail, /^2\/2 SMS sent/);
+  assert.deepEqual(recorded.map(r => r.message_id), ["7391827364512379999", "7391827364512378880"]);
+  assertValidLogs();
+});
+
+test("a refused request keeps NextSMS's own reason", async () => {
   claims = [run()];
   smsReply = () => new Response('{"message":"Duplicate request sent within past 24 hour(s)"}', { status: 422 });
+  smsSingleReply = () => new Response('{"message":"Unauthenticated."}', { status: 401 });
   await scheduler()(post());
-  assert.match(finished[0].p_detail, /2 failed \(HTTP 422: Duplicate request sent within past 24 hour\(s\)\)/);
+  assert.match(finished[0].p_detail, /2 failed \(HTTP 401: Unauthenticated\.\)/);
   assertValidLogs();
 });
 

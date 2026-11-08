@@ -1192,3 +1192,55 @@ test("nextRun and the Schedules page count sends waiting at NextSMS until their 
   assert.equal(nextRun(runs, now).id, "b");
   assert.equal(nextRun([{ status: "handed", run_at: "2026-11-01T09:00:00Z" }], now), null);
 });
+
+// ── NextSMS duplicate protection (same first message within 24 hours) ──
+import { sendSmsMessages, isDuplicateRefusal } from "./messages.js";
+
+const fakeProvider = (refuseFirstMulti = 1, singleStatus = 200) => {
+  const calls = [];
+  let multis = 0;
+  const reply = (msgs) => JSON.stringify({ messages: msgs.map((m, i) => ({ to: m.to, messageId: `9${calls.length}${i}`, status: { groupId: 18, id: 51 } })) });
+  const post = async (path, body) => {
+    calls.push([path, body]);
+    if (path === "/text/multi") {
+      if (++multis <= refuseFirstMulti) return { status: 422, text: '{"message":"Duplicate request sent within past 24 hour(s)"}' };
+      return { status: 200, text: reply(body.messages) };
+    }
+    return singleStatus === 200 ? { status: 200, text: reply([{ to: body.to }]) } : { status: singleStatus, text: '{"message":"Unauthenticated."}' };
+  };
+  return { post, calls };
+};
+const msgs = ["255712000001", "255712000002", "255712000003"].map(to => ({ from: "NIKADI", to, text: "Hi" }));
+
+test("isDuplicateRefusal spots NextSMS's 24-hour duplicate refusal", () => {
+  assert.equal(isDuplicateRefusal(422, '{"message":"Duplicate request sent within past 24 hour(s)"}'), true);
+  assert.equal(isDuplicateRefusal(200, "Duplicate request"), false);
+  assert.equal(isDuplicateRefusal(422, '{"message":"The from field is required."}'), false);
+});
+
+test("sendSmsMessages: no duplicate → one bulk request", async () => {
+  const p = fakeProvider(0);
+  const out = await sendSmsMessages(p.post, msgs, { date: "2026-11-09", time: "09:00" });
+  assert.equal(p.calls.length, 1);
+  assert.deepEqual(p.calls[0][1], { messages: msgs, flash: 0, date: "2026-11-09", time: "09:00" });
+  assert.deepEqual([out.problem, out.problemFrom, out.answers.map(a => a.to)], ["", 3, ["255712000001", "255712000002", "255712000003"]]);
+});
+
+test("sendSmsMessages: a duplicate refusal sends the first message alone, then the rest", async () => {
+  const p = fakeProvider(2);   // the first two bulk requests are refused (their first messages are recent)
+  const out = await sendSmsMessages(p.post, msgs, { reference: "nikadi-x" });
+  assert.deepEqual(p.calls.map(([path, b]) => [path, b.messages ? b.messages.map(m => m.to.slice(-1)) : b.to.slice(-1)]), [
+    ["/text/multi", ["1", "2", "3"]], ["/text/single", "1"], ["/text/multi", ["2", "3"]], ["/text/single", "2"], ["/text/multi", ["3"]]]);
+  assert.deepEqual(p.calls[1][1], { from: "NIKADI", to: "255712000001", text: "Hi", flash: 0, reference: "nikadi-x" });
+  assert.equal(out.problem, "");
+  assert.ok(out.answers.every(a => a && a.messageId));
+});
+
+test("sendSmsMessages: a refusal or no answer says from where, and whether they were sent", async () => {
+  const refused = await sendSmsMessages(fakeProvider(1, 401).post, msgs);
+  assert.deepEqual([refused.problem, refused.problemFrom, refused.refused], ["HTTP 401: Unauthenticated.", 0, true]);
+  const down = await sendSmsMessages(async () => { throw new Error("network down"); }, msgs);
+  assert.deepEqual([down.problem, down.problemFrom, down.refused], ["network down", 0, false]);
+  const empty = await sendSmsMessages(fakeProvider(0).post, []);
+  assert.deepEqual([empty.problem, empty.problemFrom], ["", 0]);
+});

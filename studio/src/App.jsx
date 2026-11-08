@@ -4,8 +4,8 @@ import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isV
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
-import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult, matchSmsMessages,
-  parseProviderJson, waCardStatus, parseDeliveryReports, reportsQueries, statusReason, providerErrorText } from "./lib/messages";
+import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult,
+  parseProviderJson, waCardStatus, parseDeliveryReports, reportsQueries, statusReason, sendSmsMessages } from "./lib/messages";
 import { DELIVERY_STATES, DELIVERY_SOURCES, indexDeliveries, extraStatusOf, deliveryNote, guestStatusCounts, deliveryCounts, failureReasons,
   filterDeliveries, deliveryExportRows, parseProviderLogs, providerLogsQuery } from "./lib/deliveries";
 import LoginPage from "./LoginPage";
@@ -82,6 +82,15 @@ const getApiToken = async (kind) => {
   const { data } = await supabase.auth.getSession();
   if (!data.session?.access_token) throw new Error("not signed in — sign in again");
   return data.session.access_token;
+};
+// One request to the SMS provider through the proxy → { status, text } (for sendSmsMessages)
+const smsPost = async (path, body) => {
+  const res = await fetch(`${SMS_API}${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${await getApiToken("sms")}`, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, text: await res.text().catch(() => "") };
 };
 const loadJsZip = () => import("jszip").then(m => m.default);
 
@@ -3525,22 +3534,12 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
       const reasons = new Map(), sends = [];
       let ok = 0, failed = 0;
       for (const batch of handoverBatches(targets, k)) {
-        let answers = [], problem = "";
-        try {
-          const res = await fetch(`${SMS_API}/text/multi`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${await getApiToken("sms")}`, "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({ messages: batch.map(t => ({ from, to: t.phone, text: t.text })), date: when.date, time: when.time,
-              reference: handoverReference(run.id), flash: 0 }),
-          });
-          const text = await res.text().catch(() => "");
-          if (!res.ok) throw new Error(providerErrorText(res.status, text));
-          let data;
-          try { data = parseProviderJson(text); } catch { throw new Error("NextSMS sent an answer that could not be read"); }
-          answers = matchSmsMessages(batch.map(t => t.phone), data?.messages || []);
-        } catch (e) { problem = e.message; }
+        // A duplicate refusal (same first message within 24 hours) is worked round in sendSmsMessages
+        const out = await sendSmsMessages(smsPost, batch.map(t => ({ from, to: t.phone, text: t.text })),
+          { date: when.date, time: when.time, reference: handoverReference(run.id) });
         batch.forEach((t, n) => {
-          const r = problem ? null : smsSendResult(answers[n]);
+          const problem = n >= out.problemFrom ? out.problem : "";
+          const r = problem ? null : smsSendResult(out.answers[n]);
           const why = problem || (r.missing ? "no answer from NextSMS for this number" : r.reason);
           if (!r || r.status === "failed") { failed++; reasons.set(why, (reasons.get(why) || 0) + 1); } else ok++;
           // Each number NextSMS answered for (a refused request has no messages to follow)
@@ -7990,22 +7989,15 @@ export default function App() {
         to:   normalisePhone(rec.phone),
         text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
       }));
-      const res = await fetch(`${SMS_API}/text/multi`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${await getApiToken("sms")}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({ messages, flash: 0 }),
-      });
-      const text = await res.text().catch(() => "");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      let data;
-      try { data = parseProviderJson(text); } catch { throw new Error("Invalid answer from the SMS provider"); }
-      // The provider echoes each recipient's number. If a number was sent more than once
-      // (user chose "Send duplicates too"), its results are handed out in order, one per record.
-      const results = matchSmsMessages(targets.map(({rec}) => rec.phone), data?.messages || []).map(smsSendResult);
+      // One bulk request. If NextSMS refuses it as a duplicate (its first message repeats a
+      // request's first message from the last 24 hours), sendSmsMessages sends that message
+      // alone and the rest again. A number sent more than once ("Send duplicates too") gets its
+      // results in order, one per record.
+      const out = await sendSmsMessages(smsPost, messages);
+      if (out.problem && out.problemFrom === 0) throw new Error(out.problem);   // nothing went out
+      const results = targets.map((_, n) => n < out.problemFrom ? smsSendResult(out.answers[n])
+        : out.refused ? { ...smsSendResult(null), missing: false, reason: out.problem }   // refused: not sent
+        : smsSendResult(null));                                                         // no answer: may have gone
       const statusOf = (r) => r.status === "delivered" ? SMS.delivered : r.status === "sent" ? SMS.sent : SMS.failed;
       // index → new smsStatus, only for recipients the provider actually reported on
       const updates = new Map(targets.flatMap(({index}, n) => results[n].missing ? [] : [[index, statusOf(results[n])]]));

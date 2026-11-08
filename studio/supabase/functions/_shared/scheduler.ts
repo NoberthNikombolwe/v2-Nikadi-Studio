@@ -24,7 +24,7 @@
 // provided by the platform.
 
 import { UPSTREAM, cleanToken } from "./proxy.ts";
-import { scheduleTargets, describeTargetSkips, matchSmsMessages, smsSendResult, classifyWaSend, parseProviderJson, waCardStatus, providerErrorText } from "./messaging.js";
+import { scheduleTargets, describeTargetSkips, sendSmsMessages, smsSendResult, classifyWaSend, waCardStatus } from "./messaging.js";
 import { json, sameSecret, clip, restClient, type Row } from "./db.ts";
 import { syncDeliveries } from "./deliveries.ts";
 
@@ -191,26 +191,19 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
     let batch: Row[];
     if (isSms) {
       batch = list.slice(next, next + SMS_BATCH);
-      let answers: (Row | undefined)[] = batch.map(() => undefined);
-      let problem = "";
-      try {
-        const res = await fetch(`${UPSTREAM}/api/sms/v2/text/multi`, {
-          method: "POST", headers, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-          body: JSON.stringify({
-            messages: batch.map((t) => ({ from: run.sender_id || Deno.env.get("SMS_SENDER_ID") || "NIKADI", to: t.phone, text: t.text })),
-            flash: 0,
-          }),
+      // One bulk request; a duplicate refusal (same first message within 24 hours) is worked
+      // round in sendSmsMessages. A refusal keeps NextSMS's own reason.
+      const post = async (path: string, body: Row) => {
+        const res = await fetch(`${UPSTREAM}/api/sms/v2${path}`, {
+          method: "POST", headers, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS), body: JSON.stringify(body),
         });
-        const text = await res.text().catch(() => "");
-        if (!res.ok) throw new Error(providerErrorText(res.status, text));   // keeps NextSMS's reason, e.g. a duplicate refusal
-        let data: Row | null = null;
-        try { data = parseProviderJson(text); } catch { data = null; }
-        answers = matchSmsMessages(batch.map((t) => t.phone), data?.messages || []);
-      } catch (e) {
-        problem = (e as Error).message;
-      }
+        return { status: res.status, text: await res.text().catch(() => "") };
+      };
+      const out = await sendSmsMessages(post,
+        batch.map((t) => ({ from: run.sender_id || Deno.env.get("SMS_SENDER_ID") || "NIKADI", to: t.phone, text: t.text })));
       batch.forEach((t, n) => {
-        const r = smsSendResult(answers[n]);
+        const problem = n >= out.problemFrom ? out.problem : "";
+        const r = smsSendResult(problem ? undefined : out.answers[n]);
         const why = problem || (r.missing ? "no result from the SMS provider" : r.reason);
         if (r.status === "failed") { failed++; failedFor(why || "not accepted by the SMS provider"); } else sent++;
         logs.push(logRow(t, "send", r.status, why ? `${runLabel} — ${why}` : runLabel));

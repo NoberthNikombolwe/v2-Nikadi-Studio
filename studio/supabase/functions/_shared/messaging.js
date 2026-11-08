@@ -169,6 +169,51 @@ export const matchSmsMessages = (phones = [], respMessages = []) => {
 // The groupId of each matched message (kept for older callers)
 export const matchSmsResults = (phones = [], respMessages = []) => matchSmsMessages(phones, respMessages).map(m => m?.status?.groupId);
 
+// NextSMS's duplicate protection (/text/multi only): a request whose FIRST message is exactly the
+// first message of a request from the last 24 hours is refused with "Duplicate request sent
+// within past 24 hour(s)". Nothing in that request was sent.
+export const isDuplicateRefusal = (httpStatus, rawText = "") =>
+  !(httpStatus >= 200 && httpStatus < 300) && /duplicate request/i.test(String(rawText ?? ""));
+
+// Sends SMS ({ from, to, text }) in one /text/multi request, working round the duplicate
+// protection: when NextSMS refuses the request as a duplicate, its first message goes alone
+// through /text/single (which has no such rule) and the rest are sent again, now led by another
+// message. Used by Send All, the scheduler and schedules handed to NextSMS.
+//   post(path, body) → Promise<{ status, text }>, path "/text/multi" or "/text/single"
+//   extra: fields added to every request (date, time, reference for a send held by NextSMS)
+// → { answers: one messages[] entry per message (undefined = NextSMS said nothing about it),
+//     problem: why the messages from `problemFrom` on got no answer ("" = they all did),
+//     problemFrom, refused: true when NextSMS refused them, so they were NOT sent (false =
+//     no answer at all, e.g. a timeout — they may have been sent) }
+export const sendSmsMessages = async (post, messages = [], extra = {}) => {
+  const answers = messages.map(() => undefined);
+  const stop = (from, problem, refused) => ({ answers, problem, problemFrom: from, refused });
+  const ok = (s) => s >= 200 && s < 300;
+  let i = 0;
+  while (i < messages.length) {
+    const rest = messages.slice(i);
+    let r;
+    try { r = await post("/text/multi", { messages: rest, flash: 0, ...extra }); }
+    catch (e) { return stop(i, String(e?.message || e), false); }
+    if (isDuplicateRefusal(r.status, r.text)) {
+      const m = rest[0];
+      let one;
+      try { one = await post("/text/single", { from: m.from, to: m.to, text: m.text, flash: 0, ...extra }); }
+      catch (e) { return stop(i, String(e?.message || e), false); }
+      if (!ok(one.status)) return stop(i, providerErrorText(one.status, one.text), true);
+      try { answers[i] = parseProviderJson(one.text)?.messages?.[0]; } catch { /* no readable answer for it */ }
+      i++;
+      continue;
+    }
+    if (!ok(r.status)) return stop(i, providerErrorText(r.status, r.text), true);
+    let data = null;
+    try { data = parseProviderJson(r.text); } catch { data = null; }
+    matchSmsMessages(rest.map(m => m.to), data?.messages || []).forEach((a, k) => { answers[i + k] = a; });
+    break;
+  }
+  return stop(messages.length, "", false);
+};
+
 /* ── WhatsApp provider results ── */
 
 // True when the provider's text says the number isn't on WhatsApp
