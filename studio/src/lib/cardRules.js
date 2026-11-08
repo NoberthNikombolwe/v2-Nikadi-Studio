@@ -60,3 +60,32 @@ export const guestCounts = (cards = []) => {
   const scanned = cards.filter(c => Number(c.scan_count) > 0).length;
   return { scanned, waiting: cards.length - scanned, sent: cards.filter(c => cardSource(c) === "sent").length };
 };
+
+// Door words for a card's scan state (scanStatus)
+export const SCAN_STATE_LABEL = { pending: "Not scanned", partial: "Partly in", complete: "Fully in" };
+
+// Card size by how many people it admits: 1 → single, 2 → double, more → group.
+// Same rule as public_scan_stats() in supabase-roles-settings-scan.sql.
+export const cardKind = (max = 1) => { const n = Number(max) || 1; return n <= 1 ? "single" : n === 2 ? "double" : "group"; };
+export const CARD_KIND_LABEL = { single: "Single", double: "Double", group: "Group" };
+
+// The scanner's Statistics screen: cards by size, cards scanned (anyone in) and not
+// scanned, and people expected / entered
+export const scanBreakdown = (cards = []) => cards.reduce((t, c) => {
+  const max = Math.max(1, Number(c.max_scans) || 1), n = Math.max(0, Number(c.scan_count) || 0);
+  t.cards++; t[cardKind(max)]++; t.people += max; t.entered += n;
+  if (n > 0) t.scanned++; else t.notScanned++;
+  if (n >= max) t.complete++;
+  return t;
+}, { cards: 0, single: 0, double: 0, group: 0, people: 0, entered: 0, scanned: 0, notScanned: 0, complete: 0 });
+
+// Rows of the check-in report (Excel), by name. fmtWhen formats the last scan time.
+export const scanReportRows = (cards = [], fmtWhen = (d) => d) =>
+  [...cards].sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""))).map((c, i) => {
+    const max = Math.max(1, Number(c.max_scans) || 1), n = Math.max(0, Number(c.scan_count) || 0);
+    return {
+      "#": i + 1, Name: c.name || "", "Card type": c.card_type || "", Size: CARD_KIND_LABEL[cardKind(max)],
+      Admits: max, Entered: n, "Still expected": Math.max(0, max - n), Status: SCAN_STATE_LABEL[scanStatus(n, max)],
+      "Last scan": c.last_scanned_at ? fmtWhen(c.last_scanned_at) : "", Phone: c.phone || "", Comment: c.call_comment || "",
+    };
+  });

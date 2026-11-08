@@ -12,6 +12,9 @@ import { createCamera, coverSize, scanBoxSide } from "./lib/camera";
 //   search(query)                    → Promise<card[]>   (manual search)
 //   checkIn(card, count, method)     → Promise<{ accepted, reason, scan_count, max_scans, name, card_type }>
 // A card is { id, name, card_type, max_scans, scan_count }.
+// On phones the pages show one view at a time with <ScanTabBar> (Statistics / Scan / Guests)
+// and tell the panel which part to show with `section`. Everything stays mounted, so a
+// check-in started from the guest list still gets its "how many are entering?" prompt.
 // The camera is stopped after every read (saves battery on a phone used all evening), and it
 // must really be released each time: a phone only lets one page hold the camera, so a stream
 // left running in the background makes the next "Scan next card" fail until the screen is
@@ -93,14 +96,125 @@ const CSS = `
   @media (prefers-reduced-motion: reduce) {
     .sp-laser { top: 50%; animation: spPulse 1.6s ease-in-out infinite; }
   }
-  @media (max-width: 760px) { .sp-wrap { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) {
+    .sp-wrap { grid-template-columns: 1fr; gap: 12px; }
+    .sp-card { padding: 12px; }
+    .sp-cam { max-width: min(100%, 62vh); }
+  }
+  /* Phones, guest list view: a check-in's result floats just above the tab bar */
+  .sp-float { position: fixed; left: 12px; right: 12px; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); z-index: 450;
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; border: 2px solid;
+    background: ${N.navy800}; box-shadow: 0 10px 30px var(--nk-shadow); animation: spUp .2s ease; }
+  .sp-float-icon { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: #fff; flex-shrink: 0; font-size: 17px; }
+  .sp-float-x { width: 36px; height: 36px; border-radius: 10px; border: 1px solid ${N.border}; background: transparent; color: ${N.textMid}; cursor: pointer; flex-shrink: 0; }
+  @keyframes spUp { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
 `;
+
+// The phone scanner's bottom tab bar. The toast and the activity panel move up above it.
+const BAR_CSS = `
+  .sp-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 400; display: flex; gap: 4px;
+    background: ${N.navy800}; border-top: 1px solid ${N.border}; box-shadow: 0 -6px 20px var(--nk-shadow);
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); }
+  .sp-tab { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 54px;
+    border: none; border-radius: 12px; background: transparent; color: ${N.textDim}; font: 700 11px 'Plus Jakarta Sans', sans-serif; cursor: pointer; }
+  .sp-tab-ic { font-size: 21px; line-height: 1; display: grid; place-items: center; }
+  .sp-tab.on { color: ${N.sky}; }
+  .sp-tab:not(.sp-tab-main).on .sp-tab-ic { background: ${alpha(N.accent, "22")}; border-radius: 10px; padding: 3px 14px; }
+  /* Scan, in the middle, is the main action: a round button raised over the bar */
+  .sp-tab-main .sp-tab-ic { width: 50px; height: 50px; margin-top: -24px; border-radius: 50%; background: ${N.accent}; color: #fff;
+    box-shadow: 0 6px 16px ${alpha(N.accent, "66")}; border: 3px solid ${N.navy800}; }
+  .sp-tab-main.on .sp-tab-ic { background: ${N.green}; box-shadow: 0 6px 16px ${alpha(N.green, "66")}; }
+  .sp-tab:focus-visible { outline: 2px solid ${N.accent}; outline-offset: 2px; }
+  body:has(.sp-tabbar) .nk-toast { left: 12px; right: 12px; max-width: none; bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+  body:has(.sp-tabbar) .nk-activity { bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
+`;
+
+// The Statistics view: tiles in rows of 1, 3, 2 and 1 (as door staff read them)
+const STATS_CSS = `
+  .sp-stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+  .sp-stat { grid-column: span 6; background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; padding: 14px 10px; text-align: center; min-width: 0; }
+  .sp-stat.third { grid-column: span 2; }
+  .sp-stat.half { grid-column: span 3; }
+  .sp-stat-v { font-size: 26px; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .sp-stat.big .sp-stat-v { font-size: 36px; }
+  .sp-stat-l { font-size: 10px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: ${N.textDim}; margin-top: 5px; }
+  .sp-stat-s { font-size: 11px; color: ${N.textMid}; margin-top: 3px; }
+  .sp-meter { height: 6px; border-radius: 6px; background: ${N.navy700}; overflow: hidden; margin-top: 8px; }
+  .sp-meter > span { display: block; height: 100%; border-radius: 6px; background: ${N.green}; }
+  .sp-dl { width: 100%; margin-top: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px;
+    border-radius: 12px; border: none; background: ${N.accent}; color: #fff; font: 700 14px 'Plus Jakarta Sans', sans-serif; cursor: pointer; }
+  .sp-dl:disabled { opacity: .6; cursor: wait; }
+`;
+
+// Bottom tab bar of the phone scanner. tabs: [{ key, label, icon }]; the "scan" tab stands out.
+export function ScanTabBar({ tabs, view, onChange }) {
+  return (
+    <>
+      <style>{BAR_CSS}</style>
+      <nav className="sp-tabbar" aria-label="Scanner views">
+        {tabs.map(t => (
+          <button key={t.key} type="button" className={`sp-tab${t.key === "scan" ? " sp-tab-main" : ""}${view === t.key ? " on" : ""}`}
+            aria-current={view === t.key ? "page" : undefined} onClick={() => onChange(t.key)}>
+            <span className="sp-tab-ic"><Icon n={t.icon} /></span>{t.label}
+          </button>
+        ))}
+      </nav>
+    </>
+  );
+}
+
+// The Statistics view: total cards, cards by size, scanned cards and guests in, not scanned
+// cards, and an optional report download. `stats` has scanBreakdown()'s shape
+// (src/lib/cardRules.js); a figure that is missing (an older database) hides its tile.
+export function ScanStats({ stats = {}, onDownload, downloading, children }) {
+  const has = (v) => typeof v === "number" && Number.isFinite(v);
+  const pct = has(stats.entered) && stats.people > 0 ? Math.min(100, Math.round(stats.entered / stats.people * 100)) : null;
+  const tile = (label, value, color, size = "", sub = null) => has(value) && (
+    <div className={`sp-stat ${size}`}>
+      <div className="sp-stat-v" style={{color}}>{value}</div>
+      <div className="sp-stat-l">{label}</div>
+      {sub && <div className="sp-stat-s">{sub}</div>}
+    </div>
+  );
+  return (
+    <>
+      <style>{STATS_CSS}</style>
+      <div className="sp-stats">
+        {tile("Total cards", stats.cards, N.sky, "big", has(stats.people) ? `for ${peopleLabel(stats.people)}` : null)}
+        {tile("Single", stats.single, N.text, "third")}
+        {tile("Double", stats.double, N.text, "third")}
+        {tile("Group", stats.group, N.text, "third")}
+        {tile("Scanned cards", stats.scanned, N.green, "half", has(stats.complete) ? `${stats.complete} fully in` : null)}
+        {has(stats.entered) && (
+          <div className="sp-stat half">
+            <div className="sp-stat-v" style={{color:N.green}}>{stats.entered}{has(stats.people) && <span style={{fontSize:15,color:N.textDim}}> / {stats.people}</span>}</div>
+            <div className="sp-stat-l">Guests in</div>
+            {pct !== null && <div className="sp-meter" role="img" aria-label={`${pct}% of guests have entered`}><span style={{width:`${pct}%`}} /></div>}
+          </div>
+        )}
+        {tile("Not scanned cards", stats.notScanned, N.amber)}
+      </div>
+      {onDownload && (
+        <button type="button" className="sp-dl" onClick={onDownload} disabled={downloading}>
+          {downloading ? <><Icon n="loader" /> Preparing the report…</> : <><Icon n="download" /> Download check-in report</>}
+        </button>
+      )}
+      {children}
+    </>
+  );
+}
 
 const statusTone = (s) => s === "complete" ? N.green : s === "partial" ? N.amber : N.textDim;
 
 // renderBelow({ begin, busy }) — optional extra content (the staff guest list) that can start
 // a check-in through the same flow, including the "how many are entering?" prompt.
-export default function ScanPanel({ findCard, search, checkIn, scannerName, disabled, disabledReason, renderBelow }) {
+// section — what shows: "all" (default: camera + search, then renderBelow), "scan" (camera +
+//   search), "list" (renderBelow only; results float above the tab bar) or "none".
+// startSignal — a number the page bumps when the user taps the Scan tab: the camera opens
+//   straight away (the tap is the user's go-ahead).
+export default function ScanPanel({ findCard, search, checkIn, scannerName, disabled, disabledReason, renderBelow, section = "all", startSignal = 0 }) {
+  const showScan = section === "all" || section === "scan";
+  const showList = section === "all" || section === "list";
   const camId = useId().replace(/:/g, "");
   const [camOn, setCamOn]   = useState(false);
   const [camReady, setCamReady] = useState(false);   // the video is showing
@@ -167,6 +281,27 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
     }
   };
 
+  // Phones: leaving the Scan view gives the camera back (the cleanup runs when it hides)
+  useEffect(() => {
+    if (!showScan) return;
+    return () => { stopCam(); };
+  }, [showScan]); // eslint-disable-line react-hooks/exhaustive-deps -- stopCam only touches the controller and state setters
+
+  // Phones: tapping the Scan tab opens the camera at once
+  const lastSignal = useRef(startSignal);
+  useEffect(() => {
+    if (startSignal === lastSignal.current) return;
+    lastSignal.current = startSignal;
+    if (showScan && !camOn) startCam();
+  }, [startSignal]); // eslint-disable-line react-hooks/exhaustive-deps -- runs only when the page asks for the camera
+
+  // Guest list view: a check-in result floats for a few seconds, then goes
+  useEffect(() => {
+    if (section !== "list" || !result) return;
+    const t = setTimeout(() => setResult(null), 5000);
+    return () => clearTimeout(t);
+  }, [section, result]);
+
   const fail = (title, message) => setResult({ tone: "bad", title, message });
 
   // A QR code was read: find the card (by ID, else by name), then check in
@@ -232,12 +367,12 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
   return (
     <>
       <style>{CSS}</style>
-      {disabled && (
+      {disabled && section !== "none" && (
         <div className="sp-card" style={{marginBottom:16,borderColor:alpha(N.amber,"66"),color:N.amber,fontSize:13}}>
           <Icon n="alert" /> {disabledReason}
         </div>
       )}
-      <div className="sp-wrap">
+      <div className="sp-wrap" style={showScan ? undefined : {display:"none"}}>
         <div className="sp-card">
           <div className="sp-cam" style={{position:"relative"}}>
             <div id={camId} className="sp-feed" style={{display:camOn ? "block" : "none"}} />
@@ -301,7 +436,7 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
           <form className="sp-card" onSubmit={doSearch}>
             <label style={{fontSize:12,fontWeight:700,color:N.textDim,display:"block",marginBottom:6}} htmlFor={camId + "q"}>No QR? Search the guest by name</label>
             <div style={{display:"flex",gap:8}}>
-              <input id={camId + "q"} className="sp-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Start typing a name — results appear as you type" disabled={disabled} />
+              <input id={camId + "q"} className="sp-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Type a guest's name" disabled={disabled} />
               <button className="sp-btn" type="submit" disabled={disabled || busy} aria-label="Search guests"><Icon n="search" /></button>
             </div>
             <div style={{marginTop:10}}>
@@ -326,7 +461,23 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
           </form>
         </div>
       </div>
-      {renderBelow && renderBelow({ begin, busy })}
+      {renderBelow && <div style={showList ? undefined : {display:"none"}}>{renderBelow({ begin, busy })}</div>}
+
+      {section === "list" && (result || (busy && !ask)) && (
+        <div className="sp-float" style={{borderColor:tone || N.border}} role="status" aria-live="assertive">
+          {!result ? <span style={{color:N.textMid,fontWeight:600}}><Icon n="loader" /> Checking…</span> : (
+            <>
+              <span className="sp-float-icon" style={{background:tone}}><Icon n={result.tone === "good" ? "check" : "xCircle"} /></span>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:800,color:tone,fontSize:14}}>{result.title}</div>
+                {result.card && <div style={{fontWeight:700,color:N.text,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{result.card.name} · {result.card.scan_count} / {result.card.max_scans}</div>}
+                {result.message && <div style={{fontSize:12,color:N.textMid}}>{result.message}</div>}
+              </div>
+              <button type="button" className="sp-float-x" onClick={() => setResult(null)} aria-label="Close" title="Close"><Icon n="x" /></button>
+            </>
+          )}
+        </div>
+      )}
 
       {ask && (
         <div className="nk-overlay nk-top" style={{position:"fixed",inset:0,zIndex:700,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>

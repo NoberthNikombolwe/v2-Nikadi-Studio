@@ -5,6 +5,7 @@ import { N, alpha } from "./lib/theme";
 import { CALL_STATUSES } from "./lib/calls";
 import { HISTORY_CHANNELS } from "./lib/history";
 import { scanStatus, cardSource } from "./lib/cardRules";
+import { hideColumnRules } from "./lib/mobileTable";
 
 // Public view-only page: #/view/<eventId>. No login — the organiser shares the link and a
 // code (Calls or History tab → Share view-only link). Shows the guest list (card sent, call
@@ -13,6 +14,8 @@ import { scanStatus, cardSource } from "./lib/cardRules";
 // Phone numbers arrive masked. Changing or turning off the code locks this page at once.
 
 const codeKey = (id) => `nikadi_view_code_${id}`;
+// Phones keep only the important columns of each table ("m-hide-N" drops the Nth)
+const PHONE_CSS = `@media (max-width: 640px) { ${hideColumnRules(".pv-table")} { display: none; } }`;
 const TONE = { good: N.green, info: N.sky, warn: N.amber, bad: N.red };
 const fmt = (t) => t ? new Date(t).toLocaleString("en-GB", { day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" }) : "—";
 
@@ -130,6 +133,7 @@ export default function PublicViewPage({ eventId }) {
 
   return (
     <div style={page}><div style={box}>
+      <style>{PHONE_CSS}</style>
       {brand}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:12,flexWrap:"wrap",marginBottom:14}}>
         <div style={{minWidth:0}}>
@@ -162,7 +166,7 @@ export default function PublicViewPage({ eventId }) {
       )}
       <div style={{...card, overflowX:"auto"}}>
         {view === "guests" ? (
-          <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <table className="pv-table m-hide-2 m-hide-3 m-hide-5 m-hide-7" style={{width:"100%",borderCollapse:"collapse"}}>
             <thead><tr>{["Guest","Card type","Phone","WhatsApp","SMS","Call answer","Comment","Entered"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
             <tbody>
               {shownGuests.map(g => {
@@ -184,7 +188,7 @@ export default function PublicViewPage({ eventId }) {
             </tbody>
           </table>
         ) : (
-          <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <table className="pv-table m-hide-4 m-hide-6 m-hide-7" style={{width:"100%",borderCollapse:"collapse"}}>
             <thead><tr>{["When","Channel","Guest","Phone","Result","Message","Detail"].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
             <tbody>
               {shownHistory.map((h, i) => (

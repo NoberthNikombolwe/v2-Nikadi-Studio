@@ -1,8 +1,9 @@
 import Logo from "./Logo";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { supabase } from "./lib/supabase";
 import Icon from "./Icon";
-import ScanPanel from "./ScanPanel";
+import ScanPanel, { ScanTabBar, ScanStats } from "./ScanPanel";
+import useMediaQuery, { SCANNER_PHONE } from "./useMediaQuery";
 import { N, alpha } from "./lib/theme";
 
 // Public door-scanning page: #/scan/<eventId>. No login — the organiser shares the link
@@ -10,6 +11,9 @@ import { N, alpha } from "./lib/theme";
 // database functions (public_scan_event / public_find_cards / public_recent_scans /
 // scan_card); this page never reads a table directly. Regenerating or turning off the
 // code in the app locks this page out at once.
+// Phones get one view at a time with a bottom tab bar: Statistics (public_scan_stats — cards
+// by size, scanned / not scanned), Scan, and Recent scans. There is no full guest list here
+// on purpose: without a login, guests are only found by searching a name.
 
 const codeKey = (id) => `nikadi_scan_code_${id}`;
 
@@ -21,6 +25,11 @@ export default function PublicScanPage({ eventId }) {
   const [error, setError] = useState(null);
   const [recent, setRecent] = useState([]);
   const [door, setDoor]   = useState(() => { try { return localStorage.getItem("nikadi_door_name") || ""; } catch { return ""; } });
+  const [stats, setStats] = useState(null);       // public_scan_stats, in scanBreakdown()'s shape
+  const statsMissing = useRef(false);             // the database doesn't have public_scan_stats yet
+  const phone = useMediaQuery(SCANNER_PHONE);
+  const [view, setView]   = useState("scan");     // phones: stats | scan | recent
+  const [camSignal, setCamSignal] = useState(0);  // bumped when the Scan tab is tapped: opens the camera
 
   // Checks the code by asking for the event summary (empty result = wrong / changed code)
   const refresh = useCallback(async (c = code) => {
@@ -35,6 +44,15 @@ export default function PublicScanPage({ eventId }) {
     setEvent(data[0]); setState("open");
     const r = await supabase.rpc("public_recent_scans", { p_event: eventId, p_code: c });
     if (!r.error) setRecent(r.data || []);
+    if (!statsMissing.current) {
+      const st = await supabase.rpc("public_scan_stats", { p_event: eventId, p_code: c });
+      if (st.error) { if (st.error.code === "PGRST202" || st.status === 404) statsMissing.current = true; }
+      else {
+        const x = st.data?.[0];
+        setStats(x ? { cards: x.cards, single: x.single_cards, double: x.double_cards, group: x.group_cards, people: x.people,
+          entered: x.entered, scanned: x.scanned_cards, notScanned: x.cards - x.scanned_cards, complete: x.complete_cards } : null);
+      }
+    }
     return true;
   }, [code, eventId]);
 
@@ -109,13 +127,47 @@ export default function PublicScanPage({ eventId }) {
     </div></div>
   );
 
+  const recentList = (
+    <div style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:14,padding:14,marginTop:16}}>
+      <div style={{fontSize:11,fontWeight:800,color:N.textDim,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Recent scans</div>
+      {!recent.length && <div style={{fontSize:13,color:N.textDim}}>No cards scanned yet.</div>}
+      {recent.map((r, i) => (
+        <div key={i} style={{display:"flex",gap:8,fontSize:13,padding:"5px 0",borderBottom:`1px solid ${N.border}`}}>
+          <span style={{color:r.accepted ? N.green : N.red}}><Icon n={r.accepted ? "check" : "xCircle"} /></span>
+          <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.name || "Unknown card"}{r.accepted ? ` · ${r.people}` : ""}</span>
+          <span style={{color:N.textDim,fontSize:11}}>{new Date(r.scanned_at).toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" })}</span>
+        </div>
+      ))}
+    </div>
+  );
+  const dateLine = [event.event_type, event.start_datetime && new Date(event.start_datetime).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" })].filter(Boolean).join(" · ");
+  const panel = (section, signal) => <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={door || null} section={section} startSignal={signal} />;
+
+  if (phone) {
+    const goView = (v) => { if (v === view) return; if (v === "scan") setCamSignal(n => n + 1); setView(v); window.scrollTo?.(0, 0); };
+    return (
+      <div style={{...page, paddingBottom:"calc(env(safe-area-inset-bottom, 0px) + 100px)"}}><div style={box}>
+        <div style={{marginBottom:12,minWidth:0}}>
+          <h1 style={{fontSize:18,fontWeight:800}}>{event.name}</h1>
+          <div style={{fontSize:12,color:N.textDim}}>{dateLine}</div>
+        </div>
+        {view === "stats" && <ScanStats stats={stats || { cards: event.cards, people: event.people, entered: event.entered }} />}
+        {view === "recent" && recentList}
+        {panel(view === "scan" ? "scan" : "none", camSignal)}
+        <ScanTabBar view={view} onChange={goView} tabs={[
+          { key: "stats", label: "Statistics", icon: "chart" }, { key: "scan", label: "Scan", icon: "scan" }, { key: "recent", label: "Recent", icon: "history" },
+        ]} />
+      </div></div>
+    );
+  }
+
   return (
     <div style={page}><div style={box}>
       {brand}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",gap:12,flexWrap:"wrap",marginBottom:14}}>
         <div style={{minWidth:0}}>
           <h1 style={{fontSize:20,fontWeight:800}}>{event.name}</h1>
-          <div style={{fontSize:12,color:N.textDim}}>{[event.event_type, event.start_datetime && new Date(event.start_datetime).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" })].filter(Boolean).join(" · ")}</div>
+          <div style={{fontSize:12,color:N.textDim}}>{dateLine}</div>
         </div>
         <div style={{display:"flex",gap:8}}>
           {[["Entered", `${event.entered} / ${event.people}`, N.green], ["Cards", event.cards, N.sky]].map(([l, v, c]) => (
@@ -125,19 +177,8 @@ export default function PublicScanPage({ eventId }) {
           ))}
         </div>
       </div>
-      <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={door || null} />
-      {recent.length > 0 && (
-        <div style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:14,padding:14,marginTop:16}}>
-          <div style={{fontSize:11,fontWeight:800,color:N.textDim,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Recent scans</div>
-          {recent.map((r, i) => (
-            <div key={i} style={{display:"flex",gap:8,fontSize:13,padding:"5px 0",borderBottom:`1px solid ${N.border}`}}>
-              <span style={{color:r.accepted ? N.green : N.red}}><Icon n={r.accepted ? "check" : "xCircle"} /></span>
-              <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.name || "Unknown card"}{r.accepted ? ` · ${r.people}` : ""}</span>
-              <span style={{color:N.textDim,fontSize:11}}>{new Date(r.scanned_at).toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" })}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {panel("all", 0)}
+      {recent.length > 0 && recentList}
     </div></div>
   );
 }

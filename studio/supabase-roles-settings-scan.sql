@@ -616,8 +616,27 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
    WHERE l.event_id = p_event AND public.scan_code_ok(p_event, p_code)
    ORDER BY l.scanned_at DESC LIMIT 15
 $$;
-REVOKE ALL ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT) FROM public;
-GRANT EXECUTE ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT) TO anon, authenticated;
+
+-- Door statistics for the page's Statistics view on phones: cards by size (single admits 1,
+-- double 2, group more — cardKind() in src/lib/cardRules.js), cards with anyone in, cards
+-- fully used, people expected / entered. Counts only, no names. No row for a wrong code.
+CREATE OR REPLACE FUNCTION public.public_scan_stats(p_event UUID, p_code TEXT)
+RETURNS TABLE (cards INT, single_cards INT, double_cards INT, group_cards INT, people INT, entered INT, scanned_cards INT, complete_cards INT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT count(c.id)::INT,
+         (count(c.id) FILTER (WHERE c.max_scans <= 1))::INT,
+         (count(c.id) FILTER (WHERE c.max_scans = 2))::INT,
+         (count(c.id) FILTER (WHERE c.max_scans > 2))::INT,
+         COALESCE(sum(c.max_scans), 0)::INT,               -- max_scans is always >= 1 (sync_card_max_scans)
+         COALESCE(sum(c.scan_count), 0)::INT,
+         (count(c.id) FILTER (WHERE c.scan_count > 0))::INT,
+         (count(c.id) FILTER (WHERE c.scan_count >= c.max_scans))::INT
+    FROM events e LEFT JOIN event_cards c ON c.event_id = e.id
+   WHERE e.id = p_event AND public.scan_code_ok(p_event, p_code)
+   GROUP BY e.id
+$$;
+REVOKE ALL ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT), public.public_scan_stats(UUID, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT), public.public_scan_stats(UUID, TEXT) TO anon, authenticated;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- 7. VIEW-ONLY SHARE LINK — #/view/<eventId> + events.view_code. Read-only guest

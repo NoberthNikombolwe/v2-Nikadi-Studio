@@ -1032,3 +1032,62 @@ test("the NextSMS account log: query and rows", () => {
   assert.deepEqual([rows[1].state, rows[1].doneAt], ["sent", null]);
   assert.deepEqual(parseProviderLogs("oops"), []);
 });
+
+// ── scanner on phones: statistics, check-in report, phone table columns ──
+import { cardKind, scanBreakdown, scanReportRows, SCAN_STATE_LABEL } from "./cardRules.js";
+import { hideColumnRules, MAX_HIDDEN_COLUMN } from "./mobileTable.js";
+
+test("cardKind sorts cards by how many they admit", () => {
+  assert.deepEqual([0, 1, 2, 3, 30, undefined, "2"].map(cardKind), ["single", "single", "double", "group", "group", "single", "double"]);
+});
+
+test("scanBreakdown counts cards by size, scanned and not scanned", () => {
+  const cards = [
+    { max_scans: 1, scan_count: 1 }, { max_scans: 1, scan_count: 0 }, { max_scans: 2, scan_count: 1 },
+    { max_scans: 30, scan_count: 30 }, { max_scans: 5, scan_count: 0 }, {},
+  ];
+  assert.deepEqual(scanBreakdown(cards), { cards: 6, single: 3, double: 1, group: 2, people: 40, entered: 32, scanned: 3, notScanned: 3, complete: 2 });
+  assert.equal(scanBreakdown().cards, 0);
+});
+
+test("scanReportRows lists every guest by name with their door state", () => {
+  const rows = scanReportRows([
+    { name: "Zara", card_type: "Double", max_scans: 2, scan_count: 1, last_scanned_at: "2026-11-08T18:00:00Z", phone: "255712000001" },
+    { name: "Amina", card_type: "Single", max_scans: 1, scan_count: 0, call_comment: "VIP" },
+  ], () => "08 Nov 21:00");
+  assert.deepEqual(rows.map(r => [r["#"], r.Name, r.Size, r.Entered, r["Still expected"], r.Status, r["Last scan"], r.Comment]), [
+    [1, "Amina", "Single", 0, 1, SCAN_STATE_LABEL.pending, "", "VIP"],
+    [2, "Zara", "Double", 1, 1, SCAN_STATE_LABEL.partial, "08 Nov 21:00", ""],
+  ]);
+});
+
+test("hideColumnRules hides the numbered column, never a spanning row", () => {
+  const css = hideColumnRules(".nk-table");
+  assert.ok(css.includes(".nk-table.m-hide-3 tr > :nth-child(3):not([colspan])"));
+  assert.equal(css.split(",").length, MAX_HIDDEN_COLUMN);
+  assert.equal(hideColumnRules(".t", 2).split(",").length, 2);
+});
+
+// ── phone bottom navigation ──
+import { phoneNavGroups, groupOfTab, sectionTab } from "./permissions.js";
+
+test("phoneNavGroups puts the event sections first and keeps four", () => {
+  const g = (label, ...ids) => ({ label, items: ids.map(id => ({ id })) });
+  const all = [g("Sales", "events", "leads"), g("Studio", "design", "sms"), g("Insight", "reports"), g("Guests", "calls", "scanner"),
+    g("Schedules", "schedules"), g("Money", "finance"), g("Admin", "settings"), g("Help", "guide")];
+  assert.deepEqual(phoneNavGroups(all).map(x => x.label), ["Sales", "Studio", "Guests", "Insight"]);
+  // no event open: the event-only sections are gone, so the others move up
+  assert.deepEqual(phoneNavGroups(all.filter(x => !["Studio", "Insight", "Guests"].includes(x.label))).map(x => x.label), ["Sales", "Schedules", "Money", "Admin"]);
+  assert.deepEqual(phoneNavGroups([g("Help", "guide"), g("Other", "x"), g("Sales", "events")]).map(x => x.label), ["Sales", "Help", "Other"]);
+  assert.deepEqual(phoneNavGroups([]), []);
+});
+
+test("groupOfTab and sectionTab: a section opens the page used last there", () => {
+  const studio = { label: "Studio", items: [{ id: "design" }, { id: "sms" }, { id: "whatsapp" }] };
+  const groups = [{ label: "Sales", items: [{ id: "events" }] }, studio];
+  assert.equal(groupOfTab(groups, "sms"), studio);
+  assert.equal(groupOfTab(groups, "nope"), null);
+  assert.equal(sectionTab(studio), "design");
+  assert.equal(sectionTab(studio, { Studio: "whatsapp" }), "whatsapp");
+  assert.equal(sectionTab(studio, { Studio: "finance" }), "design");   // not in the section (any more)
+});

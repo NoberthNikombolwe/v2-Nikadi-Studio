@@ -72,6 +72,19 @@ export const visibleNav = (groups, matrix, role) => groups
   .map(g => ({ ...g, items: g.items.filter(it => canSeeTab(matrix, role, it.id)) }))
   .filter(g => g.items.length);
 
+// Phones: the bottom bar shows up to `max` sections (nav groups) in this order — the ones
+// used most at an event first — and then "More", which opens the full menu
+export const PHONE_NAV_ORDER = ["Sales", "Studio", "Guests", "Insight", "Schedules", "Money", "Admin", "Help"];
+export const phoneNavGroups = (groups = [], max = 4) => {
+  const rank = (g) => { const i = PHONE_NAV_ORDER.indexOf(g.label); return i < 0 ? PHONE_NAV_ORDER.length : i; };
+  return [...groups].sort((a, b) => rank(a) - rank(b)).slice(0, max);
+};
+// The nav group a tab belongs to (null when it is in none of them)
+export const groupOfTab = (groups = [], tab) => groups.find(g => g.items.some(it => it.id === tab)) || null;
+// The page a tap on a section opens: the one used last in that section, else its first
+export const sectionTab = (group, last = {}) =>
+  group.items.some(it => it.id === last[group.label]) ? last[group.label] : group.items[0]?.id;
+
 // The rows to write when the matrix editor saves one role (all modules, explicit false)
 export const rowsForRole = (role, perms = {}) => MODULES.map(m => ({
   role, module: m.key, can_view: perms[m.key] === "V" || perms[m.key] === "E", can_edit: perms[m.key] === "E",

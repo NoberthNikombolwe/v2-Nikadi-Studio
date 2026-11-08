@@ -10,11 +10,13 @@ import { DELIVERY_STATES, DELIVERY_SOURCES, indexDeliveries, extraStatusOf, deli
   filterDeliveries, deliveryExportRows, parseProviderLogs, providerLogsQuery } from "./lib/deliveries";
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
-import ScanPanel from "./ScanPanel";
+import ScanPanel, { ScanTabBar, ScanStats } from "./ScanPanel";
+import useMediaQuery, { SCANNER_PHONE } from "./useMediaQuery";
+import { hideColumnRules } from "./lib/mobileTable";
 import { TASK_SUGGESTIONS, groupAssignments, initials, eventsAssignedTo, assignableFor, validateAssignment } from "./lib/assignments";
-import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE } from "./lib/permissions";
+import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, visibleNav, matrixFromRows, rowsForRole, validateInvite, TAB_MODULE, phoneNavGroups, groupOfTab, sectionTab } from "./lib/permissions";
 import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, validateSenderId } from "./lib/settings";
-import { peopleForCardType, peopleLabel, scanTotals, validateCardRule, scanStatus, remaining as placesLeft, filterGuests, guestCounts, cardSource } from "./lib/cardRules";
+import { peopleForCardType, peopleLabel, validateCardRule, scanStatus, remaining as placesLeft, filterGuests, cardSource, scanBreakdown, scanReportRows, SCAN_STATE_LABEL } from "./lib/cardRules";
 import { buildQrPayload, matchByName, SCAN_REASON, newScanCode } from "./lib/scan";
 import { CALL_STATUSES, callOptions, nextCallStatus, summariseCalls, filterCalls } from "./lib/calls";
 import { GUIDE_STAGES, GUIDE_STEPS, GUIDE_LINKS, stepsOfStage, guideProgress } from "./lib/guide";
@@ -325,8 +327,6 @@ const CSS = `
     .nk-modal-foot .nk-btn, .nk-dialog-actions .nk-btn { flex: 1 1 auto; }
     .nk-stats { grid-template-columns: 1fr 1fr; gap: 8px; }
     .nk-stat-num { font-size: 18px !important; }
-    .nk-table td, .nk-table thead th { padding: 9px 10px; }
-    .nk-activity { left: 12px; right: 12px; bottom: 12px; width: auto; max-width: none; }
     .nk-page h2 { font-size: 18px !important; }
     input, select, textarea { font-size: 16px !important; }   /* stops iOS zooming into fields */
   }
@@ -547,6 +547,46 @@ const CSS = `
 
   .nk-table tbody tr:last-child td { border-bottom: none; }
 
+  /* Phones: tables keep only their important columns and actions. A table lists the columns
+     to drop as classes ("m-hide-3" drops the 3rd: hideColumnRules, src/lib/mobileTable.js),
+     one cell or button can carry "m-hide", and "m-act" pins the last (actions) column to the
+     right edge while the rest scrolls under it. */
+  @media (max-width: 640px) {
+    .nk-table td, .nk-table thead th { padding: 8px 9px; }
+    .nk-table thead th { font-size: 9px; letter-spacing: .8px; }
+    .nk-table td { font-size: 12px; max-width: 60vw; }
+    .nk-table .m-hide,
+    ${hideColumnRules(".nk-table")} { display: none !important; }
+    .nk-table.m-act tr > :last-child:not([colspan]) { position: sticky; right: 0; z-index: 1; background: ${N.navy800}; box-shadow: -12px 0 12px -12px var(--nk-shadow); }
+    .nk-table.m-act thead tr > :last-child { background: ${N.navy700}; z-index: 2; }
+    .nk-row-actions { gap: 4px; }
+    .nk-table .nk-btn-sm { height: 34px; }
+    .nk-table .nk-btn-sm.has-icon, .nk-table .nk-btn-sm.icon-only { width: 34px; }
+  }
+
+  /* Scanner guest list on phones (<GuestList compact>): one short row per card, one button */
+  .nk-gl { background: ${N.navy800}; border: 1px solid ${N.border}; border-radius: 14px; overflow: hidden; }
+  .nk-gl-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid ${alpha(N.border,"44")}; }
+  .nk-gl-row:last-child { border-bottom: none; }
+  .nk-gl-n { min-width: 22px; flex-shrink: 0; text-align: right; font: 600 11px 'JetBrains Mono', monospace; color: ${N.textDim}; }
+  .nk-gl-main { flex: 1; min-width: 0; }
+  .nk-gl-name { display: block; width: 100%; padding: 0; border: none; background: none; text-align: left; cursor: pointer;
+    font: 700 14px 'Plus Jakarta Sans', sans-serif; color: ${N.text}; overflow-wrap: anywhere; }
+  div.nk-gl-name { cursor: default; }
+  .nk-gl-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .nk-gl-tag { padding: 2px 7px; border-radius: 6px; border: 1px solid ${N.border}; background: ${N.navy700}; color: ${N.textMid};
+    font: 700 10px 'JetBrains Mono', monospace; letter-spacing: .4px; text-transform: uppercase; }
+  .nk-gl-note { margin-top: 3px; font-size: 11px; color: ${N.textDim}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nk-gl-act { flex-shrink: 0; min-width: 104px; min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1.5px solid;
+    font: 800 12px 'Plus Jakarta Sans', sans-serif; cursor: pointer; }
+  .nk-gl-act.pending { background: ${N.green}; border-color: ${N.green}; color: #fff; }
+  .nk-gl-act.partial { background: ${alpha(N.amber,"22")}; border-color: ${N.amber}; color: ${N.amber}; }
+  .nk-gl-act.complete { background: ${alpha(N.red,"14")}; border-color: ${alpha(N.red,"88")}; color: ${N.red}; cursor: default; }
+  .nk-gl-act:disabled:not(.complete) { opacity: .5; cursor: wait; }
+  .nk-gl-chips { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 10px; padding-bottom: 2px; scrollbar-width: none; }
+  .nk-gl-chips::-webkit-scrollbar { display: none; }
+  .nk-gl-chips > button { flex-shrink: 0; white-space: nowrap; }
+
   /* Badges */
   .nk-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
   .badge-idle    { background: ${N.navy700}; color: ${N.textDim}; border: 1px solid ${N.border}; }
@@ -571,6 +611,51 @@ const CSS = `
   .toast-warn    { background: ${N.amberBg}; color: ${N.amber}; border: 1px solid ${alpha(N.amber,"44")}; }
   .toast-info    { background: ${N.navy600}; color: ${N.sky}; border: 1px solid ${alpha(N.sky,"44")}; }
   @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  /* ── Phones (≤760px): bottom navigation ──
+     The bar holds up to four sections (phoneNavGroups in src/lib/permissions.js) and More,
+     which opens the full menu as a sheet from the bottom. A section with several pages lists
+     them in a row under the header (.nk-subnav). On the Scanner tab the scanner's own bar
+     (Statistics / Scan / Guests / Menu) takes this one's place. These rules sit after the
+     toast and activity rules on purpose, so they win. */
+  .nk-bottomnav, .nk-subnav { display: none; }
+  .nk-drawer-text { flex: 1; }
+  @keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  @media (max-width: 760px) {
+    .nk-menu-btn { display: none; }
+    .nk-body { padding-bottom: calc(70px + env(safe-area-inset-bottom, 0px)); }
+    .nk-bottomnav { display: flex; gap: 2px; position: fixed; left: 0; right: 0; bottom: 0; z-index: 400;
+      background: ${N.navy800}; border-top: 1px solid ${N.border}; box-shadow: 0 -6px 20px var(--nk-shadow);
+      padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
+    body:has(.sp-tabbar) .nk-bottomnav { display: none; }
+    .nk-bn-item { flex: 1; min-width: 0; min-height: 52px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+      border: none; border-radius: 12px; background: transparent; color: ${N.textDim}; cursor: pointer;
+      font: 700 11px 'Plus Jakarta Sans', sans-serif; white-space: nowrap; }
+    .nk-bn-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+    .nk-bn-ic { position: relative; display: grid; place-items: center; padding: 3px 14px; border-radius: 10px; font-size: 20px; line-height: 1; }
+    .nk-bn-item.on { color: ${N.sky}; }
+    .nk-bn-item.on .nk-bn-ic { background: ${alpha(N.accent,"22")}; }
+    .nk-bn-item:focus-visible { outline: 2px solid ${N.accent}; outline-offset: -2px; }
+    .nk-bn-badge { position: absolute; top: -5px; right: 4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+      background: ${N.red}; color: #fff; font: 800 10px/16px 'Plus Jakarta Sans', sans-serif; }
+    .nk-subnav { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; position: sticky; top: 58px; z-index: 90;
+      padding: 8px 14px; background: ${N.navy800}; border-bottom: 1px solid ${N.border}; }
+    .nk-subnav::-webkit-scrollbar { display: none; }
+    .nk-subnav-item { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; border-radius: 18px;
+      border: 1px solid ${N.border}; background: transparent; color: ${N.textMid}; font: 600 13px 'Plus Jakarta Sans', sans-serif; white-space: nowrap; cursor: pointer; }
+    .nk-subnav-item.on { border-color: ${N.accent}; background: ${alpha(N.accent,"22")}; color: ${N.sky}; }
+    .nk-toast { left: 12px; right: 12px; max-width: none; bottom: calc(82px + env(safe-area-inset-bottom, 0px)); }
+    .nk-activity { left: 12px; right: 12px; width: auto; max-width: none; bottom: calc(82px + env(safe-area-inset-bottom, 0px)); }
+    /* More: the full menu slides up from the bottom, each section's pages as tiles */
+    .nk-drawer { top: auto; right: 0; width: auto; max-height: 88vh; border-right: none; border-top: 1px solid ${N.border};
+      border-radius: 18px 18px 0 0; padding-top: 14px; animation: sheetUp .22s ease; box-shadow: 0 -10px 40px var(--nk-shadow); }
+    .nk-drawer-items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 2px 4px 4px; }
+    .nk-drawer-items .nk-drawer-item { position: relative; flex-direction: column; justify-content: center; gap: 6px; min-height: 70px; padding: 8px 4px;
+      text-align: center; font-size: 12px; background: ${N.navy700}; }
+    .nk-drawer-items .nk-drawer-item .nk-icon { font-size: 20px; }
+    .nk-drawer-items .nk-drawer-text { flex: none; }
+    .nk-drawer-items .nk-count { position: absolute; top: 6px; right: 6px; margin: 0; }
+  }
 
   input[type=range] { width: 100%; accent-color: ${N.accent}; margin-bottom: 6px; }
 
@@ -923,7 +1008,7 @@ function SmsBadge({ status, reason }) {
 // Compact icon-style action button used inside table rows (WA/SMS/download/edit actions)
 // Its text is wrapped in .nk-sb-label, which tables hide (icon-only buttons there), and
 // the text + `title` become the tooltip and accessible name so the action is always described.
-function Sb({ bg, col, border, children, onClick, title, disabled, label }) {
+function Sb({ bg, col, border, children, onClick, title, disabled, label, className }) {
   const icons = [], text = [];
   const walk = (node) => Children.toArray(node).forEach(c => {
     if (isValidElement(c) && c.type === Fragment) walk(c.props.children);
@@ -936,7 +1021,7 @@ function Sb({ bg, col, border, children, onClick, title, disabled, label }) {
   const tip  = name && title && title !== name ? `${name} — ${title}` : (name || title);
   const hasText = text.some(c => typeof c !== "string" || c.trim());
   return (
-    <button type="button" className={`nk-btn-sm${icons.length ? (hasText ? " has-icon" : " icon-only") : ""}`} onClick={onClick} title={tip} aria-label={tip} disabled={disabled}
+    <button type="button" className={`nk-btn-sm${icons.length ? (hasText ? " has-icon" : " icon-only") : ""}${className ? ` ${className}` : ""}`} onClick={onClick} title={tip} aria-label={tip} disabled={disabled}
       style={{ background:bg, color:col, borderColor:border||alpha(col,"44"), opacity:disabled?0.5:1 }}>
       {icons}
       {hasText && <span className="nk-sb-label">{text}</span>}
@@ -988,7 +1073,7 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
             {rec.waStatus===WA.sending?<><Icon n="loader" /></>:<><Icon n="whatsapp" /></>} WA
           </Sb>}
           {rec.phone && <Sb bg={N.tealBg} col={N.teal} border={alpha(N.teal,"44")} onClick={()=>onSendSms(idx)} label="Send SMS"><Icon n="sms" /> SMS</Sb>}
-          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)} label="Download card as PNG"><Icon n="download" /> PNG</Sb>
+          <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")} onClick={()=>onDownload(idx)} label="Download card as PNG" className="m-hide"><Icon n="download" /> PNG</Sb>
         </div>
       </td>
     </tr>
@@ -2021,7 +2106,7 @@ function AccountsModal({ fin, onClose }) {
             {editId && <button className="nk-btn nk-btn-ghost" onClick={() => { setEditId(null); setForm(BLANK_ACCOUNT); }}>Cancel</button>}
           </div>
           <div className="nk-table-wrap" style={{margin:0}}>
-            <table className="nk-table">
+            <table className="nk-table m-hide-2 m-hide-3 m-act">
               <thead><tr><th>Account</th><th className="num">In</th><th className="num">Out</th><th className="num">Net</th><th></th></tr></thead>
               <tbody>
                 {fin.accounts.map(a => {
@@ -2123,7 +2208,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
         <div style={{flex:"2 1 520px",minWidth:0}}>
           <input className="nk-input" style={{maxWidth:320,marginBottom:10}} placeholder="Search event, customer, venue…" value={q} onChange={e => setQ(e.target.value)} />
           <div className="nk-table-wrap" style={{margin:0}}>
-            <table className="nk-table">
+            <table className="nk-table m-hide-2 m-hide-3">
               <thead><tr><th>Event</th><th className="num">Income</th><th className="num">Expenses</th><th className="num">Profit</th><th>Margin</th></tr></thead>
               <tbody>
                 {rows.map(({ ev: e, s }) => (
@@ -2681,7 +2766,7 @@ function UsersSettings({ access, askDialog, myEmail }) {
         {canEdit && <button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}><Icon n="plus" /> Invite user</button>}
       </div>
       <div className="nk-table-wrap">
-        <table className="nk-table">
+        <table className="nk-table m-hide-4 m-hide-5 m-act">
           <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last seen</th><th>Invited by</th>{canEdit && <th></th>}</tr></thead>
           <tbody>
             {list.map(u => {
@@ -2824,7 +2909,9 @@ function PermissionsSettings({ access }) {
   );
 }
 
-// One editable list (templates / sender IDs / card types) with an inline add/edit form
+// One editable list (templates / sender IDs / card types) with an inline add/edit form.
+// columns: [{ h, cell(row), num?, opt? }] — `opt` columns are left out on phones.
+const listColClass = (c) => [c.num && "num", c.opt && "m-hide"].filter(Boolean).join(" ") || undefined;
 function ListEditor({ title, hint, rows, columns, blank, renderForm, validate, onSave, onDelete, onDefault, canEdit, busy, rowKey = "id", rowLabel }) {
   const canDelete = useCanDelete();
   const [form, setForm] = useState(null);
@@ -2850,12 +2937,12 @@ function ListEditor({ title, hint, rows, columns, blank, renderForm, validate, o
         </div>
       )}
       <div className="nk-table-wrap">
-        <table className="nk-table">
-          <thead><tr>{columns.map(c => <th key={c.h} className={c.num ? "num" : undefined}>{c.h}</th>)}{canEdit && <th></th>}</tr></thead>
+        <table className={canEdit ? "nk-table m-act" : "nk-table"}>
+          <thead><tr>{columns.map(c => <th key={c.h} className={listColClass(c)}>{c.h}</th>)}{canEdit && <th></th>}</tr></thead>
           <tbody>
             {rows.map(r => (
               <tr key={r[rowKey]} style={r.active === false ? { opacity: .55 } : undefined}>
-                {columns.map(c => <td key={c.h} className={c.num ? "num" : undefined}>{c.cell(r)}</td>)}
+                {columns.map(c => <td key={c.h} className={listColClass(c)}>{c.cell(r)}</td>)}
                 {canEdit && (
                   <td><div className="nk-row-actions">
                     {onDefault && !r.is_default && <Sb bg="transparent" col={N.amber} border={N.border} label={`Make ${rowLabel(r)} the default`} onClick={() => onDefault(r)}><Icon n="check" /> Default</Sb>}
@@ -2889,8 +2976,8 @@ function TemplatesSettings({ access, askDialog }) {
       blank={{ name: "", label: "", account: "", has_image_header: true, preview: "", active: true, sort: access.waTemplates.length + 1 }}
       columns={[
         { h: "Template", cell: t => <><div style={{fontWeight:700,color:N.text,fontFamily:"JetBrains Mono, monospace"}}>{t.name}</div><div style={{fontSize:11,color:N.textDim}}>{t.label || "—"}</div></> },
-        { h: "Account",  cell: t => t.account || <span style={{color:N.textDim}}>{access.settings.wa_account} (default)</span> },
-        { h: "Card image", cell: t => t.has_image_header ? <Pill tone="good">Yes</Pill> : <Pill tone="info">No</Pill> },
+        { h: "Account",  opt: true, cell: t => t.account || <span style={{color:N.textDim}}>{access.settings.wa_account} (default)</span> },
+        { h: "Card image", opt: true, cell: t => t.has_image_header ? <Pill tone="good">Yes</Pill> : <Pill tone="info">No</Pill> },
         { h: "Status",   cell: t => <>{t.is_default && <Pill tone="warn">Default</Pill>} {t.active ? <Pill tone="good">Active</Pill> : <Pill tone="bad">Off</Pill>}</> },
       ]}
       validate={f => validateTemplate(f, access.waTemplates)}
@@ -2922,7 +3009,7 @@ function SendersSettings({ access, askDialog }) {
       blank={{ sender_id: "", label: "", active: true }}
       columns={[
         { h: "Sender ID", cell: s => <span style={{fontWeight:700,color:N.text,fontFamily:"JetBrains Mono, monospace"}}>{s.sender_id}</span> },
-        { h: "Label",     cell: s => s.label || "—" },
+        { h: "Label",     opt: true, cell: s => s.label || "—" },
         { h: "Status",    cell: s => <>{s.is_default && <Pill tone="warn">Default</Pill>} {s.active ? <Pill tone="good">Active</Pill> : <Pill tone="bad">Off</Pill>}</> },
       ]}
       validate={f => validateSenderId(f, access.senderIds)}
@@ -2977,7 +3064,7 @@ function CardTypeSettings({ access, askDialog }) {
         columns={[
           { h: "Card type", cell: r => <span style={{fontWeight:700,color:N.text}}>{r.name}</span> },
           { h: "Admits", num: true, cell: r => <strong style={{color:N.green}}>{peopleLabel(r.people)}</strong> },
-          { h: "Note", cell: r => r.label || "—" },
+          { h: "Note", opt: true, cell: r => r.label || "—" },
         ]}
         validate={f => validateCardRule(f, access.cardRules)}
         onSave={f => access.save("card_type_rules", { id: f.id, name: f.name.trim(), people: Number(f.people), label: f.label?.trim() || null, sort: Number(f.sort) || 0 }, "card type")}
@@ -3274,7 +3361,7 @@ function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit
         {!canEdit && <span style={{fontSize:12,color:N.textDim,alignSelf:"center"}}><Icon n="lock" /> Your role can view but not change this schedule</span>}
       </div>
       <div className="nk-table-wrap">
-        <table className="nk-table">
+        <table className="nk-table m-hide-1 m-hide-6 m-hide-7">
           <thead><tr>{["#", "When", "Status", "Sent", "Failed", "Skipped", "Detail"].map(h => <th key={h}>{h}</th>)}</tr></thead>
           <tbody>
             {runs.map((r, i) => (
@@ -3798,7 +3885,7 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
               action={(onCurrent || !list.length) && (canSms || canWa) ? <button className="nk-btn nk-btn-primary" onClick={newSchedule}><Icon n="plus" /> New schedule</button> : null} />
           ) : (
             <div className="nk-table-wrap">
-              <table className="nk-table">
+              <table className="nk-table m-hide-2 m-hide-4 m-hide-5 m-hide-7 m-act">
                 <thead><tr>{["Name", "Event", "Channel", "When", "Who", "Next send", "Done", "Status", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
                 <tbody>
                   {shown.map(s => {
@@ -4165,7 +4252,7 @@ function FeedbackTab({ access, events, askDialog, showToast }) {
               text={list.length ? "Change the filters to see more." : "Users send feedback with the Feedback button at the top of the page."} />
           ) : (
             <div className="nk-table-wrap">
-              <table className="nk-table">
+              <table className="nk-table m-hide-2 m-hide-4 m-hide-6 m-act">
                 <thead><tr>{["When", "From", "Kind", "Rating", "Message", "Page", "Status", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
                 <tbody>
                   {shown.map(f => (
@@ -4309,7 +4396,7 @@ function ProviderLog({ fetchLogs, today }) {
       ) : rows.length ? (
         <>
           <div className="nk-table-wrap">
-            <table className="nk-table">
+            <table className="nk-table m-hide-3 m-hide-4 m-hide-6 m-hide-7">
               <thead><tr>{["Sent", "To", "From", "Channel", "Status", "Reason", "Done"].map(h => <th key={h}>{h}</th>)}</tr></thead>
               <tbody>
                 {rows.map((r, i) => (
@@ -4427,7 +4514,7 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
 
       {view === "guests" && (
         <div className="nk-table-wrap">
-          <table className="nk-table">
+          <table className="nk-table m-hide-1 m-hide-3 m-hide-4">
             <thead><tr>{["#", "Name", "Card Type", "Phone", "WhatsApp", "SMS"].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>
               {guests.map((rec, i) => (
@@ -4468,7 +4555,7 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
                   text={deliveries.rows.length ? "Change the filters to see more." : "Every SMS and WhatsApp sent from now on is listed here with its delivery result."} />
               : (
                 <div className="nk-table-wrap">
-                  <table className="nk-table">
+                  <table className="nk-table m-hide-3 m-hide-5 m-hide-7 m-hide-8 m-hide-9">
                     <thead><tr>{["Sent", "Guest", "Phone", "Channel", "Message", "Status", "Reason / note", "Done", "Via"].map(h => <th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
                       {log.slice(0, 500).map(d => (
@@ -4498,8 +4585,21 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
   );
 }
 
-function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded }) {
+// The door check-in tab. Wide screens show it all on one page. Phones (SCANNER_PHONE) show
+// one view at a time with a bottom tab bar: Statistics (totals, cards by size, report, recent
+// scans), Scan (camera + search) and Guests (compact list, one check-in button per card).
+const SCAN_VIEWS = [
+  { key: "stats", label: "Statistics", icon: "chart" },
+  { key: "scan",  label: "Scan",       icon: "scan" },
+  { key: "list",  label: "Guests",     icon: "users" },
+];
+const SCAN_VIEW_TITLE = { stats: "Check-in statistics", scan: "Scan a card", list: "Guest list" };
+function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded, onMenu }) {
   const { cards, error, load, patch } = useEventCards(eventId);
+  const phone = useMediaQuery(SCANNER_PHONE);
+  const [view, setView] = useState("scan");          // phones: stats | scan | list
+  const [camSignal, setCamSignal] = useState(0);     // bumped when the Scan tab is tapped: opens the camera
+  const [downloading, setDownloading] = useState(false);
   const [commenting, setCommenting] = useState(null);
   const canComment = access.setupMissing || access.can("calls", "edit") || access.can("scanner", "edit");
   const canImport  = access.setupMissing || access.can("calls", "edit") || access.can("design", "edit") || access.can("batch", "edit");
@@ -4521,7 +4621,7 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
     const { data } = await supabase.from("scan_logs").select("*").eq("event_id", eventId).order("scanned_at", { ascending: false }).limit(15);
     setRecent(data || []);
   };
-  useEffect(() => { loadRecent(); }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- loads data from the database
+  useEffect(() => { loadRecent(); }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps -- loads data from the database
   if (!eventId) return <div className="nk-page"><NoEventOpen what="The scanner" onGo={onGo} /></div>;
   if (error) return (
     <div className="nk-page" style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
@@ -4530,8 +4630,7 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
         action={<button className="nk-btn nk-btn-ghost" onClick={load}><Icon n="refresh" /> Retry</button>} />
     </div>
   );
-  const totals = scanTotals(cards || []);
-  const counts = guestCounts(cards || []);
+  const stats = scanBreakdown(cards || []);
   const byId = Object.fromEntries((cards || []).map(c => [c.id, c]));
   const findCard = async ({ id, name, cardType }) => {
     if (id) {
@@ -4547,6 +4646,91 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
     loadRecent();
     return data?.[0] || {};
   };
+  // Phones: switch view; tapping Scan from another view opens the camera straight away
+  const goView = (v) => {
+    if (v === "menu") { onMenu?.(); return; }      // the app's full menu (its bottom bar hides on this tab)
+    if (v === view) return;
+    if (v === "scan") setCamSignal(n => n + 1);
+    setView(v);
+    window.scrollTo?.(0, 0);
+  };
+  // The check-in report (Excel): every guest with card size, how many entered, last scan, comment
+  const downloadReport = async () => {
+    setDownloading(true);
+    try {
+      const XLSX = await loadXlsx();
+      const ws = XLSX.utils.json_to_sheet(scanReportRows(cards || [], fmtWhen));
+      const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Check-in");
+      XLSX.writeFile(wb, `${(eventRow?.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_")}_Checkin_${localDate()}.xlsx`);
+    } catch (e) { showToast(`Could not build the report: ${e.message}`, "warn"); }
+    finally { setDownloading(false); }
+  };
+
+  const tools = (
+    <>
+      <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => { load(); loadRecent(); }}><Icon n="refresh" /> Refresh</button>
+      {!phone && cards?.length > 0 && (
+        <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={downloadReport} disabled={downloading}>
+          <Icon n={downloading ? "loader" : "download"} /> Check-in report
+        </button>
+      )}
+      {canImport && <GuestImport eventId={eventId} cards={cards || []} showToast={showToast} logHistory={logHistory} onAdded={(rows) => { load(); onGuestsAdded?.(rows); }} />}
+      {canScan && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="link" /> Share scan page{eventRow?.scan_code ? " (on)" : ""}</button>}
+    </>
+  );
+  const placeholder = cards === null ? <EmptyState loading title="Loading guest list…" />
+    : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." action={<button className="nk-btn nk-btn-ghost" onClick={() => onGo("design")}><Icon n="palette" /> Go to Design</button>} />
+    : null;
+  const scanner = cards?.length > 0 && (
+    <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests."
+      section={phone ? (view === "stats" ? "none" : view) : "all"} startSignal={camSignal}
+      renderBelow={({ begin, busy }) => <GuestList compact={phone} cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} onComment={canComment ? setCommenting : null} />} />
+  );
+  const recentScans = recent.length > 0 && (
+    <div className="nk-table-wrap" style={{marginTop:16}}>
+      <table className="nk-table m-hide-5">
+        <thead><tr><th>Time</th><th>Guest</th><th className="num">People</th><th>Result</th><th>By</th></tr></thead>
+        <tbody>
+          {recent.map(r => (
+            <tr key={r.id}>
+              <td style={{fontSize:12,color:N.textDim}}>{fmtWhen(r.scanned_at)}</td>
+              <td style={{fontWeight:600}}>{byId[r.event_card_id]?.name || "Unknown card"}</td>
+              <td className="num">{r.people}</td>
+              <td>{r.accepted ? <Pill tone="good">Admitted</Pill> : <Pill tone="bad">{SCAN_REASON[r.reason] || r.reason}</Pill>}</td>
+              <td style={{fontSize:12,color:N.textDim}}>{r.scanned_by || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+  const popups = (
+    <>
+      {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)} onSave={(text) => saveComment(commenting, text)} />}
+      {sharing && <ShareScanModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
+    </>
+  );
+
+  if (phone) return (
+    <div className="nk-page" style={{padding:"0 0 calc(100px + env(safe-area-inset-bottom, 0px))"}}>
+      <div style={{marginBottom:12}}>
+        <h2 style={{fontSize:18,fontWeight:800,color:N.text}}>{SCAN_VIEW_TITLE[view]}</h2>
+        <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{eventRow?.username}</p>
+      </div>
+      {view === "stats" && (
+        <>
+          <ScanStats stats={stats} onDownload={cards?.length ? downloadReport : null} downloading={downloading} />
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:12}}>{tools}</div>
+          {recentScans}
+        </>
+      )}
+      {view !== "stats" && placeholder}
+      {scanner}
+      {popups}
+      <ScanTabBar tabs={onMenu ? [...SCAN_VIEWS, { key: "menu", label: "Menu", icon: "menu" }] : SCAN_VIEWS} view={view} onChange={goView} />
+    </div>
+  );
+
   return (
     <div className="nk-page" style={{padding:"0 0 40px",maxWidth:1200}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:16,flexWrap:"wrap",gap:12}}>
@@ -4554,42 +4738,17 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
           <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Door check-in</h2>
           <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{eventRow?.username} · scan the QR code on each card, or search by name</p>
         </div>
-        <div style={{display:"flex",gap:8}}>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => { load(); loadRecent(); }}><Icon n="refresh" /> Refresh</button>
-          {canImport && <GuestImport eventId={eventId} cards={cards || []} showToast={showToast} logHistory={logHistory} onAdded={(rows) => { load(); onGuestsAdded?.(rows); }} />}
-          {canScan && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="link" /> Share scan page{eventRow?.scan_code ? " (on)" : ""}</button>}
-        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{tools}</div>
       </div>
       <div className="nk-stats">
-        <MoneyTile label="People entered" value={`${totals.entered} / ${totals.people}`} tone="good" sub={totals.people ? `${Math.round(totals.entered / totals.people * 100)}% arrived` : null} />
-        <MoneyTile label="Cards fully used" value={`${totals.complete} / ${totals.cards}`} tone="info" />
-        <MoneyTile label="Still expected" value={Math.max(0, totals.people - totals.entered)} tone="warn" />
-        <MoneyTile label="Guests scanned" value={`${counts.scanned} / ${totals.cards}`} tone="good" sub={`${counts.waiting} not scanned yet`} />
+        <MoneyTile label="People entered" value={`${stats.entered} / ${stats.people}`} tone="good" sub={stats.people ? `${Math.round(stats.entered / stats.people * 100)}% arrived` : null} />
+        <MoneyTile label="Cards fully used" value={`${stats.complete} / ${stats.cards}`} tone="info" sub={`${stats.single} single · ${stats.double} double · ${stats.group} group`} />
+        <MoneyTile label="Still expected" value={Math.max(0, stats.people - stats.entered)} tone="warn" />
+        <MoneyTile label="Guests scanned" value={`${stats.scanned} / ${stats.cards}`} tone="good" sub={`${stats.notScanned} not scanned yet`} />
       </div>
-      {cards === null ? <EmptyState loading title="Loading guest list…" />
-        : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." action={<button className="nk-btn nk-btn-ghost" onClick={() => onGo("design")}><Icon n="palette" /> Go to Design</button>} />
-        : <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests."
-            renderBelow={({ begin, busy }) => <GuestList cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} onComment={canComment ? setCommenting : null} />} />}
-      {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)} onSave={(text) => saveComment(commenting, text)} />}
-      {recent.length > 0 && (
-        <div className="nk-table-wrap" style={{marginTop:16}}>
-          <table className="nk-table">
-            <thead><tr><th>Time</th><th>Guest</th><th className="num">People</th><th>Result</th><th>By</th></tr></thead>
-            <tbody>
-              {recent.map(r => (
-                <tr key={r.id}>
-                  <td style={{fontSize:12,color:N.textDim}}>{fmtWhen(r.scanned_at)}</td>
-                  <td style={{fontWeight:600}}>{byId[r.event_card_id]?.name || "Unknown card"}</td>
-                  <td className="num">{r.people}</td>
-                  <td>{r.accepted ? <Pill tone="good">Admitted</Pill> : <Pill tone="bad">{SCAN_REASON[r.reason] || r.reason}</Pill>}</td>
-                  <td style={{fontSize:12,color:N.textDim}}>{r.scanned_by || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {sharing && <ShareScanModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
+      {placeholder || scanner}
+      {popups}
+      {recentScans}
     </div>
   );
 }
@@ -4648,7 +4807,7 @@ function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
             <>
               <div style={{fontSize:13,fontWeight:700,color:N.amber,marginBottom:6}}><Icon n="alert" /> These names with the same phone number already exist and will be skipped</div>
               <div className="nk-table-wrap" style={{maxHeight:220,overflowY:"auto",marginBottom:14}}>
-                <table className="nk-table">
+                <table className="nk-table m-hide-2">
                   <thead><tr>{th("Name")}{th("Phone")}{th("Card type")}{th("Why skipped")}</tr></thead>
                   <tbody>{plan.skip.map((s, i) => (
                     <tr key={i}><td style={{fontWeight:600}}>{s.row.name}</td><td>{s.row.phone || "—"}</td><td>{s.row.cardType || "—"}</td><td><Pill tone="warn">{s.reason}</Pill></td></tr>
@@ -4686,14 +4845,62 @@ function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
 
 // Scanner guest list: every saved card for the event (sent or only uploaded), with live scan
 // state. Filters as you type and by state; "Check in" uses ScanPanel's flow (count prompt).
+// compact (phones): one short row per card — number, name, card type and "in / admits"
+// badges, and a single button: Check in (nobody yet), Check in more (some in), Fully in.
+// Tapping the name adds or edits the guest's comment.
 const GUEST_FILTERS = [["all", "All"], ["waiting", "Not scanned"], ["partial", "Partly in"], ["complete", "Fully in"], ["entered", "Scanned"]];
-function GuestList({ cards = [], canScan, busy, onCheckIn, onComment }) {
+const GUEST_ACTION = { pending: "Check in", partial: "Check in more", complete: "Fully in" };
+function GuestList({ cards = [], canScan, busy, onCheckIn, onComment, compact }) {
   const [q, setQ] = useState("");
   const [state, setState] = useState("all");
   const rows = filterGuests(cards, { q, state });
   const count = (k) => k === "all" ? cards.length : filterGuests(cards, { state: k }).length;
   const tone = { pending: "warn", partial: "info", complete: "good" };
-  const word = { pending: "Not scanned", partial: "Partly in", complete: "Fully in" };
+  const countColor = { pending: N.textDim, partial: N.amber, complete: N.green };
+  const filters = (
+    <div className={compact ? "nk-gl-chips" : undefined} style={compact ? undefined : {display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}} role="group" aria-label="Show guests">
+      {GUEST_FILTERS.map(([k, l]) => (
+        <button key={k} type="button" className={`nk-btn ${state === k ? "nk-btn-primary" : "nk-btn-ghost"}`} style={{fontSize:12,padding:"5px 10px"}}
+          aria-pressed={state === k} onClick={() => setState(k)}>{l} ({count(k)})</button>
+      ))}
+    </div>
+  );
+  if (compact) return (
+    <div>
+      <input className="nk-input" type="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Search name, card type or phone" aria-label="Filter guests" style={{width:"100%",marginBottom:10}} />
+      {filters}
+      {!rows.length ? <EmptyState compact icon="search" title="No guests match" text="Change the filter or clear the search." /> : (
+        <div className="nk-gl">
+          {rows.map((c, i) => {
+            const st = scanStatus(c.scan_count, c.max_scans);
+            const tip = st === "complete" ? `Everyone on ${c.name}'s card has entered` : `Check in ${c.name} (${placesLeft(c.scan_count, c.max_scans)} left)`;
+            return (
+              <div key={c.id} className="nk-gl-row">
+                <span className="nk-gl-n">{i + 1}</span>
+                <div className="nk-gl-main">
+                  {onComment
+                    ? <button type="button" className="nk-gl-name" onClick={() => onComment(c)} title={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`}>
+                        {c.name || "—"} <Icon n="note" style={{color:c.call_comment ? N.sky : N.textDim,fontSize:12}} />
+                      </button>
+                    : <div className="nk-gl-name">{c.name || "—"}</div>}
+                  <div className="nk-gl-tags">
+                    <span className="nk-gl-tag">{c.card_type || "No type"}</span>
+                    <span className="nk-gl-tag" style={{color:countColor[st],borderColor:alpha(countColor[st],"55")}}>{c.scan_count || 0} / {c.max_scans || 1}</span>
+                  </div>
+                  {c.call_comment && <div className="nk-gl-note">{c.call_comment}</div>}
+                </div>
+                {canScan && (
+                  <button type="button" className={`nk-gl-act ${st}`} disabled={busy || st === "complete"} onClick={() => onCheckIn(c)} aria-label={tip} title={tip}>
+                    {GUEST_ACTION[st]}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
   return (
     <div style={{marginTop:16}}>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
@@ -4702,15 +4909,10 @@ function GuestList({ cards = [], canScan, busy, onCheckIn, onComment }) {
           <input className="nk-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Filter by name, card type or phone" aria-label="Filter guests" style={{width:"100%"}} />
         </div>
       </div>
-      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}} role="group" aria-label="Show guests">
-        {GUEST_FILTERS.map(([k, l]) => (
-          <button key={k} className={`nk-btn ${state === k ? "nk-btn-primary" : "nk-btn-ghost"}`} style={{fontSize:12,padding:"5px 10px"}}
-            aria-pressed={state === k} onClick={() => setState(k)}>{l} ({count(k)})</button>
-        ))}
-      </div>
+      {filters}
       {!rows.length ? <EmptyState compact icon="search" title="No guests match" text="Change the filter or clear the search." /> : (
         <div className="nk-table-wrap">
-          <table className="nk-table">
+          <table className="nk-table m-hide-3 m-hide-4 m-hide-7 m-hide-8 m-act">
             <thead><tr><th>Guest</th><th>Card type</th><th>Phone</th><th>Card</th><th className="num">Entered</th><th>Status</th><th>Comment</th><th>Last scan</th><th></th></tr></thead>
             <tbody>
               {rows.map(c => {
@@ -4722,7 +4924,7 @@ function GuestList({ cards = [], canScan, busy, onCheckIn, onComment }) {
                     <td style={{fontSize:12,color:N.textDim}}>{c.phone || "—"}</td>
                     <td>{cardSource(c) === "sent" ? <Pill tone="good">Sent</Pill> : <Pill tone="info">Uploaded</Pill>}</td>
                     <td className="num">{c.scan_count || 0} / {c.max_scans || 1}</td>
-                    <td><Pill tone={tone[st]}>{word[st]}</Pill></td>
+                    <td><Pill tone={tone[st]}>{SCAN_STATE_LABEL[st]}</Pill></td>
                     <td>
                       <div className="nk-row-actions">
                         <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
@@ -4903,7 +5105,7 @@ function StorageSettings({ access, askDialog, showToast }) {
             </div>
             <StorageBar pct={u.pct} />
             <div className="nk-table-wrap" style={{marginTop:14}}>
-              <table className="nk-table">
+              <table className="nk-table m-hide-4 m-hide-5 m-act">
                 <thead><tr><th>What</th><th className="num">Files</th><th className="num">Size</th><th>Oldest</th><th>Newest</th><th></th></tr></thead>
                 <tbody>
                   {!u.rows.length && <tr><td colSpan={6} style={{color:N.textDim}}>Nothing stored yet</td></tr>}
@@ -5103,7 +5305,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
         {filters.map(([k, l]) => <button key={k} style={segStyle(filter.status === k)} onClick={() => setFilter(f => ({ ...f, status: k }))}>{l}</button>)}
       </div>
       <div className="nk-table-wrap">
-        <table className="nk-table">
+        <table className="nk-table m-hide-5">
           <thead><tr><th>Guest</th><th>Phone</th><th>Answer</th><th>Comment</th><th>Updated</th></tr></thead>
           <tbody>
             {rows.map(c => (
@@ -5114,7 +5316,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                     <div className="nk-row-actions">
                       <a className="nk-btn-sm icon-only" href={`tel:+${normalisePhone(c.phone)}`} aria-label={`Call ${c.name}`} title={`Call ${c.name}`}
                         style={{background:N.greenBg,color:N.green,borderColor:alpha(N.green,"44"),width:30,height:30,padding:0,justifyContent:"center",textDecoration:"none"}}><Icon n="phone" /></a>
-                      <span style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>+{normalisePhone(c.phone)}</span>
+                      <span className="m-hide" style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>+{normalisePhone(c.phone)}</span>
                     </div>
                   ) : <span style={{color:N.textDim,fontSize:12}}>No phone</span>}
                 </td>
@@ -5236,7 +5438,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
 
       <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
         <div className="nk-table-wrap" style={{flex:"2 1 560px",margin:0}}>
-          <table className="nk-table">
+          <table className="nk-table m-hide-2 m-hide-3 m-hide-4">
             <thead><tr>{["Lead","Event","Package","Region","Stage","Next follow-up"].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>
               {rows.map(l => (
@@ -5374,7 +5576,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
 
       <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
         <div className="nk-table-wrap" style={{flex:"2 1 480px",margin:0}}>
-          <table className="nk-table">
+          <table className="nk-table m-hide-2 m-hide-4">
             <thead><tr>{["Customer","Region","Events","Since"].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>
               {rows.map(c => (
@@ -6145,6 +6347,19 @@ export default function App() {
   const extraNote = (msgId, rec) => deliveryNote(deliveryIndex.byExtra.get(`${msgId}|${recipientKey(rec)}`));
   const navGroups = (access.setupMissing ? NAV_GROUPS : visibleNav(NAV_GROUPS, access.matrix, access.role))
     .filter(g => !g.eventOnly || savedEventId);
+  // Phones: the bottom bar's sections, the open tab's section, and the page used last in each
+  // section (a tap on a section goes back there)
+  const phoneGroups = phoneNavGroups(navGroups);
+  const currentGroup = groupOfTab(navGroups, tab);
+  const currentSection = currentGroup?.label;
+  const lastTabRef = useRef({});
+  useEffect(() => { if (currentSection) lastTabRef.current[currentSection] = tab; }, [tab, currentSection]);
+  // Phones: the section's row of pages scrolls sideways to show the open one
+  const subnavRef = useRef(null);
+  useEffect(() => {
+    const nav = subnavRef.current, on = nav?.querySelector(".on");
+    if (on) nav.scrollLeft = on.offsetLeft - (nav.clientWidth - on.offsetWidth) / 2;
+  }, [tab]);
   // Leave a tab that is no longer in the menu (role change, or the event was closed)
   useEffect(() => {
     if (access.loading || (!access.setupMissing && !access.role)) return;
@@ -7923,6 +8138,18 @@ export default function App() {
           })}
         </nav>
 
+        {/* Phones: the open section's pages, under the header */}
+        {currentGroup && currentGroup.items.length > 1 && (
+          <nav className="nk-subnav" ref={subnavRef} aria-label={currentGroup.label}>
+            {currentGroup.items.map(it => (
+              <button key={it.id} type="button" className={`nk-subnav-item${tab===it.id?" on":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
+                <Icon n={it.icon} /> {it.label}
+                {it.id === "leads" && leadsDue > 0 && <span className="nk-count" title="Follow-ups due today or overdue">{leadsDue}</span>}
+              </button>
+            ))}
+          </nav>
+        )}
+
         {feedbackOpen && (
           <FeedbackModal myEmail={(user.email || "").toLowerCase()} page={TAB_LABEL[tab] || tab}
             eventId={savedEventId} eventName={savedEventId ? eventData.username : ""} showToast={showToast} onClose={() => setFeedbackOpen(false)} />
@@ -7947,12 +8174,14 @@ export default function App() {
                 {navGroups.map(g => (
                   <div key={g.label} className="nk-drawer-group">
                     <div className="nk-drawer-label">{g.label}</div>
-                    {g.items.map(it => (
-                      <button key={it.id} className={`nk-drawer-item${tab===it.id?" active":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
-                        <Icon n={it.icon} /> <span style={{flex:1}}>{it.label}</span>
-                        {it.id === "leads" && leadsDue > 0 && <span className="nk-count">{leadsDue}</span>}
-                      </button>
-                    ))}
+                    <div className="nk-drawer-items">
+                      {g.items.map(it => (
+                        <button key={it.id} className={`nk-drawer-item${tab===it.id?" active":""}`} aria-current={tab===it.id ? "page" : undefined} onClick={() => goTab(it.id)}>
+                          <Icon n={it.icon} /> <span className="nk-drawer-text">{it.label}</span>
+                          {it.id === "leads" && leadsDue > 0 && <span className="nk-count">{leadsDue}</span>}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </nav>
@@ -7978,6 +8207,26 @@ export default function App() {
             </aside>
           </div>
         )}
+
+        {/* Phones: bottom navigation — up to four sections, then More (the full menu) */}
+        <nav className="nk-bottomnav" aria-label="Sections">
+          {phoneGroups.map(g => {
+            const on = currentSection === g.label;
+            const due = g.items.some(it => it.id === "leads") && leadsDue > 0;
+            return (
+              <button key={g.label} type="button" className={`nk-bn-item${on ? " on" : ""}`} aria-current={on ? "page" : undefined}
+                onClick={() => on ? window.scrollTo({ top: 0, behavior: "smooth" }) : goTab(sectionTab(g, lastTabRef.current))}>
+                <span className="nk-bn-ic"><Icon n={g.icon || g.items[0].icon} />{due && <span className="nk-bn-badge" title="Follow-ups due today or overdue">{leadsDue}</span>}</span>
+                <span className="nk-bn-label">{g.label}</span>
+              </button>
+            );
+          })}
+          <button type="button" className={`nk-bn-item${currentGroup && !phoneGroups.some(g => g.label === currentSection) ? " on" : ""}`}
+            aria-haspopup="dialog" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)}>
+            <span className="nk-bn-ic"><Icon n="menu" /></span>
+            <span className="nk-bn-label">More</span>
+          </button>
+        </nav>
 
         {viewOnly && (
           <div className="nk-banner" role="note">
@@ -8270,10 +8519,10 @@ export default function App() {
                 )}
                 {supabase && savedEvents.length > 0 && (
                   <div className="nk-table-wrap">
-                    <table className="nk-table">
+                    <table className="nk-table m-hide-1 m-hide-3 m-hide-4 m-act">
                       <thead>
                         <tr>
-                          {["#","Username","Type","Venue","Date","Status",...(access.setupMissing ? [] : ["Team"]),"Actions"].map(h=><th key={h}>{h}</th>)}
+                          {["#","Username","Type","Venue","Date","Status",...(access.setupMissing ? [] : ["Team"]),"Actions"].map(h=><th key={h} className={h === "Team" ? "m-hide" : undefined}>{h}</th>)}
                         </tr>
                       </thead>
                       <tbody>
@@ -8307,7 +8556,7 @@ export default function App() {
                                 {ev.status}
                               </span>
                             </td>
-                            {!access.setupMissing && <td><TeamAvatars team={teamsByEvent[ev.id]} /></td>}
+                            {!access.setupMissing && <td className="m-hide"><TeamAvatars team={teamsByEvent[ev.id]} /></td>}
                             <td>
                               <div className="nk-row-actions">
                                 <Sb bg={N.navy600} col={N.green} border={alpha(N.green,"44")}
@@ -8320,12 +8569,12 @@ export default function App() {
                                   title="Load this event and open card designer">
                                   <Icon n="palette" /> Create Cards
                                 </Sb>
-                                <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")}
+                                <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} className="m-hide"
                                   onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "reports"); }}
                                   title="View this event's cards and download the send report">
                                   <Icon n="report" /> Report
                                 </Sb>
-                                <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")}
+                                <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")} className="m-hide"
                                   onClick={(e)=>{ e.stopPropagation(); selectEvent(ev, "history"); }}
                                   title="Every card and SMS sent for this event, with results">
                                   <Icon n="history" /> History
@@ -8341,7 +8590,7 @@ export default function App() {
                                   <Icon n="trash" /> Delete
                                 </Sb>)}
                                 {ev.cover_image_url && (
-                                  <Sb bg={N.navy700} col={N.textMid} border={N.border}
+                                  <Sb bg={N.navy700} col={N.textMid} border={N.border} className="m-hide"
                                     onClick={(e)=>{ e.stopPropagation(); window.open(ev.cover_image_url,"_blank"); }}
                                     label="View card template" title="Opens the template image in a new tab">
                                     <Icon n="image" />
@@ -8387,7 +8636,8 @@ export default function App() {
             {tab === "feedback" && <FeedbackTab access={access} events={savedEvents} askDialog={askDialog} showToast={showToast} />}
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
-                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} onGuestsAdded={addImportedGuests} />
+                showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} onGuestsAdded={addImportedGuests}
+                onMenu={() => setMenuOpen(true)} />
             )}
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
@@ -8469,7 +8719,7 @@ export default function App() {
                           {vcardContacts.length>5 && `\n\n… and ${vcardContacts.length-5} more contacts`}
                         </div>
                         <div className="nk-table-wrap">
-                          <table className="nk-table">
+                          <table className="nk-table m-hide-1">
                             <thead><tr>{["#","Name","Phone","VCard Name"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                             <tbody>
                               {vcardContacts.map((c,i)=>(
@@ -8797,7 +9047,7 @@ export default function App() {
                       </button>
                     )}
                     <div className="nk-table-wrap">
-                      <table className="nk-table">
+                      <table className="nk-table m-hide-1 m-hide-3 m-hide-4 m-act">
                         <thead><tr>{["#","Name","Phone","SMS Preview","Status",""].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
                           {activeRecipients.map((rec,i)=>(
@@ -8904,7 +9154,7 @@ export default function App() {
                     )}
                     {/* Records table */}
                     <div className="nk-table-wrap">
-                      <table className="nk-table">
+                      <table className="nk-table m-hide-1 m-hide-3 m-act">
                         <thead><tr>{["#","Name","Phone","Upload","WA","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
                           {records.map((rec,i)=>(
@@ -9045,7 +9295,7 @@ export default function App() {
 
                     {/* Log table */}
                     <div className="nk-table-wrap">
-                      <table className="nk-table">
+                      <table className="nk-table m-hide-3 m-hide-5 m-hide-7 m-hide-8">
                         <thead><tr>{["Time","Channel","Action","Recipient","Message / Template","Result","By","Detail"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
                           {shown.map(r => {
@@ -9118,7 +9368,7 @@ export default function App() {
                   ))}
                 </div>
                 <div className="nk-table-wrap">
-                  <table className="nk-table">
+                  <table className="nk-table m-hide-1 m-hide-3 m-hide-4 m-act">
                     <thead><tr>{["#","Name","Card Type","Phone","WA Status","SMS","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
                       {records.map((rec,i)=>(
