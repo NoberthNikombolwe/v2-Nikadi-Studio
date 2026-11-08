@@ -5,7 +5,7 @@ import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult, matchSmsMessages,
-  parseProviderJson, waCardStatus, parseDeliveryReports, reportsQueries, statusReason } from "./lib/messages";
+  parseProviderJson, waCardStatus, parseDeliveryReports, reportsQueries, statusReason, providerErrorText } from "./lib/messages";
 import { DELIVERY_STATES, DELIVERY_SOURCES, indexDeliveries, extraStatusOf, deliveryNote, guestStatusCounts, deliveryCounts, failureReasons,
   filterDeliveries, deliveryExportRows, parseProviderLogs, providerLogsQuery } from "./lib/deliveries";
 import LoginPage from "./LoginPage";
@@ -27,7 +27,8 @@ import { PACKAGE_OPTIONS, EVENT_TYPES, TZ_REGIONS, LEAD_STATUSES, OPEN_STATUSES,
          leadToRow, eventFromLead, matchCustomer, localDate, followupDue, filterLeads, sortLeads, summariseLeads } from "./lib/crm";
 import { MAX_SCHEDULE_RUNS, MAX_EVERY_WEEKS, WEEKDAYS, CARD_PLACEHOLDERS, AUDIENCE_LABEL, SCHEDULE_STATUS, RUN_STATUS, scheduleTargets, describeTargetSkips,
   validateSchedule, describeSchedule, defaultScheduleForm, formForEdit, patternOf, parseLocal, fmtRun, ymd, smsParts, estimateSms, audienceOptions, nextRun,
-  filterSchedules, summariseSchedules, clockOffset, serverNow } from "./lib/schedule";
+  filterSchedules, summariseSchedules, clockOffset, serverNow, SENT_BY, eatDateTime, handoverBatches, handoverReference, handoverDetail,
+  scheduleControls } from "./lib/schedule";
 import { FEEDBACK_KINDS, FEEDBACK_STATUSES, FEEDBACK_MAX, validateFeedback, deviceSummary, feedbackToRow, filterFeedback, summariseFeedback, feedbackExportRows } from "./lib/feedback";
 import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeHistory, HISTORY_CHANNELS, HISTORY_ACTIONS, HISTORY_STATUSES } from "./lib/history";
 
@@ -60,6 +61,28 @@ import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeH
 // loaded on demand to keep them out of the initial bundle (both are bundled by Vite
 // from node_modules — nothing is fetched from a third-party CDN at runtime)
 const loadXlsx  = () => import("xlsx");
+
+// The SMS provider through our proxy: the Vite proxy in dev, the send-sms Edge Function in
+// production (it adds the provider token). At module level so pop-ups outside <App> (a
+// schedule handed to NextSMS) send the same way as Send All.
+const SMS_BASE = import.meta.env.DEV ? "/sms-proxy" : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-sms`;
+const SMS_API = `${SMS_BASE}/api/sms/v2`;
+// Bearer token for the SMS/WhatsApp proxy. Dev: the provider token from
+// .env.development.local (the Vite proxy forwards it as-is). Production: the
+// signed-in user's Supabase access token — the Edge Functions verify it and attach
+// the provider token server-side, so no provider secret ever reaches the browser.
+// Throws a readable error instead of letting the provider answer a bare "HTTP 401".
+const getApiToken = async (kind) => {
+  if (import.meta.env.DEV) {
+    const sms = import.meta.env.VITE_SMS_BEARER_TOKEN || "";
+    const token = kind === "wa" ? (import.meta.env.VITE_WA_BEARER_TOKEN || sms) : sms;
+    if (!token) throw new Error(`no ${kind === "wa" ? "VITE_WA_BEARER_TOKEN / " : ""}VITE_SMS_BEARER_TOKEN — add it to .env.development.local and restart npm run dev`);
+    return token;
+  }
+  const { data } = await supabase.auth.getSession();
+  if (!data.session?.access_token) throw new Error("not signed in — sign in again");
+  return data.session.access_token;
+};
 const loadJsZip = () => import("jszip").then(m => m.default);
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -3220,7 +3243,7 @@ function useScheduleActions({ askDialog, showToast, logHistory, reload }) {
     return true;
   };
   const remove = async (s) => {
-    if (!(await confirmDelete(askDialog, `schedule "${s.title}"`))) return false;
+    if (!(await confirmDelete(askDialog, `schedule "${s.title}"${s.sent_by === "nextsms" ? " (NextSMS still sends the SMS it holds)" : ""}`))) return false;
     const { data, error: e } = await supabase.from("message_schedules").delete().eq("id", s.id).select("id");
     if (e || !data?.length) { showToast(`Could not delete the schedule${e ? `: ${e.message}` : ""}`, "warn"); return false; }
     logHistory({ channel: s.channel, action: "schedule", title: s.title, detail: "Schedule deleted" }, s.event_id);
@@ -3273,7 +3296,7 @@ function ScheduledSends({ channel, eventId, eventDate, canEdit, askDialog, showT
     <div style={{marginTop:20}}>
       <div className="nk-sec" style={{color:N.purple}}><Icon n="clock" /> Scheduled {word}</div>
       <div className="nk-chip" style={{marginBottom:10,fontSize:11,lineHeight:1.7}}>
-        Plan {word} sends ahead: pick dates, or days of the week for a few weeks. They go out from the server, even with this page closed.
+        Plan {word} sends ahead: pick dates, or days of the week for a few weeks. They go out at their time, even with this page closed.
       </div>
       {!eventId ? (
         <EmptyState compact icon="folder" title="Save the event first" text="Schedules belong to a saved event." />
@@ -3324,13 +3347,14 @@ function ScheduledSends({ channel, eventId, eventDate, canEdit, askDialog, showT
 
 // One schedule: what it sends, to whom, and every send with its result
 function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit, onStatus, onDelete, eventName, onOpenEvent }) {
-  const live = s.status === "active" || s.status === "paused";
+  const can = scheduleControls(s, runs);
   const info = [
     ...(eventName ? [["Event", eventName]] : []),
     ["When", describeSchedule(s.pattern || {})],
     ["Who", AUDIENCE_LABEL[s.audience] || s.audience],
     ...(s.channel === "sms"
-      ? [["Sender", s.sender_id || "Default"], ["Message", s.body || ""]]
+      ? [["Sent by", s.sent_by === "nextsms" ? `${SENT_BY.nextsms.label} — handed over when saved` : SENT_BY.server.label],
+         ["Sender", s.sender_id || "Default"], ["Message", s.body || ""]]
       : [["Template", `${s.wa_template || "—"} · ${s.wa_image ? "each guest's card image" : "text only"}`]]),
     ["Created", `${fmtWhen(s.created_at)}${s.created_by ? ` by ${s.created_by}` : ""}`],
     ...(s.updated_by ? [["Changed", `${fmtWhen(s.updated_at)} by ${s.updated_by}`]] : []),
@@ -3352,14 +3376,19 @@ function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit
         ))}
       </div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
-        {live && canEdit && <button className="nk-btn nk-btn-primary" onClick={onEdit}><Icon n="edit" /> Edit</button>}
-        {s.status === "active" && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("paused")}><Icon n="pause" /> Pause</button>}
-        {s.status === "paused" && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("active")}><Icon n="play" /> Resume</button>}
-        {live && canEdit && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => onStatus("cancelled")}><Icon n="ban" /> Cancel schedule</button>}
+        {can.edit && canEdit && <button className="nk-btn nk-btn-primary" onClick={onEdit}><Icon n="edit" /> Edit</button>}
+        {can.pause && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("paused")}><Icon n="pause" /> Pause</button>}
+        {can.resume && canEdit && <button className="nk-btn nk-btn-ghost" onClick={() => onStatus("active")}><Icon n="play" /> Resume</button>}
+        {can.cancel && canEdit && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => onStatus("cancelled")}><Icon n="ban" /> Cancel schedule</button>}
         {canDelete && <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={onDelete}><Icon n="trash" /> Delete</button>}
         {onOpenEvent && <button className="nk-btn nk-btn-ghost" onClick={onOpenEvent}><Icon n="arrowRight" /> Open event in {CHANNEL_WORD[s.channel]}</button>}
         {!canEdit && <span style={{fontSize:12,color:N.textDim,alignSelf:"center"}}><Icon n="lock" /> Your role can view but not change this schedule</span>}
       </div>
+      {can.atNextsms && (
+        <div className="nk-chip" style={{marginBottom:14,fontSize:12,lineHeight:1.6,color:N.textMid}}>
+          <Icon n="info" /> NextSMS holds these SMS and sends each at its time. They can't be paused, cancelled or changed — NextSMS has no way to stop them.
+        </div>
+      )}
       <div className="nk-table-wrap">
         <table className="nk-table m-hide-1 m-hide-6 m-hide-7">
           <thead><tr>{["#", "When", "Status", "Sent", "Failed", "Skipped", "Detail"].map(h => <th key={h}>{h}</th>)}</tr></thead>
@@ -3428,6 +3457,10 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
   const image = isSms ? false : (tplRow ? tplRow.has_image_header !== false : (initial?.wa_image ?? true));
   const [audience, setAudience] = useState(initial?.audience || "all");
   const [form, setForm] = useState(() => initial ? formForEdit(initial.pattern, { now: new Date(), doneRuns }) : defaultScheduleForm(new Date(), eventDate));
+  // SMS: NextSMS holds the messages (handed over on save) or our server sends at each time
+  const [sentBy, setSentBy] = useState(initial?.sent_by || (isSms ? "nextsms" : "server"));
+  const byNextsms = isSms && sentBy === "nextsms";
+  const [handing, setHanding] = useState(null);   // { done, total } while send times are handed to NextSMS
   const [cards, setCards] = useState(null);
   const [tried, setTried] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -3467,11 +3500,80 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
     setBody(body.slice(0, from) + `{${ph}}` + body.slice(to));
   };
 
+  // Hands every send time of a new NextSMS schedule to NextSMS — the same bulk request as Send
+  // All, with a date and time (East Africa Time) — and records each message for the delivery
+  // reports and each send time's result. NextSMS can't take messages back, so it stops at the
+  // first send time refused outright (the rest would be refused too) and marks the rest failed.
+  // → { times, handed, accepted, refused, stopped }
+  const handOver = async (scheduleId, targets, skipped) => {
+    const { data: runs, error: re } = await supabase.from("message_schedule_runs").select("id,run_at")
+      .eq("schedule_id", scheduleId).eq("status", "pending").order("run_at");
+    if (re || !runs?.length) return { times: 0, handed: 0, accepted: 0, refused: 0, stopped: re?.message || "no send times found" };
+    const skippedCount = Object.values(skipped).reduce((a, b) => a + b, 0);
+    const skippedNote = describeTargetSkips(skipped);
+    const from = sender || defaultSender || "NIKADI";
+    let handed = 0, accepted = 0, refused = 0, stopped = "";
+    for (let k = 0; k < runs.length; k++) {
+      const run = runs[k];
+      setHanding({ done: k, total: runs.length });
+      if (stopped) {
+        await supabase.rpc("record_schedule_handover", { p_run_id: run.id, p_accepted: false, p_sent: 0, p_failed: targets.length,
+          p_skipped: skippedCount, p_detail: `Not handed over: an earlier send time was refused (${stopped})` });
+        continue;
+      }
+      const when = eatDateTime(run.run_at);
+      const reasons = new Map(), sends = [];
+      let ok = 0, failed = 0;
+      for (const batch of handoverBatches(targets, k)) {
+        let answers = [], problem = "";
+        try {
+          const res = await fetch(`${SMS_API}/text/multi`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${await getApiToken("sms")}`, "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ messages: batch.map(t => ({ from, to: t.phone, text: t.text })), date: when.date, time: when.time,
+              reference: handoverReference(run.id), flash: 0 }),
+          });
+          const text = await res.text().catch(() => "");
+          if (!res.ok) throw new Error(providerErrorText(res.status, text));
+          let data;
+          try { data = parseProviderJson(text); } catch { throw new Error("NextSMS sent an answer that could not be read"); }
+          answers = matchSmsMessages(batch.map(t => t.phone), data?.messages || []);
+        } catch (e) { problem = e.message; }
+        batch.forEach((t, n) => {
+          const r = problem ? null : smsSendResult(answers[n]);
+          const why = problem || (r.missing ? "no answer from NextSMS for this number" : r.reason);
+          if (!r || r.status === "failed") { failed++; reasons.set(why, (reasons.get(why) || 0) + 1); } else ok++;
+          // Each number NextSMS answered for (a refused request has no messages to follow)
+          if (r && !r.missing) sends.push({ event_id: eventId, event_card_id: t.id || null, channel: "sms", message_key: messageKey,
+            message_title: title.trim(), recipient_name: t.name, phone: t.phone, message_id: r.messageId,
+            status: r.status === "failed" ? "failed" : "sent", status_id: r.statusId, status_group: r.groupId, status_name: r.statusName,
+            reason: r.status === "failed" ? why : null, update_card: false, schedule_run_id: run.id, sent_at: new Date(run.run_at).toISOString() });
+        });
+      }
+      const top = [...reasons.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+      if (sends.length) await supabase.rpc("record_message_sends", { p_items: sends });   // never throws; reports follow them
+      await supabase.rpc("record_schedule_handover", { p_run_id: run.id, p_accepted: ok > 0, p_sent: ok, p_failed: failed,
+        p_skipped: skippedCount, p_detail: handoverDetail({ accepted: ok, total: targets.length, failed, reason: top, skippedNote }) });
+      accepted += ok; refused += failed;
+      if (ok) handed++; else stopped = top || "refused by NextSMS";
+    }
+    setHanding({ done: runs.length, total: runs.length });
+    return { times: runs.length, handed, accepted, refused, stopped };
+  };
+
   const save = async () => {
     setTried(true);
     const check = () => validateSchedule(form, { now: serverNow(clockOff), clockOffset: clockOff, eventDate, channel, title, body, waTemplate: template });
     const fresh = check();
     if (Object.keys(fresh.errors).length) { showToast(fresh.errors.clock ? "Fix this device's clock first" : "Check the highlighted fields", "warn"); return; }
+    const handover = byNextsms && !initial;
+    if (handover) {
+      // The database must know NextSMS schedules — otherwise our server would send them too
+      const pre = await supabase.from("message_schedules").select("sent_by").limit(1);
+      if (pre.error) { showToast("Run the latest supabase-roles-settings-scan.sql first — it adds scheduling through NextSMS", "warn"); return; }
+      if (!picked) { showToast("Still counting the guests — try again in a moment", "info"); return; }
+      if (!picked.targets.length) { showToast("Nobody to send to: no guest in this audience has a valid number", "warn"); return; }
+    }
     const n = fresh.runs.length;
     const what = isSms ? `about ${cost.messages.toLocaleString()} SMS (≈ ${cost.tsh.toLocaleString()} TSh)` : `about ${(n * guests).toLocaleString()} WhatsApp messages`;
     const ok = await askDialog({
@@ -3479,8 +3581,10 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
       body: `${describeSchedule(form)} — first ${fmtRun(fresh.runs[0])}, last ${fmtRun(fresh.runs[n - 1])}. `
         + `Each send goes to ${plural(guests, "guest")} as the list stands now (${AUDIENCE_LABEL[aud]}): ${what}. `
         + (initial ? "Sends still waiting are replaced; sends already made stay as they were. " : "")
-        + "They go out automatically from the server; you can pause or cancel at any time.",
-      actions: [{ value: "yes", label: initial ? "Save changes" : `Schedule ${plural(n, "send")}`, kind: "primary" }],
+        + (handover
+          ? "They are handed to NextSMS now, which sends each at its time. Once saved they can't be paused, cancelled or changed — NextSMS has no way to stop them."
+          : "They go out automatically from the server; you can pause or cancel at any time."),
+      actions: [{ value: "yes", label: initial ? "Save changes" : handover ? `Hand ${plural(n, "send")} to NextSMS` : `Schedule ${plural(n, "send")}`, kind: "primary" }],
     });
     if (ok !== "yes") return;
     // The question may have stayed open a while: a send time may have passed meanwhile
@@ -3492,7 +3596,7 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
     }
     setSaving(true);
     const fields = {
-      title: title.trim(), audience: aud, pattern: patternOf(form),
+      title: title.trim(), audience: aud, pattern: patternOf(form), sent_by: byNextsms ? "nextsms" : "server",
       ...(isSms
         ? { body, message_key: messageKey, sender_id: sender || null }
         : { message_key: image ? "card" : "text", wa_template: template, wa_account: tplRow?.account || defaultAccount || null, wa_image: image }),
@@ -3509,7 +3613,19 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
         ? "this device's clock may be behind it" : `it is ${fmtRun(serverNow(clockOff))} there now`}. Pick a later time.`, "warn");
       return;
     }
-    if (error) { showToast(`Could not save the schedule: ${error.message}`, "warn"); return; }
+    if (error) { setSaving(false); showToast(`Could not save the schedule: ${error.message}`, "warn"); return; }
+    if (handover) {
+      setSaving(true);
+      const h = await handOver(data, picked.targets, picked.skipped);
+      setSaving(false); setHanding(null);
+      logHistory({ channel, action: "schedule", title: title.trim(),
+        detail: `Handed to NextSMS: ${describeSchedule(form)} · ${h.handed}/${h.times} send times · ${h.accepted} SMS accepted${h.refused ? ` · ${h.refused} refused` : ""}${h.stopped ? ` (${h.stopped})` : ""}` }, eventId);
+      if (!h.handed) showToast(`NextSMS refused the schedule: ${h.stopped}`, "warn");
+      else if (h.stopped || h.refused) showToast(`NextSMS took ${plural(h.handed, "send time")} of ${h.times} (${h.accepted} SMS); ${h.refused} refused${h.stopped ? ` — ${h.stopped}` : ""}. See the schedule for details.`, "warn");
+      else showToast(`NextSMS will send ${plural(h.times, "time")} — ${h.accepted} SMS, the first ${fmtRun(fresh.runs[0])}`, "success");
+      onSaved(data);
+      return;
+    }
     logHistory({ channel, action: "schedule", title: title.trim(),
       detail: `${initial ? "Schedule changed" : "Scheduled"}: ${describeSchedule(form)} · ${plural(n, "send")} from ${fmtRun(fresh.runs[0])} · ${AUDIENCE_LABEL[aud]}` }, eventId);
     showToast(initial ? `Saved "${title.trim()}"` : `Scheduled ${plural(n, "send")} — the first goes out ${fmtRun(fresh.runs[0])}`, "success");
@@ -3523,9 +3639,9 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
         <div className="nk-modal-head">
           <div>
             <div className="nk-modal-title"><Icon n="clock" /> {initial ? "Edit schedule" : `Schedule ${CHANNEL_WORD[channel]}`}</div>
-            <div style={{fontSize:12,color:N.textDim,marginTop:2}}>Sent by the server at each time below, even with this page closed</div>
+            <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{byNextsms ? "NextSMS sends at each time below — handed over when you save" : "Sent by the server at each time below, even with this page closed"}</div>
           </div>
-          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
+          <button className="nk-modal-close" aria-label="Close" onClick={onClose} disabled={saving}><Icon n="x" /></button>
         </div>
         <div className="nk-modal-body">
           <div className="nk-form-grid">
@@ -3547,6 +3663,22 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
                   <select className="nk-select" value={sender} onChange={e => setSender(e.target.value)}>
                     {[...new Set([sender, ...senderIds].filter(Boolean))].map(id => <option key={id} value={id}>{id}</option>)}
                   </select>
+                </Field>
+                <Field label="Who sends it" span>
+                  {initial ? (
+                    <div style={{fontSize:13,color:N.textMid,marginBottom:10}}>{(SENT_BY[initial.sent_by] || SENT_BY.server).label} — chosen when the schedule was made</div>
+                  ) : (
+                    <div role="radiogroup" aria-label="Who sends it" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))",gap:8,marginBottom:10}}>
+                      {["nextsms", "server"].map(k => (
+                        <button key={k} type="button" role="radio" aria-checked={sentBy === k} onClick={() => setSentBy(k)}
+                          style={{...segStyle(sentBy === k), textAlign:"left", padding:"10px 12px", lineHeight:1.45, whiteSpace:"normal",
+                            ...(sentBy === k ? { color: N.purple, borderColor: N.purple, background: N.purpleBg } : {})}}>
+                          <div style={{fontWeight:800,fontSize:13}}>{k === "nextsms" ? <Icon n="send" /> : <Icon n="database" />} {SENT_BY[k].label}</div>
+                          <div style={{fontSize:11,color:N.textDim,marginTop:3}}>{SENT_BY[k].hint}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </Field>
                 <Field label={`SMS text * · ${body.length} characters · ${plural(smsParts(body), "part")}`} error={shown.body} span>
                   <textarea ref={bodyRef} className="nk-input nk-textarea" rows={4} value={body}
@@ -3691,9 +3823,15 @@ function ScheduleModal({ channel, eventId, eventDate, initial, doneRuns, smsMess
           )}
         </div>
         <div className="nk-modal-foot">
+          {handing && (
+            <span style={{fontSize:12,color:N.textMid,marginRight:"auto",alignSelf:"center"}} role="status">
+              <Icon n="loader" /> Handing to NextSMS: {handing.done} of {plural(handing.total, "send time")} — keep this open
+            </span>
+          )}
           <button className="nk-btn nk-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
           <button className="nk-btn nk-btn-primary" onClick={save} disabled={saving || (tried && hasErrors)}>
-            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="clock" /> {initial ? "Save changes" : `Schedule ${v.runs.length && !v.errors.runs ? plural(Math.min(v.runs.length, MAX_SCHEDULE_RUNS), "send") : ""}`.trim()}</>}
+            {saving ? <><Icon n="loader" /> {handing ? "Handing over…" : "Saving…"}</>
+              : <><Icon n={byNextsms && !initial ? "send" : "clock"} /> {initial ? "Save changes" : `${byNextsms ? "Hand to NextSMS" : "Schedule"} ${v.runs.length && !v.errors.runs ? plural(Math.min(v.runs.length, MAX_SCHEDULE_RUNS), "send") : ""}`.trim()}</>}
           </button>
         </div>
       </div>
@@ -3809,7 +3947,7 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
     setMissing(false); setError(null);
     setList((data || []).map(s => ({ ...s, event_name: s.events?.username || "", event_date: s.events?.start_datetime || null })));
     const { data: rs } = await supabase.from("message_schedule_runs").select("id,schedule_id,run_at,status")
-      .in("status", ["pending", "sending"]).order("run_at").limit(5000);
+      .in("status", ["pending", "sending", "handed"]).order("run_at").limit(5000);
     setWaiting(rs || []);
     setNow(new Date());
     if (openRef.current) loadRuns(openRef.current);
@@ -3832,7 +3970,7 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { setStatus, remove } = useScheduleActions({ askDialog, showToast, logHistory, reload: load });
-  const nextOf = (id) => waiting.find(r => r.schedule_id === id) || null;
+  const nextOf = (id) => nextRun(waiting.filter(r => r.schedule_id === id), now);
   const shown = filterSchedules(list || [], filters);
   const stats = summariseSchedules(list || [], waiting, now);
   const open = (list || []).find(s => s.id === openId) || null;
@@ -3936,7 +4074,7 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
                 <tbody>
                   {shown.map(s => {
                     const next = nextOf(s.id);
-                    const live = s.status === "active" || s.status === "paused";
+                    const can = scheduleControls(s, waiting.filter(r => r.schedule_id === s.id), now);
                     const ok = canEditOf(s);
                     return (
                       <tr key={s.id} style={{cursor:"pointer"}} onClick={() => view(s)}>
@@ -3950,10 +4088,10 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
                         <td><SchedBadge map={SCHEDULE_STATUS} status={s.status} /></td>
                         <td onClick={e => e.stopPropagation()} style={{whiteSpace:"nowrap"}}>
                           <Sb label={`View ${s.title}`} onClick={() => view(s)}><Icon n="eye" /></Sb>
-                          {live && ok && <Sb label={`Edit ${s.title}`} onClick={() => edit(s)}><Icon n="edit" /></Sb>}
-                          {s.status === "active" && ok && <Sb label={`Pause ${s.title}`} onClick={() => setStatus(s, "paused")}><Icon n="pause" /></Sb>}
-                          {s.status === "paused" && ok && <Sb label={`Resume ${s.title}`} onClick={() => setStatus(s, "active")}><Icon n="play" /></Sb>}
-                          {live && ok && <Sb label={`Cancel ${s.title}`} col={N.red} onClick={() => setStatus(s, "cancelled")}><Icon n="ban" /></Sb>}
+                          {can.edit && ok && <Sb label={`Edit ${s.title}`} onClick={() => edit(s)}><Icon n="edit" /></Sb>}
+                          {can.pause && ok && <Sb label={`Pause ${s.title}`} onClick={() => setStatus(s, "paused")}><Icon n="pause" /></Sb>}
+                          {can.resume && ok && <Sb label={`Resume ${s.title}`} onClick={() => setStatus(s, "active")}><Icon n="play" /></Sb>}
+                          {can.cancel && ok && <Sb label={`Cancel ${s.title}`} col={N.red} onClick={() => setStatus(s, "cancelled")}><Icon n="ban" /></Sb>}
                           {canDelete && <Sb label={`Delete ${s.title}`} col={N.red} onClick={() => remove(s)}><Icon n="trash" /></Sb>}
                         </td>
                       </tr>
@@ -7153,23 +7291,7 @@ export default function App() {
   const WA_BASE = import.meta.env.DEV
     ? "/wa-proxy"
     : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-wa`;
-  const WA_BEARER = import.meta.env.VITE_WA_BEARER_TOKEN || "";
 
-  // Bearer token for the SMS/WhatsApp proxy. Dev: the provider token from
-  // .env.development.local (the Vite proxy forwards it as-is). Production: the
-  // signed-in user's Supabase access token — the Edge Functions verify it and attach
-  // the provider token server-side, so no provider secret ever reaches the browser.
-  // Throws a readable error instead of letting the provider answer a bare "HTTP 401".
-  const getApiToken = async (kind) => {
-    if (import.meta.env.DEV) {
-      const token = kind === "wa" ? (WA_BEARER || smsSettings.bearerToken) : smsSettings.bearerToken;
-      if (!token) throw new Error(`no ${kind === "wa" ? "VITE_WA_BEARER_TOKEN / " : ""}VITE_SMS_BEARER_TOKEN — add it to .env.development.local and restart npm run dev`);
-      return token;
-    }
-    const { data } = await supabase.auth.getSession();
-    if (!data.session?.access_token) throw new Error("not signed in — sign in again");
-    return data.session.access_token;
-  };
 
   // Asks (in-app modal) before re-sending to someone who already received a message
   const confirmResend = async (name, what) => (await askDialog({
@@ -7753,11 +7875,7 @@ export default function App() {
     } catch (err) { showToast(`Download failed: ${err.message}`, "warn"); }
   };
 
-  /* ── SMS ── */
-  const SMS_BASE = import.meta.env.DEV
-    ? "/sms-proxy"
-    : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-sms`;
-  const SMS_API = `${SMS_BASE}/api/sms/v2`;
+  /* ── SMS ── (SMS_BASE / SMS_API / getApiToken are at the top of the file) */
 
   // Queries the messaging-service.co.tz balance endpoint for remaining SMS credits
   const fetchSmsBalance = async () => {

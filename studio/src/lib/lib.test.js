@@ -1134,3 +1134,61 @@ test("a schedule is checked against the server's time, not the device's", () => 
   assert.match(blocked.errors.clock, /3 h ahead/);
   assert.equal(blocked.runs.length, 1);
 });
+
+// ── SMS schedules handed to NextSMS ──
+import { eatDateTime, handoverBatches, handoverReference, scheduleControls, handoverDetail, RUN_STATUS } from "./schedule.js";
+import { providerErrorText } from "./messages.js";
+
+test("eatDateTime gives NextSMS the date and time in East Africa Time, whatever the device's zone", () => {
+  assert.deepEqual(eatDateTime(new Date("2026-11-20T06:00:00Z")), { date: "2026-11-20", time: "09:00" });
+  assert.deepEqual(eatDateTime("2026-11-20T22:30:00Z"), { date: "2026-11-21", time: "01:30" });   // past midnight in Dar es Salaam
+  assert.equal(eatDateTime("nope"), null);
+});
+
+test("handoverBatches: batches of 500, each send time starting from a different guest", () => {
+  const t = Array.from({ length: 5 }, (_, i) => ({ phone: `25571200000${i}` }));
+  assert.deepEqual(handoverBatches(t, 0, 2).map(b => b.map(x => x.phone.slice(-1))), [["0", "1"], ["2", "3"], ["4"]]);
+  assert.deepEqual(handoverBatches(t, 1)[0].map(x => x.phone.slice(-1)), ["1", "2", "3", "4", "0"]);
+  assert.deepEqual(handoverBatches(t, 7)[0][0].phone.slice(-1), "2");     // wraps round
+  assert.equal(handoverBatches(Array.from({ length: 1201 }, () => ({})), 0).length, 3);
+  assert.deepEqual(handoverBatches([], 3), []);
+});
+
+test("handoverReference fits NextSMS's reference rules", () => {
+  const r = handoverReference("8f1c2d3e-4b5a-6978-8a9b-0c1d2e3f4a5b");
+  assert.ok(r.length <= 50 && !/\s/.test(r));
+  assert.match(r, /^nikadi-8f1c2d3e4b5a/);
+});
+
+test("scheduleControls: a schedule with NextSMS can't be edited, paused or cancelled while it holds sends", () => {
+  const now = new Date("2026-11-08T10:00:00Z");
+  const server = { status: "active", sent_by: "server" };
+  assert.deepEqual(scheduleControls(server, [], now), { edit: true, pause: true, resume: false, cancel: true, atNextsms: false });
+  assert.equal(scheduleControls({ status: "paused" }, [], now).resume, true);
+  const nx = { status: "active", sent_by: "nextsms" };
+  const held = [{ status: "handed", run_at: "2026-11-09T06:00:00Z" }];
+  assert.deepEqual(scheduleControls(nx, held, now), { edit: false, pause: false, resume: false, cancel: false, atNextsms: true });
+  // nothing left at NextSMS (the hand-over failed, or every time has passed): it can be cancelled
+  assert.equal(scheduleControls(nx, [{ status: "failed", run_at: "2026-11-09T06:00:00Z" }, { status: "handed", run_at: "2026-11-07T06:00:00Z" }], now).cancel, true);
+  assert.equal(scheduleControls({ status: "done", sent_by: "nextsms" }, [], now).cancel, false);
+});
+
+test("handoverDetail and the With NextSMS badge", () => {
+  assert.equal(handoverDetail({ accepted: 120, total: 122, failed: 2, reason: "UNDELIVERABLE", skippedNote: "3 skipped: 3 invalid numbers" }),
+    "120/122 SMS accepted by NextSMS · 2 failed (UNDELIVERABLE) · 3 skipped: 3 invalid numbers");
+  assert.equal(handoverDetail({ total: 0 }), "Nobody to send to");
+  assert.equal(RUN_STATUS.handed.label, "With NextSMS");
+});
+
+test("providerErrorText keeps what NextSMS said", () => {
+  assert.equal(providerErrorText(422, '{"message":"Duplicate request sent within past 24 hour(s)"}'), "HTTP 422: Duplicate request sent within past 24 hour(s)");
+  assert.equal(providerErrorText(503, "  Service\n unavailable "), "HTTP 503: Service unavailable");
+  assert.equal(providerErrorText(401, ""), "HTTP 401");
+});
+
+test("nextRun and the Schedules page count sends waiting at NextSMS until their time", () => {
+  const now = new Date("2026-11-08T10:00:00Z");
+  const runs = [{ id: "a", status: "handed", run_at: "2026-11-08T09:00:00Z" }, { id: "b", status: "handed", run_at: "2026-11-08T12:00:00Z" }];
+  assert.equal(nextRun(runs, now).id, "b");
+  assert.equal(nextRun([{ status: "handed", run_at: "2026-11-01T09:00:00Z" }], now), null);
+});

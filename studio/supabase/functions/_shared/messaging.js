@@ -120,6 +120,16 @@ export const statusReason = (id, name) => {
 export const parseProviderJson = (text) =>
   JSON.parse(String(text ?? "").replace(/("(?:messageId|sendReference)"\s*:\s*)(-?\d+(?:\.\d+)?)/g, "$1\"$2\""));
 
+// A refused request in words, keeping what the provider said — e.g.
+// "HTTP 422: Duplicate request sent within past 24 hour(s)" (its JSON `message`, else the
+// start of the text). A bare "HTTP 422" hides why.
+export const providerErrorText = (httpStatus, rawText = "") => {
+  let msg = "";
+  try { const j = JSON.parse(String(rawText)); msg = j?.message || j?.error || ""; } catch { msg = String(rawText || ""); }
+  msg = String(msg).replace(/\s+/g, " ").trim().slice(0, 160);
+  return `HTTP ${httpStatus}${msg ? `: ${msg}` : ""}`;
+};
+
 /* ── SMS provider results ── */
 
 // One SMS send result (a messages[] entry of /text/single or /text/multi):

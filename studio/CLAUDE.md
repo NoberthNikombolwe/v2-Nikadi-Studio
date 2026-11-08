@@ -92,6 +92,14 @@ Schema, RLS and bucket setup live in [supabase-schema.sql](supabase-schema.sql) 
   - **Times are checked against the server's clock, not the device's.** The server refuses passed times and sends by its own clock, and a phone's clock can be minutes off (or hours, with the wrong time zone).
     - **How:** `useServerClock` measures the offset once with the `server_time()` RPC (`clockOffset`), and `<ScheduleModal>` validates with `serverNow(offset)`. Without the RPC it falls back to the device clock.
     - **What the user sees:** a minute or more off gives a note; 15 minutes or more blocks saving (`clockProblem`). The times are checked again after the confirm question, and a server "already passed" error says what time it is on the server. The form shows the device's time zone and the current time.
+  - **Who sends an SMS schedule (`message_schedules.sent_by`, fixed at creation):**
+    - **`nextsms` (default)** — `ScheduleModal`'s `handOver` sends every send time to NextSMS right after saving.
+      - **The request:** `/text/multi` through the `send-sms` proxy with `date` / `time` in East Africa Time (`eatDateTime`), up to 500 messages per request (`handoverBatches` starts each time from a different guest because of NextSMS's 24-hour duplicate rule), with a `reference`.
+      - **Recording:** each message goes to `record_message_sends` (`sent_at` = its send time, `update_card: false`), and `record_schedule_handover` marks the run `handed` ("With NextSMS") or `failed`. The first send time refused outright stops the rest.
+      - **Completion:** `finish_handed_runs()` (pg_cron, every minute, plain SQL) marks passed `handed` runs done, and skips runs never handed over.
+      - **Locked:** NextSMS can't cancel held messages, so `scheduleControls` hides Edit / Pause and allows Cancel only when nothing is held. The SQL refuses them too.
+    - **`server`** — `run-schedules` sends; `claim_schedule_run` and the cron job pick only `server` schedules, so nothing is sent twice. WhatsApp is always `server`.
+    - **Reports:** report checks and the guest's "latest send" ignore deliveries whose `sent_at` is still in the future.
   - **Sending:** pg_cron job `nikadi-run-schedules` posts to the `run-schedules` Edge Function every minute while a run is due. The project URL and `x-cron-secret` come from Vault, and the function checks `CRON_SECRET`.
     - The function works with the service role (`claim_schedule_run` lease → `save_run_progress` → `finish_schedule_run`) in about 35 s slices: SMS go out 100 per `/text/multi`, WhatsApp one by one with a 1 s gap.
     - It writes `event_logs` itself, with `user_email` = the schedule's creator.

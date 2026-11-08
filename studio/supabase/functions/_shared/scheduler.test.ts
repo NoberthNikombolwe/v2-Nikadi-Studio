@@ -154,10 +154,27 @@ test("the provider failing marks the run failed with the reason", async () => {
   smsReply = () => new Response("down", { status: 503 });
   await scheduler()(post());
   assert.deepEqual(logs.filter(l => l.action === "send").map(l => [l.status, l.detail]), [
-    ["failed", "Scheduled send 3 of 30 — HTTP 503"], ["failed", "Scheduled send 3 of 30 — HTTP 503"]]);
+    ["failed", "Scheduled send 3 of 30 — HTTP 503: down"], ["failed", "Scheduled send 3 of 30 — HTTP 503: down"]]);
   assert.equal(statuses.length, 0);   // no result from the provider → statuses untouched
   assert.equal(finished[0].p_status, "failed");
+  assert.match(finished[0].p_detail, /^0\/2 SMS sent · 2 failed \(HTTP 503: down\)/);   // the run's line says why
+});
+
+test("a refused request keeps NextSMS's own reason (e.g. a duplicate within 24 hours)", async () => {
+  claims = [run()];
+  smsReply = () => new Response('{"message":"Duplicate request sent within past 24 hour(s)"}', { status: 422 });
+  await scheduler()(post());
+  assert.match(finished[0].p_detail, /2 failed \(HTTP 422: Duplicate request sent within past 24 hour\(s\)\)/);
   assertValidLogs();
+});
+
+test("numbers the provider refuses: the run's line names the commonest reason", async () => {
+  claims = [run()];
+  smsReply = (body) => new Response('{"messages":[' + body.messages.map((m: any, i: number) =>
+    `{"to":${Number(m.to)},"messageId":"9${i}","status":{"groupId":22,"id":57,"name":"FAILED_NOT_ENOUGH_CREDITS"}}`).join(",") + "]}", { status: 200 });
+  await scheduler()(post());
+  assert.equal(finished[0].p_status, "failed");
+  assert.match(finished[0].p_detail, /^0\/2 SMS sent · 2 failed \(FAILED_NOT_ENOUGH_CREDITS — Not enough SMS credit\)/);
 });
 
 test("no provider token: the run fails without calling the provider", async () => {
@@ -181,7 +198,7 @@ test("a WhatsApp card run sends one guest at a time with its card; guests withou
   assert.deepEqual(sleeps, [1000]);
   assert.deepEqual(statuses, [{ id: "c1", wa_status: "sent" }, { id: "c4", wa_status: "invalid" }]);
   assert.deepEqual(logs.filter(l => l.action === "send").map(l => l.status), ["sent", "invalid"]);
-  assert.match(finished[0].p_detail, /1\/2 WhatsApp sent · 1 failed · 2 skipped: 1 invalid number, 1 no card uploaded/);
+  assert.match(finished[0].p_detail, /1\/2 WhatsApp sent · 1 failed \(number not on WhatsApp\) · 2 skipped: 1 invalid number, 1 no card uploaded/);
   assertValidLogs();
 });
 

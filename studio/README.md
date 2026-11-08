@@ -567,6 +567,17 @@ The **Schedules** page lists every schedule of every event you can see. It has f
 
 The form refuses dates and times that have already passed (the server checks again). It allows at most 100 sends per schedule, and it previews every send time, the number of guests and the SMS cost. The **Edit**, **Pause**, **Resume** and **Cancel** controls are in the schedule's window, next to the result of every send. Sends that came due while a schedule was paused, or more than 2 hours late, are skipped instead of sent late. Main-SMS and card schedules update the guests' statuses like **Send All**. Every send is also written to the event History.
 
+**Who sends an SMS schedule** is chosen when it is made:
+
+- **NextSMS schedules it** (the default):
+  - **On save:** every send time goes to NextSMS straight away, through the same route as **Send All**, as a normal bulk send with a date and time in East Africa Time. NextSMS holds the messages and sends each at its time, with no server scheduler or Vault secrets involved.
+  - **Fixed once saved:** NextSMS's API cannot cancel, pause or change a held message, so these schedules have no Edit, Pause or Cancel. The guest list and texts are fixed when you save.
+  - **Status:** each send time shows **With NextSMS** until its time passes, then **Sent**. Every message's real result comes from the delivery reports.
+  - **If NextSMS refuses a send time** (e.g. no credit, or a duplicate within 24 hours), the remaining send times aren't handed over, and the reason is shown on each one.
+- **Nikadi server**: the `run-schedules` function sends at each time. Can be paused, cancelled and edited; needs [Step 9](#step-9--turn-on-scheduled-sends).
+
+WhatsApp schedules are always sent by the server, because NextSMS can't hold a WhatsApp card for later.
+
 The schedules live in `message_schedules` / `message_schedule_runs`. The browser works out every send time and saves them through `save_message_schedule()`. The `run-schedules` Edge Function sends what is due: SMS in batches of 100, WhatsApp one at a time, about 25–30 per minute. Larger WhatsApp sends continue over the next minutes. Setup: [Step 9](#step-9--turn-on-scheduled-sends).
 
 ---

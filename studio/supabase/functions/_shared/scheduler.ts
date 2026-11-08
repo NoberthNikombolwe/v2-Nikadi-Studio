@@ -24,7 +24,7 @@
 // provided by the platform.
 
 import { UPSTREAM, cleanToken } from "./proxy.ts";
-import { scheduleTargets, describeTargetSkips, matchSmsMessages, smsSendResult, classifyWaSend, parseProviderJson, waCardStatus } from "./messaging.js";
+import { scheduleTargets, describeTargetSkips, matchSmsMessages, smsSendResult, classifyWaSend, parseProviderJson, waCardStatus, providerErrorText } from "./messaging.js";
 import { json, sameSecret, clip, restClient, type Row } from "./db.ts";
 import { syncDeliveries } from "./deliveries.ts";
 
@@ -170,6 +170,10 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
     message_title: clip(run.title, 120), detail: clip(detail, 500), user_email: run.created_by || null,
   });
   const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" };
+  // Why messages failed (reason → how many), so the run's own line can say it — not only History.
+  // Counts this call's part of the run (a long run continues over several calls).
+  const reasons = new Map<string, number>();
+  const failedFor = (reason: string) => reasons.set(reason, (reasons.get(reason) || 0) + 1);
 
   while (next < list.length) {
     if (outOfTime()) {
@@ -197,8 +201,8 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
             flash: 0,
           }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
+        const text = await res.text().catch(() => "");
+        if (!res.ok) throw new Error(providerErrorText(res.status, text));   // keeps NextSMS's reason, e.g. a duplicate refusal
         let data: Row | null = null;
         try { data = parseProviderJson(text); } catch { data = null; }
         answers = matchSmsMessages(batch.map((t) => t.phone), data?.messages || []);
@@ -207,8 +211,8 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
       }
       batch.forEach((t, n) => {
         const r = smsSendResult(answers[n]);
-        if (r.status === "failed") failed++; else sent++;
         const why = problem || (r.missing ? "no result from the SMS provider" : r.reason);
+        if (r.status === "failed") { failed++; failedFor(why || "not accepted by the SMS provider"); } else sent++;
         logs.push(logRow(t, "send", r.status, why ? `${runLabel} — ${why}` : runLabel));
         // No answer at all: the message may still have gone out, so the guest's status stays
         sends.push(sendRow(t, { message_id: r.messageId, status: r.status, status_id: r.statusId, status_group: r.groupId,
@@ -233,7 +237,7 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
         result = { status: "not_sent", detail: (e as Error).message };
       }
       const ok = result.status === "sent" || result.status === "delivered" || result.status === "read";
-      if (ok) sent++; else failed++;
+      if (ok) sent++; else { failed++; failedFor(result.detail || "not accepted by the WhatsApp provider"); }
       logs.push(logRow(t, "send", result.status, result.detail ? `${runLabel} — ${result.detail}` : runLabel));
       const state = ok ? result.status : "failed";
       sends.push(sendRow(t, { message_id: result.messageId || null, status: state, status_id: result.statusId ?? null,
@@ -248,7 +252,10 @@ const sendRun = async (db: Db, run: Row, { outOfTime, sleep }: { outOfTime: () =
     if (!isSms && next < list.length) await sleep(WA_GAP_MS);
   }
 
-  const detail = [list.length ? `${sent}/${list.length} ${word} sent` : `Nobody to send to`, failed ? `${failed} failed` : "", note]
+  // e.g. "0/5 SMS sent · 5 failed (HTTP 401) · 1 skipped: 1 invalid number"
+  const top = [...reasons.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const failedText = failed ? `${failed} failed${top ? ` (${clip(top, 160)}${reasons.size > 1 ? ", and other reasons" : ""})` : ""}` : "";
+  const detail = [list.length ? `${sent}/${list.length} ${word} sent` : `Nobody to send to`, failedText, note]
     .filter(Boolean).join(" · ");
   const status = list.length && !sent ? "failed" : "done";
   await db.logs([logRow(null, "bulk", status === "failed" ? "failed" : "ok", `${runLabel}: ${detail}`)]);

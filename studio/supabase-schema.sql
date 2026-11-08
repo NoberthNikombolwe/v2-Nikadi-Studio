@@ -1080,7 +1080,7 @@ CREATE TABLE IF NOT EXISTS message_schedule_runs (
   schedule_id  UUID NOT NULL REFERENCES message_schedules(id) ON DELETE CASCADE,
   event_id     UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   run_at       TIMESTAMPTZ NOT NULL,
-  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','done','failed','skipped','cancelled')),
+  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sending','done','failed','skipped','cancelled','handed')),
   sent         INT NOT NULL DEFAULT 0,
   failed       INT NOT NULL DEFAULT 0,
   skipped      INT NOT NULL DEFAULT 0,
@@ -1093,6 +1093,18 @@ CREATE TABLE IF NOT EXISTS message_schedule_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON message_schedule_runs(schedule_id, run_at);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_due ON message_schedule_runs(run_at) WHERE status IN ('pending','sending');
+
+-- Who sends a schedule's SMS: our server (run-schedules, at each time) or NextSMS itself —
+-- handed over from the app when the schedule is saved (the normal send with a date and time).
+-- NextSMS has no way to cancel those, so such a schedule can't be paused, cancelled or edited.
+-- A handed-over send time is 'handed' until its time passes, then 'done' (finish_handed_runs).
+ALTER TABLE message_schedules ADD COLUMN IF NOT EXISTS sent_by TEXT NOT NULL DEFAULT 'server';
+DO $$ BEGIN
+  ALTER TABLE message_schedules ADD CONSTRAINT message_schedules_sent_by_check CHECK (sent_by IN ('server','nextsms'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE message_schedule_runs DROP CONSTRAINT IF EXISTS message_schedule_runs_status_check;
+ALTER TABLE message_schedule_runs ADD CONSTRAINT message_schedule_runs_status_check
+  CHECK (status IN ('pending','sending','done','failed','skipped','cancelled','handed'));
 
 -- Who a run goes to, fixed when it starts (phones + texts). Server only; removed when the run ends.
 CREATE TABLE IF NOT EXISTS message_run_targets (
@@ -1121,14 +1133,15 @@ CREATE POLICY p_schedules_delete ON message_schedules FOR DELETE TO authenticate
 CREATE POLICY p_schedule_runs_select ON message_schedule_runs FOR SELECT TO authenticated
   USING (EXISTS (SELECT 1 FROM message_schedules s WHERE s.id = message_schedule_runs.schedule_id));
 
--- Recounts a schedule's runs and marks it done once nothing is left to send
+-- Recounts a schedule's runs and marks it done once nothing is left to send (a send held by
+-- NextSMS still counts as to come)
 CREATE OR REPLACE FUNCTION public.refresh_message_schedule(p_id UUID) RETURNS VOID
 LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   UPDATE message_schedules s SET
     total_runs = (SELECT count(*) FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status <> 'cancelled'),
     done_runs  = (SELECT count(*) FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status IN ('done','failed','skipped')),
     status     = CASE WHEN s.status IN ('active','paused')
-                       AND NOT EXISTS (SELECT 1 FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status IN ('pending','sending'))
+                       AND NOT EXISTS (SELECT 1 FROM message_schedule_runs r WHERE r.schedule_id = s.id AND r.status IN ('pending','sending','handed'))
                       THEN 'done' ELSE s.status END
    WHERE s.id = p_id
 $$;
@@ -1143,7 +1156,8 @@ GRANT EXECUTE ON FUNCTION public.server_time() TO authenticated;
 
 -- Creates a schedule with its send times, or (p_id set) edits one: the fields change and
 -- the sends still waiting are replaced by p_run_times; sends already made stay as they were.
--- p_fields: title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern.
+-- p_fields: title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern,
+-- sent_by ('server' | 'nextsms' — SMS only, fixed when created; a NextSMS schedule can't be edited).
 CREATE OR REPLACE FUNCTION public.save_message_schedule(
   p_id UUID, p_event_id UUID, p_channel TEXT, p_fields JSONB, p_run_times TIMESTAMPTZ[]
 ) RETURNS UUID
@@ -1162,6 +1176,7 @@ DECLARE
   v_image  BOOLEAN := p_channel = 'whatsapp' AND COALESCE((p_fields ->> 'wa_image')::BOOLEAN, TRUE);   -- SMS never has an image
   v_aud    TEXT := COALESCE(NULLIF(p_fields ->> 'audience', ''), 'all');
   v_pat    JSONB := COALESCE(p_fields -> 'pattern', '{}'::jsonb);
+  v_by     TEXT := CASE WHEN p_channel = 'sms' AND p_fields ->> 'sent_by' = 'nextsms' THEN 'nextsms' ELSE 'server' END;
 BEGIN
   IF p_channel NOT IN ('sms','whatsapp') THEN RAISE EXCEPTION 'Unknown channel %', p_channel; END IF;
   IF NOT public.has_perm(p_channel, TRUE) THEN
@@ -1187,6 +1202,7 @@ BEGIN
     SELECT * INTO v_old FROM message_schedules s WHERE s.id = v_id FOR UPDATE;
     IF NOT FOUND OR v_old.event_id <> p_event_id OR v_old.channel <> p_channel THEN RAISE EXCEPTION 'Schedule not found'; END IF;
     IF v_old.status IN ('done','cancelled') THEN RAISE EXCEPTION 'This schedule has finished — create a new one'; END IF;
+    IF v_old.sent_by = 'nextsms' THEN RAISE EXCEPTION 'This schedule was handed to NextSMS and can''t be changed'; END IF;
     UPDATE message_schedules s SET title = v_title, body = v_body, message_key = v_key, sender_id = v_sender,
            wa_template = v_tpl, wa_account = v_acct, wa_image = v_image, audience = v_aud, pattern = v_pat,
            updated_by = v_email, updated_at = NOW()
@@ -1194,8 +1210,8 @@ BEGIN
     UPDATE message_schedule_runs r SET status = 'cancelled', finished_at = NOW(), detail = 'Replaced when the schedule was edited'
      WHERE r.schedule_id = v_id AND r.status = 'pending';
   ELSE
-    INSERT INTO message_schedules (event_id, channel, title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern, created_by)
-    VALUES (p_event_id, p_channel, v_title, v_body, v_key, v_sender, v_tpl, v_acct, v_image, v_aud, v_pat, v_email)
+    INSERT INTO message_schedules (event_id, channel, title, body, message_key, sender_id, wa_template, wa_account, wa_image, audience, pattern, created_by, sent_by)
+    VALUES (p_event_id, p_channel, v_title, v_body, v_key, v_sender, v_tpl, v_acct, v_image, v_aud, v_pat, v_email, v_by)
     RETURNING id INTO v_id;
   END IF;
   INSERT INTO message_schedule_runs (schedule_id, event_id, run_at) SELECT v_id, p_event_id, t FROM unnest(v_times) t;
@@ -1215,6 +1231,15 @@ BEGIN
   IF NOT FOUND OR NOT public.can_see_event(v.event_id) THEN RAISE EXCEPTION 'Schedule not found'; END IF;
   IF NOT public.has_perm(v.channel, TRUE) THEN RAISE EXCEPTION 'Your role cannot change this schedule'; END IF;
   IF v.status IN ('done','cancelled') THEN RAISE EXCEPTION 'This schedule has already finished'; END IF;
+  -- NextSMS can't stop SMS it holds: such a schedule can't be paused, and can be cancelled
+  -- only when none of its sends is still waiting there (e.g. the hand-over failed)
+  IF v.sent_by = 'nextsms' AND p_status IN ('paused','active') THEN
+    RAISE EXCEPTION 'SMS handed to NextSMS can''t be paused — NextSMS has no way to hold them back';
+  END IF;
+  IF v.sent_by = 'nextsms' AND p_status = 'cancelled'
+     AND EXISTS (SELECT 1 FROM message_schedule_runs r WHERE r.schedule_id = p_id AND r.status = 'handed' AND r.run_at > NOW()) THEN
+    RAISE EXCEPTION 'SMS handed to NextSMS can''t be cancelled — NextSMS has no way to stop them';
+  END IF;
   IF p_status = 'paused' THEN
     UPDATE message_schedules s SET status = 'paused' WHERE s.id = p_id;
   ELSIF p_status = 'active' THEN
@@ -1233,6 +1258,61 @@ BEGIN
   UPDATE message_schedules s SET updated_by = auth.jwt() ->> 'email', updated_at = NOW() WHERE s.id = p_id;
   RETURN (SELECT s.status FROM message_schedules s WHERE s.id = p_id);
 END $$;
+
+-- The app reports one send time of a NextSMS schedule after handing it over: 'handed' when
+-- NextSMS took some of it (it holds them until the time), 'failed' when it took none (nothing
+-- will go out). Only a send time still waiting, of a NextSMS SMS schedule on an event you can
+-- see, with SMS (edit).
+CREATE OR REPLACE FUNCTION public.record_schedule_handover(
+  p_run_id UUID, p_accepted BOOLEAN, p_sent INT, p_failed INT, p_skipped INT, p_detail TEXT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_sched UUID;
+BEGIN
+  SELECT r.schedule_id INTO v_sched
+    FROM message_schedule_runs r JOIN message_schedules s ON s.id = r.schedule_id
+   WHERE r.id = p_run_id AND r.status = 'pending' AND s.sent_by = 'nextsms' AND s.channel = 'sms'
+     AND public.has_perm('sms', TRUE) AND public.can_see_event(s.event_id)
+   FOR UPDATE OF r;
+  IF v_sched IS NULL THEN RETURN FALSE; END IF;
+  UPDATE message_schedule_runs r SET
+         status = CASE WHEN p_accepted THEN 'handed' ELSE 'failed' END,
+         sent = GREATEST(COALESCE(p_sent, 0), 0), failed = GREATEST(COALESCE(p_failed, 0), 0),
+         skipped = GREATEST(COALESCE(p_skipped, 0), 0), detail = left(p_detail, 500),
+         started_at = NOW(), finished_at = CASE WHEN p_accepted THEN NULL ELSE NOW() END, attempts = r.attempts + 1
+   WHERE r.id = p_run_id;
+  PERFORM public.refresh_message_schedule(v_sched);
+  RETURN TRUE;
+END $$;
+REVOKE ALL ON FUNCTION public.record_schedule_handover(UUID, BOOLEAN, INT, INT, INT, TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.record_schedule_handover(UUID, BOOLEAN, INT, INT, INT, TEXT) TO authenticated;
+
+-- Once a handed-over send time has passed, NextSMS has sent it: mark it done (each message's
+-- own result still comes from the delivery reports). A NextSMS send time never handed over
+-- (the page closed first) is skipped — nothing went out. Called every minute by pg_cron.
+CREATE OR REPLACE FUNCTION public.finish_handed_runs() RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_ids UUID[];
+  v_n   INT;
+BEGIN
+  WITH u AS (
+    UPDATE message_schedule_runs r SET
+           status = CASE WHEN r.status = 'handed' THEN 'done' ELSE 'skipped' END,
+           finished_at = NOW(),
+           detail = CASE WHEN r.status = 'handed' THEN left(COALESCE(r.detail || ' · ', '') || 'sent by NextSMS at its time', 500)
+                         ELSE 'Not handed to NextSMS — the page was closed before it finished, so nothing went out' END
+      FROM message_schedules s
+     WHERE s.id = r.schedule_id AND s.sent_by = 'nextsms' AND r.run_at <= NOW()
+       AND (r.status = 'handed' OR (r.status = 'pending' AND r.run_at <= NOW() - INTERVAL '10 minutes'))
+    RETURNING r.schedule_id
+  ) SELECT array_agg(DISTINCT u.schedule_id), count(*) INTO v_ids, v_n FROM u;
+  PERFORM public.refresh_message_schedule(x) FROM unnest(COALESCE(v_ids, '{}')) x;
+  RETURN COALESCE(v_n, 0);
+END $$;
+REVOKE ALL ON FUNCTION public.finish_handed_runs() FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finish_handed_runs() TO service_role;
 
 -- ── Used only by the run-schedules Edge Function (service role) ──
 
@@ -1253,7 +1333,7 @@ BEGIN
     UPDATE message_schedule_runs r SET status = 'skipped', finished_at = NOW(),
            detail = 'Missed — the server was not running at this time'
       FROM message_schedules s
-     WHERE s.id = r.schedule_id AND s.status = 'active' AND r.status = 'pending' AND r.run_at < NOW() - INTERVAL '2 hours'
+     WHERE s.id = r.schedule_id AND s.status = 'active' AND s.sent_by = 'server' AND r.status = 'pending' AND r.run_at < NOW() - INTERVAL '2 hours'
     RETURNING r.schedule_id
   ) SELECT array_agg(DISTINCT u.schedule_id) INTO v_ids FROM u;
   PERFORM public.refresh_message_schedule(x) FROM unnest(COALESCE(v_ids, '{}')) x;
@@ -1268,7 +1348,7 @@ BEGIN
 
   SELECT r.id INTO v_run
     FROM message_schedule_runs r JOIN message_schedules s ON s.id = r.schedule_id
-   WHERE s.status = 'active'
+   WHERE s.status = 'active' AND s.sent_by = 'server'                -- NextSMS sends its own (never twice)
      AND ((r.status = 'pending' AND r.run_at <= NOW())
        OR (r.status = 'sending' AND (r.locked_until IS NULL OR r.locked_until < NOW())))
    ORDER BY r.run_at
@@ -1372,12 +1452,21 @@ BEGIN
       timeout_milliseconds := 60000)
     WHERE EXISTS (
       SELECT 1 FROM public.message_schedule_runs r JOIN public.message_schedules s ON s.id = r.schedule_id
-       WHERE s.status = 'active'
+       WHERE s.status = 'active' AND s.sent_by = 'server'
          AND ((r.status = 'pending' AND r.run_at <= NOW())
            OR (r.status = 'sending' AND (r.locked_until IS NULL OR r.locked_until < NOW()))))
   $job$);
 EXCEPTION WHEN OTHERS THEN
   RAISE NOTICE 'Scheduled sends: could not set up pg_cron / pg_net (%). Turn both on under Database → Extensions, then run this file again.', SQLERRM;
+END $outer$;
+
+-- Every minute: mark NextSMS send times whose time has passed as done (plain SQL — no Edge
+-- Function or Vault secret needed)
+DO $outer$
+BEGIN
+  PERFORM cron.schedule('nikadi-finish-handed', '* * * * *', $job$ SELECT public.finish_handed_runs() $job$);
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'NextSMS schedules: could not set up pg_cron (%). Turn on pg_cron under Database → Extensions, then run this file again.', SQLERRM;
 END $outer$;
 
 -- Live progress of schedules in the SMS / WhatsApp tabs
@@ -1534,7 +1623,8 @@ $$;
 -- Records sends as they happen (the app and scheduled sends). One item per number:
 --   { event_id, event_card_id?, channel, message_key, message_title, recipient_name, phone,
 --     message_id?, status?, status_id?, status_group?, status_name?, reason?, card_status?,
---     update_card?, schedule_run_id?, created_by? }
+--     update_card?, schedule_run_id?, created_by?, sent_at? }
+-- sent_at: when it goes out — a later time for SMS handed to NextSMS to send then (never earlier than now)
 -- For the main SMS (message_key 'main') and the WhatsApp card ('card') it also sets the guest's
 -- sms_status / wa_status, so the database — not a browser's memory — holds the status
 -- (update_card: false skips that, e.g. when the provider gave no answer at all).
@@ -1566,12 +1656,13 @@ BEGIN
     IF v_state NOT IN ('sent','delivered','read','failed') THEN v_state := 'failed'; END IF;
 
     INSERT INTO message_deliveries (message_id, event_id, event_card_id, channel, message_key, message_title, recipient_name, phone,
-                                    schedule_run_id, status, status_id, status_group, status_name, reason, done_at, source, created_by)
+                                    schedule_run_id, status, status_id, status_group, status_name, reason, done_at, source, created_by, sent_at)
     VALUES (NULLIF(it ->> 'message_id', ''), v_event, v_card, v_channel, v_key, left(it ->> 'message_title', 120), left(it ->> 'recipient_name', 200),
             left(it ->> 'phone', 20), NULLIF(it ->> 'schedule_run_id', '')::UUID, v_state, NULLIF(it ->> 'status_id', '')::INT,
             NULLIF(it ->> 'status_group', '')::INT, left(it ->> 'status_name', 80), left(it ->> 'reason', 300),
             CASE WHEN v_state IN ('delivered','read','failed') THEN NOW() END, 'send',
-            COALESCE(NULLIF(it ->> 'created_by', ''), v_email))
+            COALESCE(NULLIF(it ->> 'created_by', ''), v_email),
+            GREATEST(COALESCE(NULLIF(it ->> 'sent_at', '')::TIMESTAMPTZ, NOW()), NOW()))
     ON CONFLICT (message_id) DO NOTHING;
 
     IF NOT COALESCE((it ->> 'update_card')::BOOLEAN, TRUE) THEN
@@ -1634,7 +1725,8 @@ BEGIN
     IF d.event_card_id IS NOT NULL
        AND ((d.channel = 'sms' AND d.message_key = 'main') OR (d.channel = 'whatsapp' AND d.message_key = 'card'))
        AND NOT EXISTS (SELECT 1 FROM message_deliveries n WHERE n.event_card_id = d.event_card_id AND n.channel = d.channel
-                          AND n.message_key = d.message_key AND n.sent_at > d.sent_at) THEN
+                          AND n.message_key = d.message_key AND n.sent_at > d.sent_at
+                          AND n.sent_at <= NOW()) THEN                -- a send NextSMS holds for later doesn't count yet
       IF d.channel = 'sms' THEN
         UPDATE event_cards c SET sms_status = CASE v_state WHEN 'read' THEN 'delivered' ELSE v_state END WHERE c.id = d.event_card_id;
       ELSE
@@ -1683,7 +1775,7 @@ BEGIN
   RETURN QUERY
   WITH due AS (
     SELECT m.id FROM message_deliveries m
-     WHERE m.status = 'sent' AND m.message_id IS NOT NULL AND m.sent_at > NOW() - INTERVAL '3 days'
+     WHERE m.status = 'sent' AND m.message_id IS NOT NULL AND m.sent_at > NOW() - INTERVAL '3 days' AND m.sent_at <= NOW()
        AND (m.checked_at IS NULL OR m.checked_at < NOW() - CASE WHEN m.sent_at > NOW() - INTERVAL '1 hour' THEN INTERVAL '4 minutes'
                                                                WHEN m.sent_at > NOW() - INTERVAL '1 day'  THEN INTERVAL '30 minutes'
                                                                ELSE INTERVAL '3 hours' END)
@@ -1716,7 +1808,7 @@ BEGIN
       timeout_milliseconds := 60000)
     WHERE EXISTS (
       SELECT 1 FROM public.message_deliveries m
-       WHERE m.status = 'sent' AND m.message_id IS NOT NULL AND m.sent_at > NOW() - INTERVAL '3 days'
+       WHERE m.status = 'sent' AND m.message_id IS NOT NULL AND m.sent_at > NOW() - INTERVAL '3 days' AND m.sent_at <= NOW()
          AND (m.checked_at IS NULL OR m.checked_at < NOW() - CASE WHEN m.sent_at > NOW() - INTERVAL '1 hour' THEN INTERVAL '4 minutes'
                                                                  WHEN m.sent_at > NOW() - INTERVAL '1 day'  THEN INTERVAL '30 minutes'
                                                                  ELSE INTERVAL '3 hours' END))

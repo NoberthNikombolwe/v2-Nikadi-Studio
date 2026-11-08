@@ -289,7 +289,12 @@ export const RUN_STATUS = {
   failed:    { label: "Failed",    badge: "badge-no" },
   skipped:   { label: "Skipped",   badge: "badge-testing" },
   cancelled: { label: "Cancelled", badge: "badge-idle" },
+  handed:    { label: "With NextSMS", badge: "badge-sent" },   // NextSMS holds it until its time
 };
+
+// A send still to come: waiting for our server, being sent, or held by NextSMS until its time
+const isUpcoming = (r, now) => r && (r.status === "pending" || r.status === "sending"
+  || (r.status === "handed" && new Date(r.run_at).getTime() > now.getTime()));
 
 // Schedules page filters: q (name / event / message), channel, status ("live" = active or
 // paused), eventId. Each schedule may carry `event_name` (joined in by the page).
@@ -307,7 +312,7 @@ export const summariseSchedules = (list = [], waiting = [], now = new Date()) =>
   const count = (st) => list.filter(s => s.status === st).length;
   const live = new Set(list.filter(s => s.status === "active").map(s => s.id));
   const weekEnd = now.getTime() + 7 * 86_400_000;
-  const pending = waiting.filter(r => live.has(r.schedule_id) && (r.status === "pending" || r.status === "sending"));
+  const pending = waiting.filter(r => live.has(r.schedule_id) && isUpcoming(r, now));
   return {
     active: count("active"), paused: count("paused"), done: count("done"), cancelled: count("cancelled"),
     dueToday: pending.filter(r => ymd(new Date(r.run_at)) === ymd(now)).length,
@@ -315,7 +320,61 @@ export const summariseSchedules = (list = [], waiting = [], now = new Date()) =>
   };
 };
 
-// The next send still waiting (runs sorted or not), or null
-export const nextRun = (runs = []) => runs
-  .filter(r => r && (r.status === "pending" || r.status === "sending"))
+// The next send still to come (runs sorted or not), or null
+export const nextRun = (runs = [], now = new Date()) => runs
+  .filter(r => isUpcoming(r, now))
   .sort((a, b) => new Date(a.run_at) - new Date(b.run_at))[0] || null;
+
+/* ── SMS handed to NextSMS when the schedule is saved ("NextSMS schedules it") ──
+   NextSMS holds an SMS until a date and time (East Africa Time) when the normal send carries
+   `date` + `time` — the same route as a normal send. Its API has no way to cancel, pause or
+   change one afterwards, so such a schedule is fixed once saved: the guest list and texts
+   are taken at that moment. sent_by "server" is the other way: run-schedules sends at each
+   time and the schedule can be paused, cancelled or edited. */
+export const SENT_BY = {
+  nextsms: { label: "NextSMS schedules it", hint: "Handed to NextSMS when you save, the same way as a normal send. Can't be paused, cancelled or changed afterwards — the guests and texts are fixed now." },
+  server:  { label: "Nikadi server",        hint: "Our server sends at each time. You can pause, cancel or edit it; it needs the scheduler set up (README → Scheduled sends)." },
+};
+export const NEXTSMS_BATCH = 500;   // messages per /text/multi request (NextSMS's limit)
+
+// A send time as NextSMS takes it: { date: "YYYY-MM-DD", time: "HH:MM" } in East Africa
+// Time (UTC+3, no summer time), whatever this device's time zone. null for a bad time.
+export const eatDateTime = (at) => {
+  const d = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(d.getTime())) return null;
+  const e = new Date(d.getTime() + 3 * 3600_000).toISOString();
+  return { date: e.slice(0, 10), time: e.slice(11, 16) };
+};
+
+// The requests that hand one send time over: the guests in batches of NEXTSMS_BATCH, each send
+// time starting from a different guest. NextSMS refuses a bulk request whose first message
+// repeats one from the last 24 hours, and every send of a schedule has the same texts.
+export const handoverBatches = (targets = [], runIndex = 0, size = NEXTSMS_BATCH) => {
+  const n = targets.length;
+  if (!n) return [];
+  const k = ((Math.trunc(runIndex) % n) + n) % n;
+  const turned = [...targets.slice(k), ...targets.slice(0, k)];
+  const out = [];
+  for (let i = 0; i < n; i += size) out.push(turned.slice(i, i + size));
+  return out;
+};
+
+// NextSMS `reference` of one send time (≤ 50 characters, no spaces), to find it in its logs
+export const handoverReference = (runId) => `nikadi-${String(runId || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 32)}`;
+
+// What can still be done to a schedule. One handed to NextSMS can't be edited, paused or
+// resumed, and can't be cancelled while any of its sends is still waiting at NextSMS.
+//   runs: this schedule's runs ({ status, run_at })
+export const scheduleControls = (s = {}, runs = [], now = new Date()) => {
+  const live = s.status === "active" || s.status === "paused";
+  if (s.sent_by !== "nextsms") return { edit: live, pause: s.status === "active", resume: s.status === "paused", cancel: live, atNextsms: false };
+  const atNextsms = runs.some(r => r.status === "handed" && new Date(r.run_at).getTime() > now.getTime());
+  return { edit: false, pause: false, resume: false, cancel: live && !atNextsms, atNextsms };
+};
+
+// The line saved on a send time after handing it over, e.g.
+// "120/122 SMS accepted by NextSMS · 2 failed (UNDELIVERABLE — …) · 3 skipped: 3 invalid numbers"
+export const handoverDetail = ({ accepted = 0, total = 0, failed = 0, reason = "", skippedNote = "" } = {}) =>
+  [total ? `${accepted}/${total} SMS accepted by NextSMS` : "Nobody to send to",
+   failed ? `${failed} failed${reason ? ` (${String(reason).slice(0, 160)})` : ""}` : "", skippedNote]
+    .filter(Boolean).join(" · ");
