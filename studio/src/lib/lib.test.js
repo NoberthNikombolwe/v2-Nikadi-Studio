@@ -1281,3 +1281,164 @@ test("qrSizeForLogo: the size that gives every guest the logo (longest name, wit
   assert.equal(qrSizeForLogo(recs), 57 * 3 + 12);     // the long name needs version 10 (57 modules)
   assert.ok(qrSizeForLogo([]) >= 150);                // no guests yet: a typical guest
 });
+
+// ── "Powered by Nikadi" footer on every card ──
+import { footerLines, footerFontSize, cardFooterLayout, footerPill, boxesOverlap, snapFooterX, CARD_FOOTER_DEFAULTS } from "./cardFooter.js";
+
+test("footerLines: from Settings, never empty", () => {
+  assert.deepEqual(footerLines({}), [CARD_FOOTER_DEFAULTS.brand, CARD_FOOTER_DEFAULTS.phone]);
+  assert.deepEqual(footerLines({ card_footer_brand: " Powered by Nikadi Events ", card_footer_phone: "+255 750 301 111" }), ["Powered by Nikadi Events", "+255 750 301 111"]);
+  assert.deepEqual(footerLines({ card_footer_brand: "  ", card_footer_phone: null }), [CARD_FOOTER_DEFAULTS.brand, CARD_FOOTER_DEFAULTS.phone]);
+  assert.equal(settingsFromRows([]).card_footer_brand, "Powered by Nikadi");
+});
+
+test("cardFooterLayout: a centred pill at the bottom, sized from the card width", () => {
+  assert.deepEqual([footerFontSize(1080), footerFontSize(440), footerFontSize(4000)], [22, 9, 30]);
+  const measure = (t) => t.length * 10;
+  const L = cardFooterLayout(1080, 1350, ["Powered by Nikadi", "+255 750 301 1111"], measure);
+  assert.ok(Math.abs(L.pill.x + L.pill.w / 2 - 540) <= 1, "centred");
+  assert.ok(L.pill.y + L.pill.h < 1350 && L.pill.y + L.pill.h > 1350 - 30, "near the bottom edge");
+  assert.deepEqual(footerPill(1080, 1350, { lines: ["Powered by Nikadi", "+255 750 301 1111"], pos: null }, measure), L.pill);
+  assert.ok(L.lines[0].y < L.lines[1].y, "brand above the phone");
+  assert.ok(L.mark.x + L.mark.w < L.lines[0].x, "the mark before the first line");
+  assert.ok(L.mark.x >= L.pill.x && L.lines[0].x + measure(L.lines[0].text) <= L.pill.x + L.pill.w, "first line inside the pill");
+  assert.equal(L.lines[1].align, "center");
+});
+
+// ── Card footer per event: text and colours ──
+import { normaliseFooter, resolveFooter, hexToRgba, contrastRatio, footerHardToRead, FOOTER_STYLE_DEFAULTS, FOOTER_PRESETS } from "./cardFooter.js";
+
+test("normaliseFooter keeps only good values", () => {
+  assert.deepEqual(normaliseFooter({ brand: "Powered by Nikadi Events", phone: "+255 750 301 111", bg: "#B8860B", bgOpacity: 140, color: "#FFFFFF", extra: 1 }),
+    { brand: "Powered by Nikadi Events", phone: "+255 750 301 111", bg: "#b8860b", bgOpacity: 100, color: "#ffffff" });
+  assert.deepEqual(normaliseFooter({ bg: "red", color: "#12345", bgOpacity: "x" }), {});
+  assert.deepEqual(normaliseFooter(null), {});
+  assert.equal(normaliseFooter({ brand: "x".repeat(99) }).brand.length, 60);
+  assert.equal(normaliseFooter({ bgOpacity: 0 }).bgOpacity, 0);
+});
+
+test("resolveFooter: the event's text and colours over the Settings defaults", () => {
+  const settings = { card_footer_brand: "Powered by Nikadi", card_footer_phone: "+255 750 301 1111" };
+  const d = resolveFooter(settings, null);
+  assert.deepEqual(d.lines, ["Powered by Nikadi", "+255 750 301 1111"]);
+  assert.equal(d.bg, "rgba(0,0,0,0.55)");
+  assert.deepEqual(d.style, FOOTER_STYLE_DEFAULTS);
+  const e = resolveFooter(settings, { brand: "Imeandaliwa na Nikadi", bg: "#ffffff", bgOpacity: 85, color: "#0d1f3c" });
+  assert.deepEqual(e.lines, ["Imeandaliwa na Nikadi", "+255 750 301 1111"]);   // phone not changed → the default
+  assert.equal(e.bg, "rgba(255,255,255,0.85)");
+  assert.equal(e.color, "#0d1f3c");
+  assert.deepEqual(resolveFooter(settings, { brand: "   ", phone: "" }).lines, d.lines);   // never empty
+});
+
+test("hexToRgba and readability", () => {
+  assert.equal(hexToRgba("#b8860b", 90), "rgba(184,134,11,0.9)");
+  assert.equal(hexToRgba("nope", 50), "rgba(0,0,0,0.5)");
+  assert.ok(Math.abs(contrastRatio("#000000", "#ffffff") - 21) < 1e-9);
+  assert.equal(footerHardToRead({ bg: "#ffffff", bgOpacity: 85, color: "#eeeeee" }), true);
+  assert.equal(footerHardToRead({ bg: "#ffffff", bgOpacity: 10, color: "#eeeeee" }), false);   // barely any pill: the card shows through
+  for (const p of FOOTER_PRESETS) assert.equal(footerHardToRead(p), false, `${p.label} reads well`);
+});
+
+// ── Card footer dragged anywhere on the card ──
+test("the footer goes where it was dragged, and never off the card", () => {
+  const measure = (t) => t.length * 10, lines = ["Powered by Nikadi", "+255 750 301 1111"];
+  const top = cardFooterLayout(1080, 1350, lines, measure, { x: 0.5, y: 0.1 });
+  assert.ok(Math.abs(top.pill.x + top.pill.w / 2 - 540) <= 1 && Math.abs(top.pill.y + top.pill.h / 2 - 135) <= 1, "centred where it was dropped");
+  assert.ok(Math.abs(top.lines[1].x - 540) <= 1 && top.lines[0].y < top.lines[1].y, "the text moves with it");
+  const corner = cardFooterLayout(1080, 1350, lines, measure, { x: 1, y: 1 });
+  assert.deepEqual([corner.pill.x + corner.pill.w, corner.pill.y + corner.pill.h], [1080, 1350]);   // pushed back onto the card
+  const left = cardFooterLayout(1080, 1350, lines, measure, { x: 0, y: 0 });
+  assert.deepEqual([left.pill.x, left.pill.y], [0, 0]);
+  assert.ok(left.mark.x >= 0);
+});
+
+test("the dragged position is saved as shares of the card, and snaps to the middle", () => {
+  assert.deepEqual(normaliseFooter({ x: 0.123456, y: 0.9 }), { x: 0.1235, y: 0.9 });
+  assert.deepEqual(normaliseFooter({ x: 2, y: -1 }), { x: 1, y: 0 });
+  assert.deepEqual(normaliseFooter({ x: 0.5 }), {});                       // both or neither
+  assert.deepEqual(normaliseFooter({ x: null, y: 0.4 }), {});
+  assert.deepEqual(resolveFooter({}, { x: 0.3, y: 0.2 }).pos, { x: 0.3, y: 0.2 });
+  assert.equal(resolveFooter({}, {}).pos, null);                           // bottom centre
+  assert.deepEqual([snapFooterX(0.49), snapFooterX(0.51), snapFooterX(0.47)], [0.5, 0.5, 0.47]);
+});
+
+test("boxesOverlap finds a QR under the footer", () => {
+  const pill = { x: 400, y: 1250, w: 280, h: 70 };
+  assert.equal(boxesOverlap({ x: 440, y: 1100, w: 200, h: 200 }, pill), true);
+  assert.equal(boxesOverlap({ x: 440, y: 900, w: 200, h: 200 }, pill), false);
+  assert.equal(boxesOverlap({ x: 0, y: 1250, w: 400, h: 70 }, pill), false);   // touching edges only
+  assert.equal(boxesOverlap(null, pill), false);
+});
+
+// ── Card footer size ──
+import { FOOTER_SIZE, stepFooterSize } from "./cardFooter.js";
+
+test("the footer's size: saved in range, − / + in 10% steps", () => {
+  assert.equal(normaliseFooter({ scale: 1.234 }).scale, 1.23);
+  assert.deepEqual([normaliseFooter({ scale: 9 }).scale, normaliseFooter({ scale: 0.1 }).scale], [FOOTER_SIZE.max, FOOTER_SIZE.min]);
+  assert.equal(normaliseFooter({ scale: "" }).scale, undefined);
+  assert.equal(resolveFooter({}, {}).scale, 1);
+  assert.equal(resolveFooter({}, { scale: 1.5 }).scale, 1.5);
+  assert.deepEqual([stepFooterSize(1, 1), stepFooterSize(1, -1), stepFooterSize(0.7, 1)], [1.1, 0.9, 0.8]);   // no float noise
+  assert.deepEqual([stepFooterSize(FOOTER_SIZE.max, 1), stepFooterSize(FOOTER_SIZE.min, -1)], [FOOTER_SIZE.max, FOOTER_SIZE.min]);
+});
+
+test("a bigger footer grows its text and pill, and still stays on the card", () => {
+  const measure = (t, font) => t.length * Number(/(\d+)px/.exec(font)[1]) * 0.5, lines = ["Powered by Nikadi", "+255 750 301 1111"];
+  const normal = cardFooterLayout(1080, 1350, lines, measure, null, 1);
+  const big = cardFooterLayout(1080, 1350, lines, measure, null, 2);
+  const small = cardFooterLayout(1080, 1350, lines, measure, null, 0.5);
+  assert.deepEqual([small.fontSize, normal.fontSize, big.fontSize], [11, 22, 44]);
+  assert.ok(big.pill.w > normal.pill.w * 1.9 && big.pill.h > normal.pill.h * 1.9);
+  assert.ok(big.mark.h > normal.mark.h * 1.9, "the mark grows too");
+  assert.equal(big.pill.y + big.pill.h < 1350, true);                                  // bottom centre: still on the card
+  const corner = cardFooterLayout(1080, 1350, lines, measure, { x: 1, y: 1 }, FOOTER_SIZE.max);
+  assert.deepEqual([corner.pill.x + corner.pill.w, corner.pill.y + corner.pill.h], [1080, 1350]);
+  assert.deepEqual(footerPill(1080, 1350, { lines, pos: null, scale: 2 }, measure), big.pill);
+});
+
+// ── Card fonts: Ubuntu, Outfit (Google), Aptos, Ananda (device / uploaded) ──
+import { CARD_FONTS, GOOGLE_FONTS_URL, cardFontOptions, uploadedFonts, missingCardFonts, validateFontUpload, fontFilePath, familyFromFileName } from "./fonts.js";
+
+test("the four new fonts are offered; Ubuntu and Outfit load from Google Fonts", () => {
+  const by = Object.fromEntries(CARD_FONTS.map(f => [f.value, f.source]));
+  assert.deepEqual([by.Ubuntu, by.Outfit, by.Aptos, by.Ananda], ["google", "google", "device", "device"]);
+  assert.match(GOOGLE_FONTS_URL, /family=Ubuntu:/);
+  assert.match(GOOGLE_FONTS_URL, /family=Outfit:/);
+  for (const f of CARD_FONTS.filter(x => x.source === "google")) assert.ok(GOOGLE_FONTS_URL.includes(`family=${f.value.replace(/ /g, "+")}:`), `${f.value} is loaded`);
+});
+
+test("uploaded fonts: cleaned, added to the list, and an uploaded Aptos counts as available", () => {
+  const up = [{ family: " Aptos ", url: "https://x.supabase.co/storage/v1/object/public/fonts/aptos-1.ttf" },
+    { family: "My Script", url: "https://x/f.woff2" }, { family: "Bad", url: "javascript:x" }, null];
+  assert.deepEqual(uploadedFonts(up).map(f => f.family), ["Aptos", "My Script"]);
+  const opts = cardFontOptions(up);
+  assert.equal(opts.find(o => o.value === "Aptos").source, "uploaded");
+  assert.equal(opts.find(o => o.value === "My Script").source, "uploaded");
+  assert.equal(opts.find(o => o.value === "Ananda").source, "device");
+  const notInstalled = () => false;
+  assert.deepEqual(missingCardFonts(["Ubuntu", "Aptos", "Ananda", "Ananda"], up, notInstalled), ["Ananda"]);   // Google fonts and uploaded ones are fine
+  assert.deepEqual(missingCardFonts(["Ananda"], [], () => true), []);                                           // installed on this computer
+});
+
+test("validateFontUpload and the stored file name", () => {
+  assert.deepEqual(validateFontUpload({ family: "Aptos", fileName: "Aptos.ttf", size: 300000 }), { errors: {}, ext: "ttf" });
+  assert.match(validateFontUpload({ family: "", fileName: "x.ttf", size: 1 }).errors.family, /name/);
+  assert.match(validateFontUpload({ family: "A", fileName: "x.zip", size: 1 }).errors.file, /\.ttf/);
+  assert.match(validateFontUpload({ family: "A", fileName: "x.woff2", size: 6e6 }).errors.file, /5 MB/);
+  assert.match(validateFontUpload({ family: "A;drop", fileName: "x.ttf", size: 1 }).errors.family, /letters/);
+  assert.match(validateFontUpload({ family: "aptos", fileName: "a.otf", size: 1 }, [{ family: "Aptos", url: "https://x" }]).errors.family, /already/);
+  assert.equal(fontFilePath("Ananda Script!", "ttf", 123), "ananda-script-123.ttf");
+  assert.deepEqual(["Aptos-Regular.ttf", "Ananda_Regular.otf", "OutfitBold.woff2", "MyFont.ttf"].map(familyFromFileName), ["Aptos", "Ananda", "Outfit", "My Font"]);
+});
+
+test("the footer has its own font", () => {
+  assert.equal(resolveFooter({}, { font: "Outfit" }).font, "Outfit");
+  assert.equal(resolveFooter({}, {}).font, "Plus Jakarta Sans");
+  assert.deepEqual(normaliseFooter({ font: "x'); alert(1" }), {});
+  const L = cardFooterLayout(1080, 1350, ["Powered by Nikadi", "+255"], (t) => t.length * 10, null, 1, "Ubuntu");
+  assert.ok(L.lines.every(l => l.font.includes("'Ubuntu', sans-serif")));
+  // a font without real numbers: the phone line keeps the normal font
+  const P = cardFooterLayout(1080, 1350, ["Powered by Nikadi", "+255"], (t) => t.length * 10, null, 1, "Ananda", "Plus Jakarta Sans");
+  assert.ok(P.lines[0].font.includes("'Ananda'") && P.lines[1].font.includes("'Plus Jakarta Sans'"));
+});

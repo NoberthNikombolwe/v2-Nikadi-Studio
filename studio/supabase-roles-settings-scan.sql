@@ -319,6 +319,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_ids_default   ON sender_ids   ((is_d
 -- Per-event choices (NULL = use the default)
 ALTER TABLE events ADD COLUMN IF NOT EXISTS sms_sender_id TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS wa_template   TEXT;
+-- The "Powered by" footer printed on the event's cards: { brand, phone, bg, bgOpacity, color }
+-- (any part unset uses the default; src/lib/cardFooter.js). Edited in Design by clicking the footer.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS card_footer   JSONB;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- 4. SCANNER + CALLS
@@ -736,6 +739,21 @@ GRANT EXECUTE ON FUNCTION public.storage_usage(), public.wa_cards_names(INT) TO 
 DROP POLICY IF EXISTS "superadmin_delete_wa_cards" ON storage.objects;
 CREATE POLICY "superadmin_delete_wa_cards" ON storage.objects FOR DELETE TO authenticated
   USING (bucket_id = 'wa-cards' AND public.my_role() = 'superuser');
+
+-- Card fonts uploaded in Settings → General (fonts that aren't on Google Fonts, e.g. Aptos):
+-- public so every computer's browser can load them by URL; uploaded with Settings (edit);
+-- each upload gets a new name, so nothing is overwritten. The list is app_settings.card_fonts.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('fonts', 'fonts', true, 5242880,
+  ARRAY['font/ttf','font/otf','font/woff','font/woff2','application/x-font-ttf','application/x-font-otf',
+        'application/font-woff','application/font-woff2','application/vnd.ms-opentype','application/octet-stream'])
+ON CONFLICT (id) DO UPDATE SET public = EXCLUDED.public, file_size_limit = EXCLUDED.file_size_limit, allowed_mime_types = EXCLUDED.allowed_mime_types;
+DROP POLICY IF EXISTS "settings_insert_fonts" ON storage.objects;
+CREATE POLICY "settings_insert_fonts" ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'fonts' AND public.has_perm('settings', TRUE));
+DROP POLICY IF EXISTS "superadmin_delete_fonts" ON storage.objects;
+CREATE POLICY "superadmin_delete_fonts" ON storage.objects FOR DELETE TO authenticated
+  USING (bucket_id = 'fonts' AND public.my_role() = 'superuser');
 
 -- ─────────────────────────────────────────────────────────────────────
 -- 9. MESSAGE SCHEDULES — SMS / WhatsApp sends planned ahead: one or more

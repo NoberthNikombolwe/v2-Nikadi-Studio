@@ -19,6 +19,9 @@ import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, va
 import { peopleForCardType, peopleLabel, validateCardRule, scanStatus, remaining as placesLeft, filterGuests, cardSource, scanBreakdown, scanReportRows, SCAN_STATE_LABEL } from "./lib/cardRules";
 import { buildQrPayload, matchByName, SCAN_REASON, newScanCode } from "./lib/scan";
 import { drawQrLogo, qrStyle, qrSizeForLogo } from "./lib/qrLogo";
+import { GOOGLE_FONTS_URL, DEFAULT_CARD_FONT, cardFontOptions, uploadedFonts, missingCardFonts,
+  FONT_FILE_TYPES, validateFontUpload, fontFilePath, familyFromFileName } from "./lib/fonts";
+import { drawCardFooter, fontStack, FOOTER_DEFAULT_FONT, resolveFooter, footerPill, boxesOverlap, snapFooterX, normaliseFooter, hexToRgba, footerHardToRead, FOOTER_PRESETS, FOOTER_SIZE, stepFooterSize } from "./lib/cardFooter";
 import { CALL_STATUSES, callOptions, nextCallStatus, summariseCalls, filterCalls } from "./lib/calls";
 import { GUIDE_STAGES, GUIDE_STEPS, GUIDE_LINKS, stepsOfStage, guideProgress } from "./lib/guide";
 import { ACCOUNT_TYPES, TXN_KINDS, TXN_CATEGORIES, validateTransaction, txnToRow, validateAccount, summariseTransactions, marginTone, formatPct,
@@ -98,26 +101,14 @@ const loadJsZip = () => import("jszip").then(m => m.default);
 /* ══════════════════════════════════════════════════════════════════════════
    BRAND
 ══════════════════════════════════════════════════════════════════════════ */
-const FONTS = "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&family=Poppins:wght@400;500;600;700;800&family=Montserrat:wght@400;500;600;700;800&family=Raleway:wght@400;500;600;700;800&family=Open+Sans:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Playfair+Display:wght@400;500;600;700&family=Oswald:wght@400;500;600;700&family=Lato:wght@400;700&family=Dancing+Script:wght@400;500;600;700&display=swap";
 
-const FONT_OPTIONS = [
-  { label:"Plus Jakarta Sans", value:"Plus Jakarta Sans" },
-  { label:"Poppins",           value:"Poppins" },
-  { label:"Montserrat",        value:"Montserrat" },
-  { label:"Raleway",           value:"Raleway" },
-  { label:"Open Sans",         value:"Open Sans" },
-  { label:"Roboto",            value:"Roboto" },
-  { label:"Playfair Display",  value:"Playfair Display" },
-  { label:"Oswald",            value:"Oswald" },
-  { label:"Lato",              value:"Lato" },
-  { label:"Dancing Script",    value:"Dancing Script" },
-];
+// Card fonts are listed in src/lib/fonts.js (CARD_FONTS; uploaded ones are added in Settings)
 
 // Colour tokens are CSS variables with light + dark values — see src/lib/theme.js and src/index.css
 
 
 const CSS = `
-  @import url('${FONTS}');
+  @import url('${GOOGLE_FONTS_URL}');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: ${N.navy900}; font-family: 'Plus Jakarta Sans', sans-serif; color: ${N.text}; }
   .nk-app { display: flex; flex-direction: column; min-height: 100vh; background: ${N.navy900}; }
@@ -857,9 +848,10 @@ const sampleRecords = () => ["Guest One","Guest Two","Guest Three"].map((name, i
 ══════════════════════════════════════════════════════════════════════════ */
 // Interactive <canvas> preview of one card: draws background + elements, and lets
 // the user click-select and drag-reposition an element with the mouse.
-function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onMove }) {
+function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onMove, footer = null, onFooterMove }) {
   const ref  = useRef(null);
   const drag = useRef(null);
+  const footerRect = useRef(null);   // where the footer was drawn, so a click on it selects it
   const cw   = bgSize?.w || DEFAULT_W;
   const ch   = bgSize?.h || DEFAULT_H;
   const displayW = Math.min(cw, MAX_DISPLAY_W);
@@ -904,9 +896,18 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
         }
       });
     };
+    // The footer (dashed outline when selected); QR codes load later and go on top of it
+    const paintFooter = () => {
+      const L = drawCardFooter(ctx, cw, ch, footer);
+      footerRect.current = L?.pill || null;
+      if (L && selected === "footer") {
+        ctx.save(); ctx.strokeStyle="#38bdf8"; ctx.lineWidth=1.5; ctx.setLineDash([4,3]);
+        ctx.strokeRect(L.pill.x-3, L.pill.y-3, L.pill.w+6, L.pill.h+6); ctx.restore();
+      }
+    };
     if (bgImage) {
       const img = new Image();
-      img.onload = () => { ctx.drawImage(img, 0, 0, cw, ch); renderEls(); };
+      img.onload = () => { ctx.drawImage(img, 0, 0, cw, ch); renderEls(); paintFooter(); };
       img.src = bgImage;
     } else {
       const g = ctx.createLinearGradient(0,0,cw,ch); g.addColorStop(0,"#0a1628"); g.addColorStop(1,"#0d1f3c");
@@ -920,10 +921,18 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
       ctx.fillStyle="rgba(59,130,246,0.15)";
       for(let xi=0;xi<5;xi++) for(let yi=0;yi<3;yi++){ctx.beginPath();ctx.arc(cw-20-xi*12,15+yi*12,2,0,Math.PI*2);ctx.fill();}
       renderEls();
+      paintFooter();
     }
-  }, [bgImage, cw, ch, elements, record, selected]);
+  }, [bgImage, cw, ch, elements, record, selected, footer]);
 
   useEffect(() => { draw(); }, [draw]);
+  // Redraw when a font finishes loading (Google or uploaded), so the preview shows the real font
+  useEffect(() => {
+    const again = () => draw();
+    document.fonts?.addEventListener?.("loadingdone", again);
+    window.addEventListener("nikadi-fonts", again);
+    return () => { document.fonts?.removeEventListener?.("loadingdone", again); window.removeEventListener("nikadi-fonts", again); };
+  }, [draw]);
 
   // Hit-tests canvas coords against elements (topmost/last-in-array first) for click-selection
   const hitEl  = (cx,cy) => [...elements].reverse().find((el) => {
@@ -932,10 +941,31 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
   });
   // Converts a mouse event's client coords to canvas-space coords (accounts for display scaling)
   const toCv   = (e) => { const r=ref.current.getBoundingClientRect(); return {cx:(e.clientX-r.left)*scaleX,cy:(e.clientY-r.top)*scaleY}; };
-  // Mouse-down: select the element under the cursor (or deselect) and start a drag
-  const onDown = (e) => { const {cx,cy}=toCv(e); const el=hitEl(cx,cy); if(el){onSelect(el.id);drag.current={id:el.id,ox:cx-el.x,oy:cy-el.y};}else onSelect(null); };
-  // Mouse-move: while dragging, report the new element position up to the parent
-  const onMov  = (e) => { if(!drag.current)return; const {cx,cy}=toCv(e); onMove(drag.current.id,cx-drag.current.ox,cy-drag.current.oy); };
+  // Mouse-down: select what is under the cursor (or deselect) and start a drag. The order
+  // follows what is drawn on top: QR codes, then the footer, then text.
+  const inFooter = (cx,cy) => { const p = footerRect.current; return !!p && cx>=p.x && cx<=p.x+p.w && cy>=p.y && cy<=p.y+p.h; };
+  const onDown = (e) => {
+    const {cx,cy}=toCv(e); const el=hitEl(cx,cy);
+    if (el && el.type === "qr") { onSelect(el.id); drag.current={id:el.id,ox:cx-el.x,oy:cy-el.y}; return; }
+    if (inFooter(cx,cy)) {
+      const p = footerRect.current;
+      onSelect("footer");
+      if (onFooterMove) drag.current = { id:"footer", ox:cx-(p.x+p.w/2), oy:cy-(p.y+p.h/2) };   // grab offset from its centre
+      return;
+    }
+    if (el) { onSelect(el.id); drag.current={id:el.id,ox:cx-el.x,oy:cy-el.y}; return; }
+    onSelect(null);
+  };
+  // Mouse-move: while dragging, report the new position up to the parent. The footer's is its
+  // centre as shares of the card (snapping to the middle line); it can't leave the card.
+  const onMov  = (e) => {
+    if(!drag.current)return; const {cx,cy}=toCv(e);
+    if (drag.current.id === "footer") {
+      onFooterMove({ x: snapFooterX(Math.max(0, Math.min(1, (cx-drag.current.ox)/cw))), y: Math.max(0, Math.min(1, (cy-drag.current.oy)/ch)) });
+      return;
+    }
+    onMove(drag.current.id,cx-drag.current.ox,cy-drag.current.oy);
+  };
   // Mouse-up/leave: end the current drag
   const onUp   = () => { drag.current=null; };
 
@@ -946,6 +976,66 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
       onMouseDown={onDown} onMouseMove={onMov} onMouseUp={onUp} onMouseLeave={onUp} />
   );
 }
+
+// Is `family` installed on this computer? (text in it measures differently from both fallbacks)
+const fontOnDeviceCache = new Map();
+const fontOnDevice = (family) => {
+  if (typeof document === "undefined" || !family) return false;
+  if (fontOnDeviceCache.has(family)) return fontOnDeviceCache.get(family);
+  const ctx = document.createElement("canvas").getContext("2d");
+  const width = (font) => { ctx.font = `72px ${font}`; return ctx.measureText("mmmmmmmmmmlliWW@#0").width; };
+  const has = ["monospace", "serif"].some(b => width(`'${family}', ${b}`) !== width(b));
+  fontOnDeviceCache.set(family, has);
+  return has;
+};
+// Registers the fonts uploaded in Settings for the card canvas (once each), then tells the
+// preview to redraw ("nikadi-fonts")
+const loadedFontUrls = new Set();
+const loadUploadedFonts = (list = []) => list.forEach(({ family, url }) => {
+  if (loadedFontUrls.has(url) || typeof FontFace === "undefined") return;
+  loadedFontUrls.add(url);
+  new FontFace(family, `url("${url}")`).load()
+    .then(face => { document.fonts.add(face); fontOnDeviceCache.clear(); fakeDigitsCache.clear(); window.dispatchEvent(new Event("nikadi-fonts")); })
+    .catch(() => loadedFontUrls.delete(url));
+});
+// Some free "personal use" copies of fonts (like the Ananda one) draw every number as the same
+// placeholder symbol. True when "1" and "8" come out identical in `family`.
+const fakeDigitsCache = new Map();
+const fontHasFakeDigits = (family) => {
+  if (typeof document === "undefined" || !family) return false;
+  if (fakeDigitsCache.has(family)) return fakeDigitsCache.get(family);
+  const c = document.createElement("canvas"); c.width = 64; c.height = 64;
+  const ctx = c.getContext("2d");
+  const pic = (t) => { ctx.clearRect(0, 0, 64, 64); ctx.font = `48px '${family}', serif`; ctx.textBaseline = "top"; ctx.fillText(t, 4, 4); return ctx.getImageData(0, 0, 64, 64).data.join(","); };
+  const fake = pic("1") === pic("8") && pic("1") !== pic(" ");
+  fakeDigitsCache.set(family, fake);
+  return fake;
+};
+// A font's name in the pickers, saying when it can't be used on this computer
+const fontLabel = (f) => f.label + (f.source === "device" && !fontOnDevice(f.value) ? " — not on this computer" : f.source === "uploaded" ? " (uploaded)" : "");
+// Under a font picker: the chosen font isn't on this computer and wasn't uploaded
+// …and when its numbers are placeholder symbols (`footer`: the phone line uses the normal font)
+const FontMissing = ({ family, uploaded, footer = false }) => {
+  const note = (text) => <div className="nk-chip" style={{fontSize:11,lineHeight:1.6,color:N.amber,margin:"-4px 0 10px"}}><Icon n="alert" /> {text}</div>;
+  if (missingCardFonts([family], uploaded, fontOnDevice).length) {
+    return note(`${family} isn't on this computer and hasn't been uploaded, so cards made here would use a standard font. Upload its font file in Settings → General → Card fonts.`);
+  }
+  if (fontHasFakeDigits(family)) {
+    return note(footer
+      ? `This copy of ${family} has no real numbers (0–9) — it's usually a free "personal use" version — so the phone line uses ${FOOTER_DEFAULT_FONT} instead.`
+      : `This copy of ${family} has no real numbers (0–9) — it's usually a free "personal use" version — so numbers in this text (e.g. a card type like "Watu 30") would show as symbols. Use the full version of the font, or another font for text with numbers.`);
+  }
+  return null;
+};
+
+// Width of `text` in `font` px, for layouts worked out outside a drawing canvas
+let measureCtx = null;
+const measureText = (text, font) => {
+  if (typeof document === "undefined") return String(text).length * 6;
+  measureCtx = measureCtx || document.createElement("canvas").getContext("2d");
+  measureCtx.font = font;
+  return measureCtx.measureText(text).width;
+};
 
 /* ── Export ──────────────────────────────────────────────────────────── */
 // Loads an image, retrying on error and giving up after `timeoutMs` so a stalled
@@ -963,11 +1053,12 @@ const loadImage = (src, { cors = false, retries = 0, timeoutMs = 15000 } = {}) =
   attempt(retries);
 });
 
-// Rasterises one card (background + text/QR elements) to a PNG data-URL, off-screen,
+// Rasterises one card (background + text/QR elements + the "Powered by Nikadi" footer,
+// `footer` = resolveFooter(...)) to a PNG data-URL, off-screen,
 // for download or upload. Every image is loaded before anything is drawn, and the
 // promise REJECTS if the template or any QR code can't be loaded — a card must never
 // be exported (and then sent to a guest) with its QR code silently missing.
-async function exportCard(bgImage, bgSize, elements, record) {
+async function exportCard(bgImage, bgSize, elements, record, footer = null) {
   const cw = bgSize?.w||DEFAULT_W; const ch = bgSize?.h||DEFAULT_H;
   const cv = document.createElement("canvas"); cv.width=cw; cv.height=ch;
   const ctx = cv.getContext("2d");
@@ -976,8 +1067,10 @@ async function exportCard(bgImage, bgSize, elements, record) {
   const qrLooks = qrEls.map(el => qrStyle(qrData, el.size));   // logo when big enough to scan with it
   // Web fonts load lazily, and canvas drawing doesn't trigger a load — wait for every font a
   // text element uses, or the card silently falls back to a default font
-  await Promise.all(elements.filter(el => el.type==="text").map(el =>
-    Promise.resolve(document.fonts?.load(`${el.bold?"bold ":""}${el.fontSize}px '${el.fontFamily||"Plus Jakarta Sans"}'`)).catch(() => {})));
+  await Promise.all([
+    ...elements.filter(el => el.type==="text").map(el => `${el.bold?"bold ":""}${el.fontSize}px '${el.fontFamily||"Plus Jakarta Sans"}'`),
+    ...(footer?.lines?.length ? [`600 20px ${fontStack(footer.font)}`, `700 20px ${fontStack(footer.font)}`] : []),
+  ].map(f => Promise.resolve(document.fonts?.load(f)).catch(() => {})));
   const [bg, ...qrImgs] = await Promise.all([
     bgImage ? loadImage(bgImage).catch(e => { throw new Error(`Template image ${e.message}`); }) : null,
     ...qrEls.map((el, i) => loadImage(qrUrl(qrData, el.size, qrLooks[i].ecc), { cors:true, retries:2 })
@@ -1005,6 +1098,7 @@ async function exportCard(bgImage, bgSize, elements, record) {
       ctx.fillText(val,el.x,el.y); ctx.textAlign="left";
     }
   });
+  drawCardFooter(ctx, cw, ch, footer);   // before the QR codes: a QR placed low stays on top, scannable
   qrEls.forEach((el, i) => {
     ctx.save(); ctx.shadowColor="rgba(0,0,0,0.2)"; ctx.shadowBlur=6;
     ctx.drawImage(qrImgs[i],el.x,el.y,el.size,el.size); ctx.restore();
@@ -3125,6 +3219,8 @@ function GeneralSettings({ access }) {
     ["org_name", "Organisation name", "Shown on reports"],
     ["country_code", "Default country code", "Local numbers like 0712… get this prefix (Tanzania = 255)"],
     ["wa_account", "WhatsApp provider account", "Used by templates that don't name their own account"],
+    ["card_footer_brand", "Card footer — first line", "Default for every card, e.g. Powered by Nikadi. An event can change it in Design (click the footer)."],
+    ["card_footer_phone", "Card footer — phone", "Default phone line under it. An event can change it in Design (click the footer)."],
   ];
   return (
     <div style={card}>
@@ -3137,6 +3233,90 @@ function GeneralSettings({ access }) {
         </div>
       ))}
       <p style={{fontSize:11,color:N.textDim}}>Changes save when you leave a field.</p>
+      <CardFontsSettings access={access} canEdit={canEdit} />
+    </div>
+  );
+}
+
+// Settings → General → Card fonts: upload font files that aren't on Google Fonts (e.g. Aptos,
+// Ananda) so every computer and phone draws cards with them. Stored in the public "fonts"
+// bucket; the list is app_settings.card_fonts = [{ family, url }].
+function CardFontsSettings({ access, canEdit }) {
+  const list = uploadedFonts(access.settings.card_fonts);
+  const [family, setFamily] = useState("");
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [tried, setTried] = useState(false);
+  const [msg, setMsg] = useState(null);            // { tone: "good" | "bad", text }
+  const { errors, ext } = validateFontUpload({ family, fileName: file?.name, size: file?.size }, list);
+  const shown = tried ? errors : {};
+  const pickFile = (e) => {
+    const f = e.target.files?.[0] || null;
+    setFile(f); setMsg(null);
+    if (f && !family.trim()) setFamily(familyFromFileName(f.name));
+  };
+  const upload = async () => {
+    setTried(true);
+    if (Object.keys(errors).length || !supabase) return;
+    setBusy(true); setMsg(null);
+    const name = family.trim(), path = fontFilePath(name, ext);
+    const { error } = await supabase.storage.from("fonts").upload(path, file, { contentType: FONT_FILE_TYPES[ext], upsert: false });
+    if (error) {
+      setBusy(false);
+      setMsg({ tone: "bad", text: /bucket|not found/i.test(error.message)
+        ? "Run the latest supabase-roles-settings-scan.sql first — it adds the storage for fonts" : `Upload failed: ${error.message}` });
+      return;
+    }
+    const url = supabase.storage.from("fonts").getPublicUrl(path).data.publicUrl;
+    try {                                          // make sure the browser can really use it
+      const face = await new FontFace(name, `url("${url}")`).load();
+      document.fonts.add(face);
+      window.dispatchEvent(new Event("nikadi-fonts"));
+    } catch {
+      setBusy(false);
+      setMsg({ tone: "bad", text: "The file uploaded, but it isn't a font this browser can read. Try the .ttf or .woff2 file." });
+      return;
+    }
+    const ok = await access.saveSetting("card_fonts", [...list, { family: name, url }]);
+    setBusy(false);
+    if (ok !== true) return;
+    setFamily(""); setFile(null); setTried(false);
+    setMsg({ tone: "good", text: `${name} is ready — pick it in Design for the name, card type or footer.` });
+  };
+  const remove = (f) => access.saveSetting("card_fonts", list.filter(x => x.family !== f.family));
+  return (
+    <div style={{marginTop:22,paddingTop:16,borderTop:`1px solid ${N.border}`,maxWidth:520}}>
+      <div style={{fontWeight:800,color:N.text,marginBottom:4}}><Icon n="file" /> Card fonts</div>
+      <p style={{fontSize:12,color:N.textDim,lineHeight:1.6,marginBottom:10}}>
+        Fonts that aren't on Google Fonts — like Aptos or Ananda — only show on computers that have them installed.
+        Upload the font file here and every computer and phone uses it on cards. Only upload fonts you're licensed to use.
+      </p>
+      {list.length > 0 && (
+        <div style={{marginBottom:12}}>
+          {list.map(f => (
+            <div key={f.family} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",border:`1px solid ${N.border}`,borderRadius:10,marginBottom:6}}>
+              <span style={{flex:1,minWidth:0,fontFamily:fontStack(f.family),fontSize:16,color:N.text}}>{f.family}</span>
+              {canEdit && <button type="button" className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 10px"}} onClick={() => remove(f)}>Remove</button>}
+            </div>
+          ))}
+        </div>
+      )}
+      {canEdit && (
+        <div className="nk-form-grid">
+          <Field label="Font file (.ttf, .otf, .woff, .woff2)" error={shown.file}>
+            <input type="file" accept=".ttf,.otf,.woff,.woff2" className="nk-input" style={{padding:6}} onChange={pickFile} disabled={busy} />
+          </Field>
+          <Field label="Font name" error={shown.family}>
+            <input className="nk-input" value={family} onChange={e => setFamily(e.target.value)} placeholder="e.g. Aptos" maxLength={40} disabled={busy} />
+          </Field>
+        </div>
+      )}
+      {canEdit && (
+        <button type="button" className="nk-btn nk-btn-primary" style={{fontSize:12}} onClick={upload} disabled={busy}>
+          {busy ? <><Icon n="loader" /> Uploading…</> : <><Icon n="upload" /> Upload font</>}
+        </button>
+      )}
+      {msg && <div style={{fontSize:12,marginTop:8,color:msg.tone === "good" ? N.green : N.red}}><Icon n={msg.tone === "good" ? "check" : "alert"} /> {msg.text}</div>}
     </div>
   );
 }
@@ -6645,6 +6825,45 @@ export default function App() {
   }, [savedEventId, access.waTemplates, openEventRow?.wa_template]);
   const waAccount = access.waTemplates.find(t => t.name === waTemplate)?.account || access.settings.wa_account || "Nikadi";
   const smsSender = resolveChoice(access.senderIds, openEventRow?.sms_sender_id, "sender_id")?.sender_id || smsSettings.senderId || "NIKADI";
+  // Card fonts: the list, and the font files uploaded in Settings (loaded on every computer)
+  const uploadedCardFonts = access.settings.card_fonts;
+  const fontOptions = useMemo(() => cardFontOptions(uploadedCardFonts), [uploadedCardFonts]);
+  useEffect(() => { loadUploadedFonts(uploadedFonts(uploadedCardFonts)); }, [uploadedCardFonts]);
+  // "Powered by Nikadi" + phone at the bottom of every card: the open event's own text and
+  // colours (events.card_footer — click the footer in Design) over the Settings defaults
+  const footerBrand = access.settings.card_footer_brand, footerPhone = access.settings.card_footer_phone;
+  const [footerDraft, setFooterDraft] = useState(null);   // { eventId, value } — the latest edit (saved shortly after)
+  const eventFooter = footerDraft && footerDraft.eventId === (savedEventId || null) ? footerDraft.value : (openEventRow?.card_footer || null);
+  // fontsVersion: bumped when an uploaded font finishes loading, so font checks run again
+  const [fontsVersion, setFontsVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setFontsVersion(v => v + 1);
+    window.addEventListener("nikadi-fonts", bump);
+    return () => window.removeEventListener("nikadi-fonts", bump);
+  }, []);
+  // A footer font without real numbers: the phone line uses the normal font, so it stays readable
+  const cardFooter = useMemo(() => {
+    const f = resolveFooter({ card_footer_brand: footerBrand, card_footer_phone: footerPhone }, eventFooter);
+    return fontsVersion >= 0 && fontHasFakeDigits(f.font) ? { ...f, phoneFont: FOOTER_DEFAULT_FONT } : f;
+  }, [footerBrand, footerPhone, eventFooter, fontsVersion]);
+  const footerDefaults = useMemo(() => resolveFooter({ card_footer_brand: footerBrand, card_footer_phone: footerPhone }).lines, [footerBrand, footerPhone]);
+  // Changes the open event's footer (null = back to the defaults)
+  const editFooter = (patch) => setFooterDraft({ eventId: savedEventId || null, value: patch === null ? {} : normaliseFooter({ ...(eventFooter || {}), ...patch }) });
+  // Saves it to the event a moment after the last change (colour pickers send many changes)
+  useEffect(() => {
+    if (!footerDraft || !supabase || !footerDraft.eventId || footerDraft.eventId !== savedEventId) return;
+    const { eventId, value } = footerDraft;
+    const t = setTimeout(async () => {
+      const { error } = await supabase.from("events").update({ card_footer: value }).eq("id", eventId);
+      if (error) {
+        showToast(/card_footer|column|schema cache/i.test(error.message)
+          ? "Run the latest supabase-roles-settings-scan.sql to keep each event's card footer" : `Could not save the card footer: ${error.message}`, "warn");
+        return;
+      }
+      setSavedEvents(es => es.map(e => e.id === eventId ? { ...e, card_footer: value } : e));
+    }, 800);
+    return () => clearTimeout(t);
+  }, [footerDraft]); // eslint-disable-line react-hooks/exhaustive-deps -- saves only when the footer changes
   // Remembers the event's choice of template / sender (when the role may change it)
   const rememberForEvent = async (col, value, module) => {
     if (!supabase || !savedEventId || !access.can(module, "edit")) return;
@@ -7534,9 +7753,10 @@ export default function App() {
   const uploadCardSingle = async (idx) => {
     const rec = records[idx];
     if (!supabase) throw new Error("Supabase not configured");
+    warnMissingFonts();
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"uploading"} : r));
     try {
-      const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+      const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
       const dataUrl = await compressCard(rawDataUrl);
       const blob = await fetch(dataUrl).then(r => r.blob());
       const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.jpg`;
@@ -7854,10 +8074,20 @@ export default function App() {
   };
 
   // Downloads one record's rendered card as a single PNG file
+  // Making cards on a computer without a chosen font (and no uploaded file): say so once per font
+  const warnedFonts = useRef(new Set());
+  const warnMissingFonts = () => {
+    const families = [...designElements.filter(e => e.type === "text").map(e => e.fontFamily || DEFAULT_CARD_FONT), cardFooter.font];
+    const missing = missingCardFonts(families, uploadedCardFonts, fontOnDevice).filter(f => !warnedFonts.current.has(f));
+    if (!missing.length) return;
+    missing.forEach(f => warnedFonts.current.add(f));
+    showToast(`${missing.join(", ")} isn't on this computer, so these cards use a standard font instead. Upload the font file in Settings → General → Card fonts.`, "warn");
+  };
   const downloadCard = async (idx) => {
+    warnMissingFonts();
     const rec = records[idx];
     try {
-      const url = await exportCard(bgImage, bgSize, designElements, rec);
+      const url = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
       const a = document.createElement("a"); a.download=`${(rec.name||`Record_${idx}`).replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
     } catch (err) { showToast(`Could not render card for ${rec.name}: ${err.message}`, "warn"); }
   };
@@ -7866,12 +8096,13 @@ export default function App() {
   const downloadAll = async () => {
     if (!records.length) { showToast("No records","warn"); return; }
     showToast(`Zipping ${records.length} cards…`,"info");
+    warnMissingFonts();
     try {
       const JSZip = await loadJsZip();
       const zip = new JSZip();
       for (let i=0;i<records.length;i++) {
         const rec = records[i];
-        const dataUrl = await exportCard(bgImage, bgSize, designElements, rec);
+        const dataUrl = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
         zip.file(`${(rec.name||`Record_${i}`).replace(/\s/g,"_")}_Nikadi.png`, dataUrl.split(",")[1], { base64:true });
       }
       const blob = await zip.generateAsync({ type:"blob" });
@@ -8600,6 +8831,11 @@ export default function App() {
                     </div>
                   );
                 })}
+                {/* The "Powered by" footer: always on, edited per event */}
+                <div className={`nk-el-pill${selected==="footer"?" active":""}`} onClick={() => setSelected("footer")} title="On every card — click to change its text and colours, drag it on the card to move it">
+                  <span style={{fontWeight:600,fontSize:13}}>Card footer</span>
+                  <span className="nk-el-type">footer</span>
+                </div>
                 {savedEventId && (
                   <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
                     onClick={saveLayout}>
@@ -8825,7 +9061,8 @@ export default function App() {
                   {layoutRestored && <span className="nk-layout-chip"><Icon n="repeat" /> Layout restored</span>}
                   {!savedEventId && <span style={{color:N.amber,fontSize:11}}><Icon n="alert" /> No event loaded — <span style={{cursor:"pointer",textDecoration:"underline"}} onClick={()=>setTab("events")}>select one</span></span>}
                 </div>
-                <CardCanvas bgImage={bgImage} bgSize={bgSize} elements={designElements}
+                <CardCanvas bgImage={bgImage} bgSize={bgSize} elements={designElements} footer={cardFooter}
+                  onFooterMove={access.can("design", "edit") ? (pos) => editFooter(pos) : undefined}
                   record={activeRecord} selected={selected} onSelect={setSelected} onMove={onMove} />
                 <div className="nk-rec-pills">
                   {records.map((r,i)=>(
@@ -9553,7 +9790,97 @@ export default function App() {
           {tab === "design" && (
             <aside className="nk-sidebar-right">
               <div className="nk-sec">Element Properties</div>
-              {!selectedEl && <p style={{fontSize:12,color:N.textDim,lineHeight:1.6}}>Click an element on the canvas to edit its properties.</p>}
+              {!selectedEl && selected !== "footer" && (
+                <>
+                  <p style={{fontSize:12,color:N.textDim,lineHeight:1.6}}>Click an element on the canvas to edit its properties.</p>
+                  <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:12,marginTop:8}} onClick={() => setSelected("footer")}>
+                    <Icon n="edit" /> Edit the card footer
+                  </button>
+                </>
+              )}
+
+              {selected === "footer" && (() => {
+                // The "Powered by" footer of this event's cards: text, look and colours
+                const st = cardFooter.style, ev = eventFooter || {}, canEditFooter = access.can("design", "edit");
+                return (
+                  <>
+                    <p style={{fontSize:12,color:N.textDim,lineHeight:1.6,marginBottom:10}}>
+                      On every card of {savedEventId ? "this event" : "the event"}. Drag it on the card to move it. Empty lines use the defaults from Settings → General.
+                    </p>
+                    <label className="nk-label" htmlFor="nk-footer-brand">First line</label>
+                    <input id="nk-footer-brand" className="nk-input" value={ev.brand ?? ""} placeholder={footerDefaults[0]} maxLength={60} disabled={!canEditFooter}
+                      onChange={e => editFooter({ brand: e.target.value })} />
+                    <label className="nk-label" htmlFor="nk-footer-phone">Phone line</label>
+                    <input id="nk-footer-phone" className="nk-input" value={ev.phone ?? ""} placeholder={footerDefaults[1]} maxLength={40} disabled={!canEditFooter}
+                      onChange={e => editFooter({ phone: e.target.value })} />
+                    <label className="nk-label" htmlFor="nk-footer-font">Font</label>
+                    <select id="nk-footer-font" className="nk-select" value={cardFooter.font} disabled={!canEditFooter}
+                      onChange={e => editFooter({ font: e.target.value })} style={{fontFamily:fontStack(cardFooter.font),marginBottom:10}}>
+                      {fontOptions.map(f => <option key={f.value} value={f.value} style={{fontFamily:fontStack(f.value)}}>{fontLabel(f)}</option>)}
+                    </select>
+                    <FontMissing family={cardFooter.font} uploaded={uploadedCardFonts} footer />
+                    <label className="nk-label">Look</label>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+                      {FOOTER_PRESETS.map(p => {
+                        const on = st.bg === p.bg && st.bgOpacity === p.bgOpacity && st.color === p.color;
+                        return (
+                          <button key={p.label} type="button" disabled={!canEditFooter} aria-pressed={on} onClick={() => editFooter({ bg: p.bg, bgOpacity: p.bgOpacity, color: p.color })}
+                            style={{...segStyle(on), padding:"5px 10px", fontSize:11}}>
+                            <span aria-hidden="true" style={{display:"inline-block",width:12,height:12,borderRadius:3,verticalAlign:"-2px",marginRight:5,
+                              background:hexToRgba(p.bg, Math.max(p.bgOpacity, 15)),border:`1px solid ${p.color}`}} />{p.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                      <div>
+                        <label className="nk-label" htmlFor="nk-footer-bg">Background</label>
+                        <input id="nk-footer-bg" type="color" className="nk-input" style={{height:40,padding:4}} value={st.bg} disabled={!canEditFooter}
+                          onChange={e => editFooter({ bg: e.target.value, bgOpacity: st.bgOpacity || 55 })} />
+                      </div>
+                      <div>
+                        <label className="nk-label" htmlFor="nk-footer-color">Text colour</label>
+                        <input id="nk-footer-color" type="color" className="nk-input" style={{height:40,padding:4}} value={st.color} disabled={!canEditFooter}
+                          onChange={e => editFooter({ color: e.target.value })} />
+                      </div>
+                    </div>
+                    <label className="nk-label" htmlFor="nk-footer-opacity">Background strength — {st.bgOpacity}%</label>
+                    <input id="nk-footer-opacity" type="range" min={0} max={100} value={st.bgOpacity} disabled={!canEditFooter}
+                      onChange={e => editFooter({ bgOpacity: Number(e.target.value) })} />
+                    {footerHardToRead(st) && (
+                      <div className="nk-chip" style={{fontSize:11,lineHeight:1.6,color:N.amber,marginTop:4}}>
+                        <Icon n="alert" /> The text colour is close to the background — guests may not be able to read it.
+                      </div>
+                    )}
+                    <label className="nk-label" htmlFor="nk-footer-size" style={{marginTop:10}}>Size — {Math.round(cardFooter.scale * 100)}%</label>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                      <button type="button" className="nk-btn nk-btn-ghost" style={{padding:"4px 10px",minHeight:32}} aria-label="Make the footer smaller" title="Smaller"
+                        disabled={!canEditFooter || cardFooter.scale <= FOOTER_SIZE.min} onClick={() => editFooter({ scale: stepFooterSize(cardFooter.scale, -1) })}><Icon n="minus" /></button>
+                      <input id="nk-footer-size" type="range" style={{flex:1,marginBottom:0}} min={FOOTER_SIZE.min * 100} max={FOOTER_SIZE.max * 100} step={5}
+                        value={Math.round(cardFooter.scale * 100)} disabled={!canEditFooter} onChange={e => editFooter({ scale: Number(e.target.value) / 100 })} />
+                      <button type="button" className="nk-btn nk-btn-ghost" style={{padding:"4px 10px",minHeight:32}} aria-label="Make the footer bigger" title="Bigger"
+                        disabled={!canEditFooter || cardFooter.scale >= FOOTER_SIZE.max} onClick={() => editFooter({ scale: stepFooterSize(cardFooter.scale, 1) })}><Icon n="plus" /></button>
+                    </div>
+                    {cardFooter.scale !== 1 && (
+                      <button type="button" className="nk-link" style={{fontSize:11,marginBottom:4}} disabled={!canEditFooter}
+                        onClick={() => editFooter({ scale: undefined })}>Back to the normal size</button>
+                    )}
+                    <label className="nk-label" style={{marginTop:10}}>Position</label>
+                    <div style={{fontSize:12,color:N.textMid,marginBottom:6}}>
+                      {cardFooter.pos ? `Moved — ${Math.round(cardFooter.pos.x * 100)}% across, ${Math.round(cardFooter.pos.y * 100)}% down` : "Bottom centre (default)"}
+                    </div>
+                    <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:12}}
+                      disabled={!canEditFooter || !cardFooter.pos} onClick={() => editFooter({ x: undefined, y: undefined })}>
+                      <Icon n="arrowDown" /> Back to the bottom centre
+                    </button>
+                    <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:12,marginTop:10}}
+                      disabled={!canEditFooter || !Object.keys(ev).length} onClick={() => editFooter(null)}>
+                      <Icon n="undo" /> Back to the default footer
+                    </button>
+                    {!savedEventId && <p style={{fontSize:11,color:N.amber,marginTop:8}}><Icon n="info" /> Save the event to keep this footer.</p>}
+                  </>
+                );
+              })()}
 
               {selectedEl?.type==="text" && (
                 <>
@@ -9564,12 +9891,13 @@ export default function App() {
                     onChange={e=>updateEl("fontFamily",e.target.value)}
                     style={{fontFamily:`'${selectedEl.fontFamily||"Plus Jakarta Sans"}', sans-serif`,marginBottom:10}}
                   >
-                    {FONT_OPTIONS.map(f=>(
+                    {fontOptions.map(f=>(
                       <option key={f.value} value={f.value} style={{fontFamily:`'${f.value}', sans-serif`}}>
-                        {f.label}
+                        {fontLabel(f)}
                       </option>
                     ))}
                   </select>
+                  <FontMissing family={selectedEl.fontFamily||DEFAULT_CARD_FONT} uploaded={uploadedCardFonts} />
                   <label className="nk-label">Font Size — {selectedEl.fontSize}px</label>
                   <input type="range" min={8} max={Math.round(ch*0.5)} value={selectedEl.fontSize} onChange={e=>updateEl("fontSize",Number(e.target.value))} />
                   <label className="nk-label">Color</label>
@@ -9603,6 +9931,11 @@ export default function App() {
                     <div><label className="nk-label">Y (px)</label><input type="number" value={Math.round(selectedEl.y)} onChange={e=>updateEl("y",Number(e.target.value))} className="nk-input" /></div>
                   </div>
                   <p style={{fontSize:11,color:N.textDim,lineHeight:1.6,marginTop:4}}>Encodes: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>Name=…;TypeCard=…</code></p>
+                  {boxesOverlap({ x:selectedEl.x, y:selectedEl.y, w:selectedEl.size, h:selectedEl.size }, footerPill(cw, ch, cardFooter, measureText)) && (
+                    <div className="nk-chip" style={{marginTop:8,fontSize:11,lineHeight:1.6,color:N.amber}}>
+                      <Icon n="alert" /> The QR overlaps the card footer. The QR stays on top so it still scans, but move one of them so the footer shows in full.
+                    </div>
+                  )}
                   {(() => {
                     // The logo needs about 3 px per QR square to scan; long names make denser codes
                     const need = qrSizeForLogo(records);
