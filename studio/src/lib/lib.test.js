@@ -1460,3 +1460,427 @@ test("an event can hide its footer, and showing it again keeps its settings", ()
   assert.equal(shown.hidden, false);
   assert.equal(shown.lines[0], "X");
 });
+
+// ── Data cleaner chat (src/lib/dataClean.js) ──
+import { parseMarkdown, parseInline, stripInline, splitRow, guestColumn, guestRowsFromBlocks, guestSheetRows, guestsToTsv, guestGaps,
+  chatForApi, cleanFileName, CLEAN_LIMITS } from "./dataClean.js";
+import { cleanChatContents, cleanModelName, CLEAN_DEFAULT_MODEL, readGeminiReply } from "../../supabase/functions/_shared/dataClean.js";
+
+const CLEAN_ANSWER = [
+  "### Orodha ya Kadi za DOUBLE",
+  "",
+  "| Name | Phone | CrdType |",
+  "| :--- | :---: | --- |",
+  "| Mr. & Mrs. Tarimo | 0764123456 | DOUBLE |",
+  "| Mr. & Mrs. John Massawe | 0754111222 | DOUBLE |",
+  "",
+  "### Orodha ya Kadi za SINGLE",
+  "```markdown",
+  "| Name | Phone | CrdType |",
+  "|---|---|---|",
+  "| Joy Mushi | 0712345678 | SINGLE |",
+  "| Baraka Juma | 0688000111 | *Haikutajwa* |",
+  "```",
+].join("\n");
+
+test("parseMarkdown reads Gemini's headings and tables, even inside a code fence", () => {
+  const blocks = parseMarkdown(CLEAN_ANSWER);
+  assert.deepEqual(blocks.map(b => b.type), ["heading", "table", "heading", "table"]);
+  assert.equal(blocks[0].text, "Orodha ya Kadi za DOUBLE");
+  assert.deepEqual(blocks[1].header, ["Name", "Phone", "CrdType"]);
+  assert.deepEqual(blocks[1].rows[0], ["Mr. & Mrs. Tarimo", "0764123456", "DOUBLE"]);
+  assert.equal(blocks[3].rows.length, 2);
+});
+
+test("parseMarkdown: paragraphs, lists, rules; short rows are padded to the header", () => {
+  const blocks = parseMarkdown("Hello there\nsecond line\n\n- one\n- two\n\n1. a\n2) b\n\n---\n\n|A|B|\n|-|-|\n|x|");
+  assert.deepEqual(blocks[0], { type: "para", lines: ["Hello there", "second line"] });
+  assert.deepEqual(blocks[1], { type: "list", ordered: false, items: ["one", "two"] });
+  assert.deepEqual(blocks[2], { type: "list", ordered: true, items: ["a", "b"] });
+  assert.deepEqual(blocks[3], { type: "rule" });
+  assert.deepEqual(blocks[4].rows, [["x", ""]]);
+  assert.deepEqual(parseMarkdown(""), []);
+  assert.deepEqual(parseMarkdown(null), []);
+});
+
+test("a line with a pipe but no divider is just text", () => {
+  assert.deepEqual(parseMarkdown("Name | Phone\nJoy | 0712").map(b => b.type), ["para"]);
+});
+
+test("splitRow keeps escaped pipes", () => {
+  assert.deepEqual(splitRow("| a \\| b | c |"), ["a | b", "c"]);
+  assert.deepEqual(splitRow("a|b"), ["a", "b"]);
+});
+
+test("parseInline / stripInline handle bold, italic, code and <br>", () => {
+  assert.deepEqual(parseInline("a **b** *c* `d`"), [
+    { text: "a " }, { text: "b", bold: true }, { text: " " }, { text: "c", italic: true }, { text: " " }, { text: "d", code: true },
+  ]);
+  assert.equal(stripInline("*Haikutajwa*"), "Haikutajwa");
+  assert.equal(stripInline("Mr. & Mrs.<br>Tarimo"), "Mr. & Mrs. Tarimo");
+  assert.equal(stripInline("2 * 3 = 6"), "2 * 3 = 6");
+});
+
+test("guestColumn maps the bot's and spreadsheet headers", () => {
+  assert.equal(guestColumn("Name"), "name");
+  assert.equal(guestColumn("**Jina**"), "name");
+  assert.equal(guestColumn("Phone"), "phone");
+  assert.equal(guestColumn("Namba ya Simu"), "phone");
+  assert.equal(guestColumn("CrdType"), "cardType");
+  assert.equal(guestColumn("Card Type"), "cardType");
+  assert.equal(guestColumn("S/N"), null);
+});
+
+test("guestRowsFromBlocks joins every guest table; 'Haikutajwa' becomes a blank card type", () => {
+  const guests = guestRowsFromBlocks(parseMarkdown(CLEAN_ANSWER));
+  assert.equal(guests.length, 4);
+  assert.deepEqual(guests[0], { name: "Mr. & Mrs. Tarimo", phone: "0764123456", cardType: "DOUBLE" });
+  assert.deepEqual(guests[3], { name: "Baraka Juma", phone: "0688000111", cardType: "" });
+  assert.deepEqual(guestGaps(guests), { noPhone: 0, noCardType: 1 });
+});
+
+test("guestRowsFromBlocks ignores other tables, blank rows and extra columns", () => {
+  const md = "| Total | Count |\n|---|---|\n| DOUBLE | 2 |\n\n| S/N | Name | Phone |\n|---|---|---|\n| 1 | Joy | 0712 |\n| 2 | | |";
+  assert.deepEqual(guestRowsFromBlocks(parseMarkdown(md)), [{ name: "Joy", phone: "0712", cardType: "" }]);
+});
+
+test("guest rows go through the spreadsheet import unchanged", () => {
+  const sheet = guestSheetRows([{ name: "Joy", phone: "0712345678", cardType: "SINGLE" }]);
+  assert.deepEqual(sheet, [{ Name: "Joy", Phone: "0712345678", CardType: "SINGLE" }]);
+  const { rows, columns } = normaliseSheetRows(sheet);
+  assert.deepEqual(rows, [{ name: "Joy", phone: "0712345678", cardType: "SINGLE" }]);
+  assert.deepEqual(columns, ["name", "cardType"]);
+});
+
+test("guestsToTsv pastes as columns", () => {
+  assert.equal(guestsToTsv([{ name: "A\tB", phone: "07", cardType: "" }]), "Name\tPhone\tCardType\nA B\t07\t");
+});
+
+test("chatForApi drops failed answers, joins back-to-back user turns, ends on the user", () => {
+  const chat = chatForApi([
+    { role: "user", text: "list one" },
+    { role: "model", error: "Gemini is busy" },
+    { role: "user", text: "list two" },
+    { role: "model", text: "| Name |" },
+    { role: "user", text: "ongeza Joy" },
+    { role: "model", pending: true },
+  ]);
+  assert.deepEqual(chat, [
+    { role: "user", text: "list one\n\nlist two" },
+    { role: "model", text: "| Name |" },
+    { role: "user", text: "ongeza Joy" },
+  ]);
+  assert.deepEqual(chatForApi([{ role: "model", text: "hi" }]), []);
+  assert.deepEqual(chatForApi([]), []);
+});
+
+test("chatForApi drops the oldest turns to stay within the limits, and starts with the user", () => {
+  const limits = { messageChars: 10, totalChars: 12, turns: 3 };
+  const chat = chatForApi([
+    { role: "user", text: "aaaaa" }, { role: "model", text: "bbbbb" }, { role: "user", text: "ccccc" },
+  ], limits);
+  assert.deepEqual(chat, [{ role: "user", text: "ccccc" }]);
+  const many = Array.from({ length: 9 }, (_, i) => ({ role: i % 2 ? "model" : "user", text: `m${i}` }));
+  const kept = chatForApi(many, { messageChars: 99, totalChars: 999, turns: 4 });
+  assert.equal(kept[0].role, "user");
+  assert.ok(kept.length <= 4);
+  assert.equal(kept[kept.length - 1].text, "m8");
+  // two failed user messages too long to join: the newer one is kept
+  assert.deepEqual(chatForApi([{ role: "user", text: "x".repeat(8) }, { role: "user", text: "y".repeat(8) }], limits), [{ role: "user", text: "yyyyyyyy" }]);
+});
+
+test("what chatForApi sends is always accepted by the ai-clean function", () => {
+  const chat = chatForApi([
+    { role: "user", text: "a" }, { role: "model", error: "x" }, { role: "user", text: "b" }, { role: "model", text: "c" }, { role: "user", text: "d" },
+  ]);
+  assert.ok(cleanChatContents(chat).contents);
+  assert.ok(CLEAN_LIMITS.messageChars < CLEAN_LIMITS.totalChars);
+});
+
+test("cleanModelName keeps real model names and refuses anything else", () => {
+  assert.equal(cleanModelName("gemini-3-flash"), "gemini-3-flash");
+  assert.equal(cleanModelName("models/gemini-2.5-flash"), "gemini-2.5-flash");
+  assert.equal(cleanModelName(""), CLEAN_DEFAULT_MODEL);
+  assert.equal(cleanModelName("a/../b"), CLEAN_DEFAULT_MODEL);
+  assert.equal(cleanModelName("x:generateContent?key=1"), CLEAN_DEFAULT_MODEL);
+});
+
+test("readGeminiReply joins the answer's text parts", () => {
+  const ok = readGeminiReply(200, JSON.stringify({ candidates: [{ content: { parts: [{ text: "| A " }, { text: "|" }] }, finishReason: "STOP" }] }));
+  assert.deepEqual(ok, { status: 200, body: { text: "| A |", truncated: false } });
+  assert.equal(readGeminiReply(200, "not json").status, 502);
+});
+
+test("cleanFileName", () => {
+  assert.equal(cleanFileName("Harusi ya Joy & Ben!", "2026-11-09"), "Clean_Harusi_ya_Joy_Ben_2026-11-09.xlsx");
+  assert.equal(cleanFileName("", "2026-11-09"), "Clean_Guests_2026-11-09.xlsx");
+});
+
+// ── Data cleaner: batches and the answer check ──
+import { phonesInText, phoneCore, splitForBatches, guestsToMarkdown, checkAnswer, CLEAN_BATCH_LINES } from "./dataClean.js";
+
+test("phonesInText finds Tanzanian mobiles in any format, side by side", () => {
+  assert.deepEqual(phonesInText("MR&MRS TARIMO simu no. +255 764-123-456 D"), ["764123456"]);
+  assert.deepEqual(phonesInText("joy 0712 345 678, ben 0754111222 and 255688000111 / 712345678"),
+    ["712345678", "754111222", "688000111", "712345678"]);
+  assert.deepEqual(phonesInText("S/N 12 MAJINA 2026 kadi 150"), []);
+  assert.deepEqual(phonesInText("07123456789"), []);   // 11 digits: not a number we can trust
+});
+
+test("phoneCore compares numbers across formats", () => {
+  assert.equal(phoneCore("0764123456"), "764123456");
+  assert.equal(phoneCore("+255 764 123 456"), "764123456");
+  assert.equal(phoneCore("764123456"), "764123456");
+  assert.equal(phoneCore("+254712345678"), "254712345678");
+});
+
+test("splitForBatches cuts a long one-guest-per-line list, keeps the rest whole", () => {
+  const rows = Array.from({ length: 95 }, (_, i) => `${i + 1}. Guest ${i} 07${String(10000000 + i)} D`);
+  const parts = splitForBatches(["S/N MAJINA SIMU", ...rows].join("\n"), 40);
+  assert.equal(parts.length, 3);
+  assert.equal(parts.join("\n").split("\n").length, 96);   // nothing lost or doubled
+  assert.ok(parts[0].startsWith("S/N MAJINA SIMU"));
+  // short list → one part, as typed
+  assert.deepEqual(splitForBatches("joy 0712345678\n\nben 0754111222", 40), ["joy 0712345678\n\nben 0754111222"]);
+  // guests over several lines (name / phone / type): never cut
+  const multi = Array.from({ length: 50 }, (_, i) => `Guest ${i}\n07${String(10000000 + i)}\nDOUBLE`).join("\n");
+  assert.equal(splitForBatches(multi, 40).length, 1);
+  assert.equal(CLEAN_BATCH_LINES, 40);
+});
+
+test("guestsToMarkdown rebuilds one answer that reads back to the same guests", () => {
+  const guests = [
+    { name: "Joy Mushi", phone: "0712345678", cardType: "SINGLE" },
+    { name: "Baraka | Juma", phone: "0688000111", cardType: "" },
+    { name: "Mr. & Mrs. Tarimo", phone: "0764123456", cardType: "DOUBLE" },
+    { name: "Dr. Swai", phone: "0700000001", cardType: "VIP" },
+  ];
+  const md = guestsToMarkdown(guests);
+  const blocks = parseMarkdown(md);
+  assert.deepEqual(blocks.filter(b => b.type === "heading").map(b => b.text),
+    ["Orodha ya Kadi za DOUBLE", "Orodha ya Kadi za SINGLE", "Orodha ya Kadi za VIP", "Orodha ya Kadi ambazo Aina Haikutajwa"]);
+  assert.deepEqual(guestRowsFromBlocks(blocks).map(g => g.phone), ["0764123456", "0712345678", "0700000001", "0688000111"]);
+  assert.equal(guestRowsFromBlocks(blocks)[3].name, "Baraka / Juma");
+  assert.equal(guestRowsFromBlocks(blocks)[3].cardType, "");
+  assert.equal(guestsToMarkdown([]), "");
+});
+
+test("checkAnswer: a clean answer has nothing to report", () => {
+  const typed = "1. MR&MRS TARIMO simu no. +255 764-123-456 D\n2. joy mushi - 0712 345 678 S";
+  const c = checkAnswer([{ name: "Mr. & Mrs. Tarimo", phone: "0764123456" }, { name: "Joy Mushi", phone: "0712345678" }], typed, typed);
+  assert.deepEqual(c.missing, []);
+  assert.equal(c.notInList.size, 0);
+  assert.equal(c.badFormat.size, 0);
+});
+
+test("checkAnswer catches a dropped guest, a slipped digit and a bad format", () => {
+  const typed = "joy 0712 345 678\nben 0754 111 222\nann 0688-000-111";
+  const c = checkAnswer([
+    { name: "Joy", phone: "0712345678" },
+    { name: "Ben", phone: "0754111223" },   // one digit off
+    { name: "Ann", phone: "688000111" },    // leading 0 lost
+  ], typed, typed);
+  assert.deepEqual(c.missing, ["0754111222"]);
+  assert.deepEqual([...c.notInList], ["0754111223"]);
+  assert.deepEqual([...c.badFormat], ["688000111"]);
+});
+
+test("checkAnswer: a follow-up is checked against its own message, numbers against everything typed", () => {
+  const all = "joy 0712345678\nongeza baraka 0688000111";
+  const c = checkAnswer([{ name: "Joy", phone: "0712345678" }, { name: "Baraka", phone: "0688000111" }], "ongeza baraka 0688000111", all);
+  assert.deepEqual(c.missing, []);
+  assert.equal(c.notInList.size, 0);
+  // a foreign number is accepted when its digits were typed
+  assert.equal(checkAnswer([{ name: "K", phone: "+254712345678" }], "", "K +254 712 345 678").notInList.size, 0);
+  // no message to compare with (older answers): nothing is invented as missing
+  assert.deepEqual(checkAnswer([{ name: "J", phone: "0712345678" }], undefined, undefined).missing, []);
+});
+
+// ── Data cleaner: card types read in code ──
+import { statedCardType, applyStatedTypes } from "./dataClean.js";
+
+test("statedCardType reads D / S / DOUBLE / SINGLE, not names or S/N", () => {
+  assert.equal(statedCardType("1. MR&MRS TARIMO simu no. +255 764-123-456 D"), "DOUBLE");
+  assert.equal(statedCardType("2. joy mushi - 0712 345 678 S"), "SINGLE");
+  assert.equal(statedCardType("3) Mr & Mrs JOHN MASSAWE 0754 111 222 double"), "DOUBLE");
+  assert.equal(statedCardType("136. MR&MRS joy mrema - +255 701-069-065 single"), "SINGLE");
+  assert.equal(statedCardType("Joy 0712345678 (D)"), "DOUBLE");
+  assert.equal(statedCardType("Joy 0712345678 SGL"), "SINGLE");
+  assert.equal(statedCardType("4. BARAKA JUMA simu 0688-000-111"), "");
+  assert.equal(statedCardType("119. Dr. SAMWELI Swai simu no. 0700 934 442"), "");
+  assert.equal(statedCardType("MRS BARAKA massawe 0701 314 554"), "");
+  assert.equal(statedCardType("John D. Mushi 0712345678"), "");
+  assert.equal(statedCardType("S/N MAJINA SIMU KADI"), "");
+  assert.equal(statedCardType("Joy 0712345678 D S"), null);
+});
+
+test("checkAnswer flags card types that differ from the list, and applyStatedTypes fixes them", () => {
+  const typed = "1. MR&MRS TARIMO +255 764-123-456 D\n2. joy mushi 0712 345 678 S\n3. baraka 0688 000 111";
+  const guests = [
+    { name: "Mr. & Mrs. Tarimo", phone: "0764123456", cardType: "SINGLE" },   // list says D
+    { name: "Joy Mushi", phone: "0712345678", cardType: "SINGLE" },
+    { name: "Baraka", phone: "0688000111", cardType: "DOUBLE" },              // list says nothing
+  ];
+  const c = checkAnswer(guests, typed, typed);
+  assert.deepEqual([...c.typeDiffers], [["0764123456", "DOUBLE"], ["0688000111", ""]]);
+  const fixed = applyStatedTypes(guests, c.typeDiffers);
+  assert.deepEqual(fixed.map(g => g.cardType), ["DOUBLE", "SINGLE", ""]);
+  assert.equal(checkAnswer(fixed, typed, typed).typeDiffers.size, 0);
+});
+
+test("checkAnswer leaves card types alone when guests span several lines", () => {
+  const typed = "Joy Mushi\n0712345678\nDOUBLE\nBaraka\n0688000111\nSINGLE";
+  const c = checkAnswer([{ name: "Joy", phone: "0712345678", cardType: "DOUBLE" }, { name: "Baraka", phone: "0688000111", cardType: "SINGLE" }], typed, typed);
+  assert.equal(c.typeDiffers.size, 0);
+});
+
+// ── Data cleaner: photos ──
+import { turnParts, dropRepeatedGuests, photoNote, photoFileProblem, fitImageSize, base64Length, sendPhotoAsIs, PHOTO_STEPS,
+  PHOTO_MAX_FILE_BYTES, CLEAN_IMAGE_LIMITS } from "./dataClean.js";
+import { imageTypeOf, CLEAN_IMAGE_TYPES } from "../../supabase/functions/_shared/dataClean.js";
+import { Buffer } from "node:buffer";
+
+// The first bytes of real images, as base64 (what the server reads a photo's type from)
+const B64 = (bytes) => Buffer.from(bytes).toString("base64");
+const JPEG = B64([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]);
+const PNG = B64([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d]);
+const WEBP = B64([...Buffer.from("RIFF"), 0x24, 0, 0, 0, ...Buffer.from("WEBPVP8 ")]);
+const GIF = B64(Buffer.from("GIF89a......"));
+// A photo as the chat keeps it (preparePhoto in CleanDataChat.jsx)
+const photo = (id, data = JPEG, mime = "image/jpeg") => ({ id, name: `${id}.jpg`, mime, data, url: `blob:${id}`, width: 10, height: 10 });
+
+test("imageTypeOf reads a photo's real type from its first bytes", () => {
+  assert.equal(imageTypeOf(JPEG), "image/jpeg");
+  assert.equal(imageTypeOf(PNG), "image/png");
+  assert.equal(imageTypeOf(WEBP), "image/webp");
+  assert.equal(imageTypeOf(GIF), "");
+  assert.equal(imageTypeOf("not base64 !!"), "");
+  assert.equal(imageTypeOf(""), "");
+  assert.deepEqual([...CLEAN_IMAGE_TYPES].sort(), ["image/jpeg", "image/png", "image/webp"]);
+});
+
+test("cleanChatContents puts a message's photos before its text, as inline data", () => {
+  const { contents } = cleanChatContents([{ role: "user", text: "wote ni DOUBLE", images: [{ mime: "image/jpeg", data: JPEG }, { mime: "image/png", data: PNG }] }]);
+  assert.deepEqual(contents[0].parts, [
+    { inlineData: { mimeType: "image/jpeg", data: JPEG } },
+    { inlineData: { mimeType: "image/png", data: PNG } },
+    { text: "wote ni DOUBLE" },
+  ]);
+  // photos alone, with no text
+  assert.deepEqual(cleanChatContents([{ role: "user", text: "", images: [{ mime: "image/webp", data: WEBP }] }]).contents[0].parts,
+    [{ inlineData: { mimeType: "image/webp", data: WEBP } }]);
+  // the type comes from the bytes, not from what the browser says
+  assert.equal(cleanChatContents([{ role: "user", text: "", images: [{ mime: "image/jpeg", data: PNG }] }]).contents[0].parts[0].inlineData.mimeType, "image/png");
+});
+
+test("cleanChatContents refuses photos it can't send", () => {
+  const ask = (images) => cleanChatContents([{ role: "user", text: "", images }]);
+  assert.match(ask([{ mime: "image/gif", data: GIF }]).error, /could not be read/);
+  assert.match(ask([{ mime: "image/jpeg", data: "@@@@" }]).error, /could not be read/);
+  assert.match(ask([{ mime: "image/jpeg", data: JPEG.slice(0, -1) }]).error, /could not be read/);   // cut short
+  assert.match(ask([{ mime: "image/jpeg" }]).error, /could not be read/);
+  assert.match(ask([null]).error, /could not be read/);
+  assert.match(ask("photo").error, /could not be read/);
+  assert.match(ask([]).error, /could not be read/);   // no text and no photos
+  assert.match(ask([{ mime: "image/jpeg", data: JPEG + "A".repeat(CLEAN_IMAGE_LIMITS.imageChars) }]).error, /too large/);
+  assert.match(ask(Array.from({ length: CLEAN_IMAGE_LIMITS.perRequest + 1 }, () => ({ mime: "image/jpeg", data: JPEG }))).error, /Too many photos/);
+  const big = { mime: "image/jpeg", data: JPEG + "A".repeat(1_200_000) };   // 4 × 1.2M is over totalChars
+  assert.match(ask([big, big, big, big]).error, /Too many photos/);
+  // only the user's messages carry photos
+  assert.match(cleanChatContents([
+    { role: "user", text: "a" }, { role: "model", text: "b", images: [{ mime: "image/jpeg", data: JPEG }] }, { role: "user", text: "c" },
+  ]).error, /could not be read/);
+});
+
+test("photo limits fit inside the request the server accepts", () => {
+  assert.ok(CLEAN_IMAGE_LIMITS.perMessage >= CLEAN_IMAGE_LIMITS.perRequest);
+  assert.ok(CLEAN_IMAGE_LIMITS.imageChars <= CLEAN_IMAGE_LIMITS.totalChars);
+  // the longest chat (up to 4 UTF-8 bytes a character) plus a question's photos
+  assert.ok(CLEAN_LIMITS.bodyBytes >= CLEAN_LIMITS.totalChars * 4 + CLEAN_IMAGE_LIMITS.totalChars);
+});
+
+test("chatForApi sends photos only with the newest message; earlier ones become a note", () => {
+  const a = photo("a"), b = photo("b", PNG, "image/png"), c = photo("c");
+  const chat = chatForApi([
+    { role: "user", text: "", images: [a, b] },
+    { role: "model", text: "| Name |\n|---|\n| Joy |" },
+    { role: "user", text: "ongeza huyu", images: [c] },
+  ]);
+  assert.deepEqual(chat[0], { role: "user", text: photoNote(2) });
+  assert.equal(chat[1].role, "model");
+  assert.deepEqual(chat[2], { role: "user", text: "ongeza huyu", images: [{ mime: "image/jpeg", data: JPEG }] });
+  assert.ok(cleanChatContents(chat).contents);
+  // a follow-up without photos sends none
+  const follow = chatForApi([{ role: "user", text: "joy", images: [a] }, { role: "model", text: "| Name |" }, { role: "user", text: "ongeza ben" }]);
+  assert.deepEqual(follow.map(t => t.images), [undefined, undefined, undefined]);
+  assert.equal(follow[0].text, `${photoNote(1)}\njoy`);
+  // photos whose answer failed are joined with the next message's
+  const joined = chatForApi([{ role: "user", text: "", images: [a] }, { role: "model", error: "busy" }, { role: "user", text: "wote ni DOUBLE", images: [b] }]);
+  assert.deepEqual(joined, [{ role: "user", text: "wote ni DOUBLE", images: [{ mime: "image/jpeg", data: JPEG }, { mime: "image/png", data: PNG }] }]);
+  assert.ok(cleanChatContents(joined).contents);
+  assert.equal(photoNote(1).includes("1 photo of"), true);
+});
+
+test("turnParts: several photos are read one per question", () => {
+  const a = photo("a"), b = photo("b");
+  // no photos: as before (one question, or a long list in parts)
+  assert.deepEqual(turnParts({ text: "joy 0712345678" }), [{ text: "joy 0712345678", images: [] }]);
+  // one photo with a note: one question, with the chat's history
+  assert.deepEqual(turnParts({ text: "wote ni DOUBLE", images: [a] }), [{ text: "wote ni DOUBLE", images: [a] }]);
+  // several photos: one each, and an instruction goes with every photo
+  assert.deepEqual(turnParts({ text: "wote ni DOUBLE", images: [a, b] }), [{ text: "wote ni DOUBLE", images: [a] }, { text: "wote ni DOUBLE", images: [b] }]);
+  assert.deepEqual(turnParts({ text: "", images: [a, b] }), [{ text: "", images: [a] }, { text: "", images: [b] }]);
+  // typed guests are a list of their own, not sent again with each photo
+  assert.deepEqual(turnParts({ text: "ben 0754111222", images: [a, b] }), [{ text: "ben 0754111222", images: [] }, { text: "", images: [a] }, { text: "", images: [b] }]);
+  // one photo and a long typed list: the list in parts, then the photo
+  const rows = Array.from({ length: 50 }, (_, i) => `guest ${i} 07${10000000 + i}`);
+  const parts = turnParts({ text: rows.join("\n"), images: [a] }, 40);
+  assert.equal(parts.length, 3);
+  assert.ok(parts.slice(0, 2).every(p => !p.images.length && p.text));
+  assert.deepEqual(parts[2], { text: "", images: [a] });
+});
+
+test("dropRepeatedGuests keeps a guest seen on two overlapping photos once", () => {
+  const { guests, repeated } = dropRepeatedGuests([
+    { name: "Joy Mushi", phone: "0712345678", cardType: "SINGLE" },
+    { name: "joy  mushi", phone: "+255 712 345 678", cardType: "single" },
+    { name: "Ben", phone: "0712345678", cardType: "SINGLE" },        // another name on that number: kept
+    { name: "Joy Mushi", phone: "0712345678", cardType: "DOUBLE" },  // another card type: kept
+  ]);
+  assert.equal(repeated, 1);
+  assert.deepEqual(guests.map(g => g.name), ["Joy Mushi", "Ben", "Joy Mushi"]);
+  assert.deepEqual(dropRepeatedGuests([]), { guests: [], repeated: 0 });
+});
+
+test("checkAnswer: numbers read from photos aren't flagged as untyped, bad formats still are", () => {
+  const guests = [{ name: "Joy", phone: "0712345678" }, { name: "Ben", phone: "07541?1222" }];
+  const c = checkAnswer(guests, "", "", { photos: 2 });
+  assert.equal(c.notInList.size, 0);
+  assert.deepEqual([...c.badFormat], ["07541?1222"]);
+  assert.deepEqual(c.missing, []);
+  // the same answer without photos: neither number was typed
+  assert.equal(checkAnswer(guests, "", "").notInList.size, 2);
+  // a typed number the answer dropped is still missing
+  assert.deepEqual(checkAnswer(guests, "baraka 0688000111", "baraka 0688000111", { photos: 1 }).missing, ["0688000111"]);
+});
+
+test("photo helpers: file checks, sizes, and when a screenshot is sent as it is", () => {
+  assert.equal(photoFileProblem({ name: "list.jpg", type: "image/jpeg", size: 2_000_000 }), "");
+  assert.equal(photoFileProblem({ name: "IMG_1.HEIC", type: "", size: 3_000_000 }), "");   // a phone photo with no type
+  assert.match(photoFileProblem({ name: "guests.pdf", type: "application/pdf", size: 1000 }), /guests\.pdf is not a photo/);
+  assert.match(photoFileProblem({ name: "big.jpg", type: "image/jpeg", size: PHOTO_MAX_FILE_BYTES + 1 }), /too large/);
+  assert.match(photoFileProblem({ name: "x.png", type: "image/png", size: 0 }), /empty/);
+  assert.match(photoFileProblem(null), /not a photo/);
+  assert.deepEqual(fitImageSize(4000, 3000, 2048), { width: 2048, height: 1536 });
+  assert.deepEqual(fitImageSize(1080, 2400, 2048), { width: 922, height: 2048 });
+  assert.deepEqual(fitImageSize(800, 600, 2048), { width: 800, height: 600 });
+  assert.equal(base64Length(3), 4);
+  assert.equal(base64Length(4), 8);
+  assert.equal(base64Length(0), 0);
+  assert.equal(sendPhotoAsIs("image/png", 300_000, 1080, 1920), true);
+  assert.equal(sendPhotoAsIs("image/png", 300_000, 1080, 2400), false);    // too tall: redrawn smaller
+  assert.equal(sendPhotoAsIs("image/jpeg", 300_000, 1080, 1920), false);   // JPEGs are redrawn the right way up
+  assert.equal(sendPhotoAsIs("image/webp", CLEAN_IMAGE_LIMITS.imageChars, 800, 600), false);   // too many bytes
+  // each try is smaller than the one before
+  assert.ok(PHOTO_STEPS.every((s, i) => i === 0 || s.scale * s.quality < PHOTO_STEPS[i - 1].scale * PHOTO_STEPS[i - 1].quality));
+});

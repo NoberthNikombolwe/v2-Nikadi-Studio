@@ -11,6 +11,7 @@ import { DELIVERY_STATES, DELIVERY_SOURCES, indexDeliveries, extraStatusOf, deli
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
 import ScanPanel, { ScanTabBar, ScanStats } from "./ScanPanel";
+import CleanDataChat from "./CleanDataChat";
 import useMediaQuery, { SCANNER_PHONE } from "./useMediaQuery";
 import { hideColumnRules } from "./lib/mobileTable";
 import { TASK_SUGGESTIONS, groupAssignments, initials, eventsAssignedTo, assignableFor, validateAssignment } from "./lib/assignments";
@@ -1375,6 +1376,8 @@ const NAV_GROUPS = [
   { label:"Admin",   icon:"settings", items:[{ id:"settings", label:"Settings", icon:"settings" }, { id:"feedback", label:"Feedback", icon:"message" }] },
   { label:"Help",    items:[{ id:"guide", label:"Guide", icon:"map" }] },
 ];
+// The Studio pages, where the floating "Clean data" chat (<CleanDataChat>) shows
+const STUDIO_TABS = new Set(NAV_GROUPS.find(g => g.label === "Studio").items.map(it => it.id));
 const THEME_LABELS = { system:"System", light:"Light", dark:"Dark" };
 const THEME_ICONS  = { system:"monitor", light:"sun", dark:"moon" };
 
@@ -7103,9 +7106,7 @@ export default function App() {
   };
 
   /* ── Excel / CSV upload ── */
-  // Parses an uploaded Excel/CSV file (via SheetJS) into `records`, normalising
-  // common column-name variants (name / cardType|card / phone|phoneNumber|mobile);
-  // any other columns pass through untouched
+  // Parses an uploaded Excel/CSV file (via SheetJS) into `records` through loadGuestRows
   const onExcelUpload = (e) => {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
@@ -7113,41 +7114,48 @@ export default function App() {
       const XLSX = await loadXlsx();
       const wb   = XLSX.read(ev.target.result, { type:"array" });
       const ws   = wb.Sheets[wb.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
-      const { rows, columns } = normaliseSheetRows(data);
-      let norm = rows.map(r => ({ waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle", ...r }));
-      // An event that already has guests: merge the sheet onto them instead of replacing
-      // them, so send statuses, calls and check-ins (Reports, Calls, Scanner, the view-only
-      // report) are not reset. Each row is matched to its saved card (phone + name, phone,
-      // name); guests missing from the sheet but with call/check-in history stay on the list.
-      let kept = 0, matched = 0;
-      if (supabase && savedEventId) {
-        const { data: saved, error } = await supabase.from("event_cards").select("*").eq("event_id", savedEventId);
-        if (error) showToast("Could not compare with the saved guest list: " + error.message, "warn");
-        else if (saved?.length) {
-          const plan = planCardSave(norm.map((r, i) => ({ r, i })), saved);
-          const byIdx = new Map(plan.keep.map(k => [k.i, k.old]));
-          matched = byIdx.size;
-          norm = norm.map((r, i) => {
-            const o = byIdx.get(i); if (!o) return r;
-            return { ...r, dbId: o.id, waStatus: o.wa_status || r.waStatus, smsStatus: o.sms_status || r.smsStatus,
-              ...(sameCardFace(r, o) ? cardFromRow(o) : {}) };   // a renamed guest needs a new card
-          });
-          kept = plan.retained.length;
-          norm = [...norm, ...plan.retained.map(c => ({
-            dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
-            waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
-          }))];
-        }
-      }
-      // Ordered column list for the SMS variable chips: standard columns first, then any extras
-      setCsvColumns(columns);
-      setRecords(norm); setActiveIdx(0);
-      showToast(matched || kept
-        ? `Loaded ${rows.length} records — ${matched} matched saved guests (statuses, calls and check-ins kept)${kept ? `, ${kept} kept for their call/check-in history` : ""}. Press Save Cards to store the changes.`
-        : `Loaded ${norm.length} records`, "success");
+      await loadGuestRows(XLSX.utils.sheet_to_json(ws, { defval:"" }));
     };
     r.readAsArrayBuffer(f);
+  };
+
+  // Makes spreadsheet-shaped rows (one object per guest) the guest list in `records`,
+  // normalising common column-name variants (name / cardType|card / phone|phoneNumber|mobile);
+  // any other columns pass through untouched. Used by Upload Spreadsheet and by the data
+  // cleaner chat's "Use as guest list" (<CleanDataChat>). Nothing is saved until Save Cards.
+  const loadGuestRows = async (data) => {
+    const { rows, columns } = normaliseSheetRows(data);
+    let norm = rows.map(r => ({ waStatus:WA.idle, smsStatus:SMS.pending, cardUrl:null, uploadStatus:"idle", ...r }));
+    // An event that already has guests: merge the sheet onto them instead of replacing
+    // them, so send statuses, calls and check-ins (Reports, Calls, Scanner, the view-only
+    // report) are not reset. Each row is matched to its saved card (phone + name, phone,
+    // name); guests missing from the sheet but with call/check-in history stay on the list.
+    let kept = 0, matched = 0;
+    if (supabase && savedEventId) {
+      const { data: saved, error } = await supabase.from("event_cards").select("*").eq("event_id", savedEventId);
+      if (error) showToast("Could not compare with the saved guest list: " + error.message, "warn");
+      else if (saved?.length) {
+        const plan = planCardSave(norm.map((r, i) => ({ r, i })), saved);
+        const byIdx = new Map(plan.keep.map(k => [k.i, k.old]));
+        matched = byIdx.size;
+        norm = norm.map((r, i) => {
+          const o = byIdx.get(i); if (!o) return r;
+          return { ...r, dbId: o.id, waStatus: o.wa_status || r.waStatus, smsStatus: o.sms_status || r.smsStatus,
+            ...(sameCardFace(r, o) ? cardFromRow(o) : {}) };   // a renamed guest needs a new card
+        });
+        kept = plan.retained.length;
+        norm = [...norm, ...plan.retained.map(c => ({
+          dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
+          waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
+        }))];
+      }
+    }
+    // Ordered column list for the SMS variable chips: standard columns first, then any extras
+    setCsvColumns(columns);
+    setRecords(norm); setActiveIdx(0);
+    showToast(matched || kept
+      ? `Loaded ${rows.length} records — ${matched} matched saved guests (statuses, calls and check-ins kept)${kept ? `, ${kept} kept for their call/check-in history` : ""}. Press Save Cards to store the changes.`
+      : `Loaded ${norm.length} records`, "success");
   };
 
   /* ── VCard CSV upload ── */
@@ -8364,6 +8372,12 @@ export default function App() {
             <span>{toast.msg}</span>
           </div>
         )}
+
+        {/* Data cleaner chat: a floating button on the Studio pages. Always mounted so the chat
+            survives tab changes; it renders nothing off the Studio pages. */}
+        <CleanDataChat visible={STUDIO_TABS.has(tab)} eventName={eventData.username}
+          canUseGuests={!!savedEventId && (access.setupMissing || access.can("design", "edit"))}
+          onUseGuests={loadGuestRows} askDialog={askDialog} showToast={showToast} />
 
         {/* Event modal */}
         {modalEvent !== null && (

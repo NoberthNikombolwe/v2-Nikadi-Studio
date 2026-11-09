@@ -1,6 +1,7 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import process from 'node:process'
+import { runCleanChat, CLEAN_LIMITS } from './supabase/functions/_shared/dataClean.js'
 
 // URL path the app is served from. "/" locally; the GitHub Pages workflow sets
 // VITE_BASE_PATH=/<repo-name>/ because Pages serves the site from a sub-folder.
@@ -15,9 +16,47 @@ const siteUrlPlugin = {
   transformIndexHtml: (html) => html.replaceAll('%SITE_URL%', siteUrl),
 }
 
+// `npm run dev` only: answers /ai-clean (the Studio's "Clean data" chat) the way the ai-clean
+// Edge Function does in production, with the same instructions and checks (dataClean.js).
+// The key is GEMINI_API_KEY in .env.development.local — no VITE_ prefix, so it is read here
+// in Node and never reaches the browser bundle. Optional: GEMINI_MODEL.
+const aiCleanDevPlugin = {
+  name: 'nikadi-ai-clean-dev',
+  apply: 'serve',
+  configureServer(server) {
+    const env = { ...loadEnv(server.config.mode, server.config.envDir || server.config.root, ''), ...process.env }
+    const send = (res, status, body) => {
+      res.statusCode = status
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify(body))
+    }
+    server.middlewares.use('/ai-clean', async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { error: 'Method not allowed' })
+      const apiKey = String(env.GEMINI_API_KEY || '').trim()
+      if (!apiKey) return send(res, 500, { error: 'No GEMINI_API_KEY — add it to .env.development.local (without VITE_) and restart npm run dev.' })
+      let raw = ''
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > CLEAN_LIMITS.bodyBytes) return send(res, 413, { error: 'That message is too large — send a shorter list or fewer photos.' })
+      }
+      let payload
+      try { payload = JSON.parse(raw) } catch { return send(res, 400, { error: 'The request could not be read.' }) }
+      const out = await runCleanChat(payload?.messages, {
+        apiKey,
+        model: env.GEMINI_MODEL,
+        post: async (url, init) => {
+          const r = await fetch(url, { method: 'POST', ...init, signal: AbortSignal.timeout(140_000) })
+          return { status: r.status, text: await r.text() }
+        },
+      })
+      send(res, out.status, out.body)
+    })
+  },
+}
+
 export default defineConfig({
   base,
-  plugins: [react(), siteUrlPlugin],
+  plugins: [react(), siteUrlPlugin, aiCleanDevPlugin],
   server: {
     proxy: {
       '/sms-proxy': {

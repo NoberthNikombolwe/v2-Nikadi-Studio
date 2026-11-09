@@ -20,7 +20,8 @@ A web application for designing, managing, and distributing personalised event i
 12. [Step 8 — Deploy the Messaging Edge Functions (Production Only)](#step-8--deploy-the-messaging-edge-functions-production-only)
 13. [Step 9 — Turn On Scheduled Sends](#step-9--turn-on-scheduled-sends)
 14. [Step 10 — Turn On Delivery Reports](#step-10--turn-on-delivery-reports)
-15. [Features](#features)
+15. [Step 11 — Turn On the Data Cleaner (Gemini)](#step-11--turn-on-the-data-cleaner-gemini)
+16. [Features](#features)
 16. [SMS Integration](#sms-integration)
 17. [WhatsApp Integration](#whatsapp-integration)
 18. [Scheduled Sends](#scheduled-sends)
@@ -408,6 +409,38 @@ select status_code, content from net._http_response order by created desc limit 
 
 ---
 
+## Step 11 — Turn On the Data Cleaner (Gemini)
+
+The **Clean data** button floats over the Studio pages (Design, VCard, SMS, WhatsApp, Batch & Send). It opens a chat where you paste a messy guest list (or attach photos of one) and Google Gemini returns clean tables of Name, Phone and card type. The browser never sees the Gemini key: it calls the `ai-clean` Edge Function, which holds the key and the bot's fixed instructions (`supabase/functions/_shared/dataClean.js`).
+
+### 11.1 — Get a Gemini API key
+
+Create one in [Google AI Studio](https://aistudio.google.com/apikey).
+
+### 11.2 — Set the secret and deploy
+
+```bash
+npx supabase secrets set GEMINI_API_KEY=<your-gemini-key> --project-ref <your-project-ref>
+# Optional: pin a model. Default: gemini-flash-lite-latest (Google's current Flash-Lite;
+# in Nov 2026 the bigger Flash models were too slow or "unavailable" for this)
+npx supabase secrets set GEMINI_MODEL=<model-name> --project-ref <your-project-ref>
+npx supabase functions deploy ai-clean --project-ref <your-project-ref> --no-verify-jwt
+```
+
+Like the messaging functions, it accepts only signed-in users whose role can see a Studio page.
+
+### 11.3 — In development
+
+Put the key in `.env.development.local` **without** the `VITE_` prefix, so it stays on your machine and out of the bundle, then restart `npm run dev`:
+
+```bash
+GEMINI_API_KEY=<your-gemini-key>
+```
+
+The Vite dev server answers `/ai-clean` itself with the same instructions and checks.
+
+---
+
 ## Features
 
 ### Events
@@ -441,6 +474,19 @@ The **Feedback** page (Admin by default; set it per role under Settings → Role
 - Add or remove contacts manually
 - Each contact has a WhatsApp status and SMS status tracked independently
 - Export contacts as CSV
+
+### Data Cleaner (AI)
+
+- The floating **Clean data** button on the Studio pages opens a chat with Google Gemini (setup: Step 11)
+- Paste a messy list (a WhatsApp message, a typed list, rows from Excel) and get clean tables: list numbers, symbols and words like "simu no." removed; phones as `07…`; names in Title Case with "Mr. & Mrs."; card types as DOUBLE / SINGLE (or *Haikutajwa* when not given)
+- Or attach photos and screenshots of a list, up to 10 per message (the photo button, paste a screenshot, or drag photos onto the chat). Each photo is read on its own and the results are joined into one list; a guest seen on two overlapping screenshots is listed once
+- Photos are never saved: they are shrunk in your browser, kept only in memory with the chat, and sent to Gemini only inside the question. Nothing goes to Storage, the database or browser storage, and New chat or a reload drops them. Numbers read from a photo can't be checked against typed text, so check them against the photos (a digit the AI couldn't read shows as `?`, marked in red)
+- Ask for changes in the same chat ("ongeza…", "ondoa…")
+- Long one-guest-per-line lists are cleaned in parts of 40 lines (the AI drops or garbles a few guests in one long answer), then joined into one list
+- Every answer is checked in code against what you pasted, and problems are marked in red: numbers missing from the table, numbers that aren't in your list (a slipped digit), numbers not in the 0… format, and card types that differ from your list (**Use the card types from my list** fixes those in one click)
+- **Use as guest list** loads the result like an uploaded spreadsheet (saved guests keep their statuses, calls and check-ins; nothing is saved until **Save Cards**). Or download it as **Excel** or **Copy** it as rows
+- The bot only cleans guest lists: its instructions are fixed on the server
+- The chat is kept in memory only (it holds phone numbers) and is cleared on reload
 
 ### Templates
 

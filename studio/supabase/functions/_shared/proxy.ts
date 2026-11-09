@@ -31,7 +31,7 @@ export type ProxyOptions = {
 // CORS: set ALLOWED_ORIGINS (comma-separated) to restrict browsers to your app's origin(s).
 // Left unset it falls back to "*", which is acceptable because auth is a bearer token,
 // not a cookie — but restricting it is the recommended production setting.
-const corsHeaders = (req: Request): Record<string, string> => {
+export const corsHeaders = (req: Request): Record<string, string> => {
   const allowed = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const origin = req.headers.get("Origin") ?? "";
   const allowOrigin = allowed.length ? (allowed.includes(origin) ? origin : allowed[0]) : "*";
@@ -43,14 +43,14 @@ const corsHeaders = (req: Request): Record<string, string> => {
   };
 };
 
-const json = (req: Request, status: number, body: unknown): Response =>
+export const json = (req: Request, status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), {
     status,
     headers: { ...corsHeaders(req), "Content-Type": "application/json" },
   });
 
 // True when the request carries a valid signed-in user's access token
-const isSignedIn = async (req: Request): Promise<boolean> => {
+export const isSignedIn = async (req: Request): Promise<boolean> => {
   const auth = req.headers.get("Authorization") ?? "";
   if (!/^Bearer \S+$/.test(auth)) return false;
   const url = Deno.env.get("SUPABASE_URL");
