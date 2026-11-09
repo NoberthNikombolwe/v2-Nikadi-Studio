@@ -18,6 +18,7 @@ import { ROLES, ROLE_LABEL, MODULES, DEFAULT_MATRIX, can, visibleNav, matrixFrom
 import { DEFAULT_SETTINGS, settingsFromRows, resolveChoice, validateTemplate, validateSenderId } from "./lib/settings";
 import { peopleForCardType, peopleLabel, validateCardRule, scanStatus, remaining as placesLeft, filterGuests, cardSource, scanBreakdown, scanReportRows, SCAN_STATE_LABEL } from "./lib/cardRules";
 import { buildQrPayload, matchByName, SCAN_REASON, newScanCode } from "./lib/scan";
+import { drawQrLogo, qrStyle, qrSizeForLogo } from "./lib/qrLogo";
 import { CALL_STATUSES, callOptions, nextCallStatus, summariseCalls, filterCalls } from "./lib/calls";
 import { GUIDE_STAGES, GUIDE_STEPS, GUIDE_LINKS, stepsOfStage, guideProgress } from "./lib/guide";
 import { ACCOUNT_TYPES, TXN_KINDS, TXN_CATEGORIES, validateTransaction, txnToRow, validateAccount, summariseTransactions, marginTone, formatPct,
@@ -785,9 +786,11 @@ const CSS = `
 `;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
-// Builds a goqr.me image URL that encodes `data` as a QR code of `size`×`size` px
-const qrUrl = (data, size = 120) =>
-  `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}&margin=6&color=0d1f3c&bgcolor=ffffff`;
+// Builds a goqr.me image URL that encodes `data` as a QR code of `size`×`size` px, with error
+// correction `ecc` (L / M / Q / H). Cards use qrStyle() (src/lib/qrLogo.js): H with the Nikadi
+// logo in the middle when the code is big enough to scan with it, else a plain L code.
+const qrUrl = (data, size = 120, ecc = "L") =>
+  `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}&margin=6&color=0d1f3c&bgcolor=ffffff&ecc=${ecc}`;
 
 // Triggers a browser file download for arbitrary text content via a throwaway <a> tag
 const downloadBlob = (content, filename, type = "text/plain") => {
@@ -886,16 +889,18 @@ function CardCanvas({ bgImage, bgSize, elements, record, selected, onSelect, onM
           }
         } else if (el.type === "qr") {
           const qrData = buildQrPayload(record || {});
+          const look = qrStyle(qrData, el.size);
           const img = new Image(); img.crossOrigin = "anonymous";
           img.onload = () => {
             ctx.save(); ctx.shadowColor="rgba(0,0,0,0.2)"; ctx.shadowBlur=6;
             ctx.drawImage(img, el.x, el.y, el.size, el.size); ctx.restore();
+            if (look.logo) drawQrLogo(ctx, el.x, el.y, el.size);
             if (selected === el.id) {
               ctx.strokeStyle="#38bdf8"; ctx.lineWidth=1.5; ctx.setLineDash([4,3]);
               ctx.strokeRect(el.x-3, el.y-3, el.size+6, el.size+6); ctx.setLineDash([]);
             }
           };
-          img.src = qrUrl(qrData, el.size);
+          img.src = qrUrl(qrData, el.size, look.ecc);
         }
       });
     };
@@ -968,13 +973,14 @@ async function exportCard(bgImage, bgSize, elements, record) {
   const ctx = cv.getContext("2d");
   const qrEls  = elements.filter(e=>e.type==="qr");
   const qrData = buildQrPayload(record || {});
+  const qrLooks = qrEls.map(el => qrStyle(qrData, el.size));   // logo when big enough to scan with it
   // Web fonts load lazily, and canvas drawing doesn't trigger a load — wait for every font a
   // text element uses, or the card silently falls back to a default font
   await Promise.all(elements.filter(el => el.type==="text").map(el =>
     Promise.resolve(document.fonts?.load(`${el.bold?"bold ":""}${el.fontSize}px '${el.fontFamily||"Plus Jakarta Sans"}'`)).catch(() => {})));
   const [bg, ...qrImgs] = await Promise.all([
     bgImage ? loadImage(bgImage).catch(e => { throw new Error(`Template image ${e.message}`); }) : null,
-    ...qrEls.map(el => loadImage(qrUrl(qrData, el.size), { cors:true, retries:2 })
+    ...qrEls.map((el, i) => loadImage(qrUrl(qrData, el.size, qrLooks[i].ecc), { cors:true, retries:2 })
       .catch(e => { throw new Error(`QR code ${e.message} for ${record?.name||"record"}`); })),
   ]);
   if (bg) ctx.drawImage(bg,0,0,cw,ch);
@@ -1002,6 +1008,7 @@ async function exportCard(bgImage, bgSize, elements, record) {
   qrEls.forEach((el, i) => {
     ctx.save(); ctx.shadowColor="rgba(0,0,0,0.2)"; ctx.shadowBlur=6;
     ctx.drawImage(qrImgs[i],el.x,el.y,el.size,el.size); ctx.restore();
+    if (qrLooks[i].logo) drawQrLogo(ctx, el.x, el.y, el.size);
   });
   return cv.toDataURL("image/png");
 }
@@ -9596,6 +9603,22 @@ export default function App() {
                     <div><label className="nk-label">Y (px)</label><input type="number" value={Math.round(selectedEl.y)} onChange={e=>updateEl("y",Number(e.target.value))} className="nk-input" /></div>
                   </div>
                   <p style={{fontSize:11,color:N.textDim,lineHeight:1.6,marginTop:4}}>Encodes: <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky,fontSize:11}}>Name=…;TypeCard=…</code></p>
+                  {(() => {
+                    // The logo needs about 3 px per QR square to scan; long names make denser codes
+                    const need = qrSizeForLogo(records);
+                    const fits = selectedEl.size >= need;
+                    return (
+                      <div className="nk-chip" style={{marginTop:8,fontSize:11,lineHeight:1.6,color:fits ? N.green : N.amber}}>
+                        <Icon n={fits ? "check" : "info"} /> {fits
+                          ? "Nikadi logo in the middle of every guest's QR code."
+                          : <>The Nikadi logo shows in the QR code from <b>{need}px</b> for every guest. Smaller codes stay plain, so they always scan.</>}
+                        {!fits && need <= Math.round(Math.min(cw,ch)*0.8) && (
+                          <button type="button" className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"4px 10px",marginTop:6,display:"flex"}}
+                            onClick={() => updateEl("size", need)}><Icon n="arrowUp" /> Make it {need}px</button>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </>
               )}
 

@@ -1244,3 +1244,40 @@ test("sendSmsMessages: a refusal or no answer says from where, and whether they 
   const empty = await sendSmsMessages(fakeProvider(0).post, []);
   assert.deepEqual([empty.problem, empty.problemFrom], ["", 0]);
 });
+
+// ── Nikadi logo in the middle of card QR codes ──
+import { qrLogoLayout, qrLogoCoverage, qrModules, qrPxPerModule, qrStyle, qrLogoMinSize, qrSizeForLogo, QR_LOGO_BOX, QR_MIN_PX_PER_MODULE } from "./qrLogo.js";
+
+test("qrLogoLayout: a centred white square with clear space round the logo", () => {
+  const { box, logo } = qrLogoLayout(100, 50, 200);
+  assert.equal(box.side, 44);                                     // 22% of 200
+  assert.deepEqual([box.x + box.side / 2, box.y + box.side / 2], [200, 150]);   // centred on the QR
+  assert.ok(logo.x > box.x + 7 && logo.x + logo.w < box.x + box.side - 7);       // padding left and right
+  assert.ok(logo.y > box.y + 7 && logo.y + logo.h < box.y + box.side - 7);       // and above and below
+  assert.ok(Math.abs(logo.w / logo.h - 116 / 72) < 1e-9);                       // keeps its shape
+  assert.ok(qrLogoCoverage() < 0.06 && QR_LOGO_BOX <= 0.25);                     // far inside what H repairs
+});
+
+test("qrModules follows the QR size tables for L and H", () => {
+  assert.equal(qrModules("x".repeat(17), "L"), 21);      // version 1
+  assert.equal(qrModules("x".repeat(18), "L"), 25);      // version 2
+  assert.equal(qrModules("x".repeat(78), "H"), 49);      // a typical guest: version 8
+  assert.equal(qrModules("x".repeat(114), "H"), 57);     // a long name: version 10
+  assert.equal(qrModules("é".repeat(40), "H"), 49);      // counted in UTF-8 bytes (80)
+  assert.equal(qrModules("x".repeat(3000), "L"), null);
+});
+
+test("qrStyle: the logo only where each square gets 3 px, else the plain code as before", () => {
+  const guest = "ID=0f8fad5b-d9cb-469f-a165-70867728950e;Name=Asha Juma Mohamed;TypeCard=Double";   // 78 chars
+  assert.equal(qrLogoMinSize(guest), 49 * QR_MIN_PX_PER_MODULE + 12);                            // 159
+  assert.deepEqual(qrStyle(guest, 159), { ecc: "H", logo: true });
+  assert.deepEqual(qrStyle(guest, 140), { ecc: "L", logo: false });
+  assert.ok(qrPxPerModule(guest, 159) >= 3 && qrPxPerModule(guest, 158) < 3);
+});
+
+test("qrSizeForLogo: the size that gives every guest the logo (longest name, with an ID)", () => {
+  const recs = [{ name: "Neema", cardType: "Single" }, { name: "Mheshimiwa Dkt. Abdallah Hamisi Kassimu Mwinyimkuu", cardType: "VIP Table" },
+    { name: "Sample", sample: true }];
+  assert.equal(qrSizeForLogo(recs), 57 * 3 + 12);     // the long name needs version 10 (57 modules)
+  assert.ok(qrSizeForLogo([]) >= 150);                // no guests yet: a typical guest
+});
