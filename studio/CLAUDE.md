@@ -35,7 +35,8 @@ Before finishing a change run `npm run lint`, `npm test`, `npm run test:function
 - **Card rendering** — `designElements` (the layout) + a record are rasterised by `exportCard()` for download/zip/upload. It is async and **rejects** if the template or a QR image fails to load (never produces a card with a missing QR). Michango events hide the `qr` and `cardtype` elements (`isMichango`).
   - **Footer on every card:** "Powered by Nikadi" + a phone number in a small pill with the Nikadi mark, at the bottom centre unless dragged elsewhere ([src/lib/cardFooter.js](src/lib/cardFooter.js), `drawCardFooter`).
     - **Where it's drawn:** in the Design preview (`<CardCanvas footer>`) and by `exportCard(…, footer)`, so on every download, upload and send.
-    - **Per event:** `events.card_footer` JSONB `{ brand, phone, bg, bgOpacity, color, x, y, scale }`.
+    - **Per event:** `events.card_footer` JSONB `{ brand, phone, bg, bgOpacity, color, x, y, scale, font, hidden }`.
+      - **Hidden:** `hidden: true` (the panel's "Show the footer on this event's cards" switch) leaves the footer off that event's cards. `drawCardFooter` and `footerPill` return null, and its font isn't checked. The other settings are kept, so showing it again restores them.
       - **Size:** `scale` (1 = normal, i.e. 2% of the card width; `FOOTER_SIZE` 0.5–2.5) scales the text, mark and pill together. The panel has a slider, −/+ buttons (`stepFooterSize`, 10% steps) and "Back to the normal size".
       - **Editing:** click the footer on the Design canvas (`selected === "footer"`) or "Card footer" in the elements list, and the right panel edits it. It has presets (`FOOTER_PRESETS`), colour pickers and a readability warning (`footerHardToRead`).
       - **Dragging:** `<CardCanvas onFooterMove>` moves it anywhere on the card.

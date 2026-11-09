@@ -48,6 +48,8 @@ export const normaliseFooter = (raw) => {
   const share = (v) => (v === undefined || v === null || v === "" || !Number.isFinite(Number(v)) ? undefined
     : Math.round(Math.max(0, Math.min(1, Number(v))) * 10000) / 10000);
   if (share(r.x) !== undefined && share(r.y) !== undefined) { out.x = share(r.x); out.y = share(r.y); }
+  // Hidden on this event's cards (everything else is kept, so showing it again restores it)
+  if (r.hidden === true) out.hidden = true;
   // Font (a family name from src/lib/fonts.js, or an uploaded one)
   if (typeof r.font === "string" && /^[\p{L}\p{N} '-]{1,40}$/u.test(r.font.trim())) out.font = r.font.trim();
   // Size: 1 = normal (2% of the card's width), FOOTER_SIZE.min – max
@@ -83,7 +85,7 @@ export const resolveFooter = (settings = {}, eventFooter = null) => {
   const [brand, phone] = footerLines(settings);
   const style = { ...FOOTER_STYLE_DEFAULTS, ...Object.fromEntries(["bg", "bgOpacity", "color"].filter(k => e[k] !== undefined).map(k => [k, e[k]])) };
   return { lines: [e.brand?.trim() || brand, e.phone?.trim() || phone], bg: hexToRgba(style.bg, style.bgOpacity), color: style.color, style,
-    pos: e.x !== undefined ? { x: e.x, y: e.y } : null, scale: e.scale ?? 1, font: e.font || FOOTER_DEFAULT_FONT };
+    pos: e.x !== undefined ? { x: e.x, y: e.y } : null, scale: e.scale ?? 1, font: e.font || FOOTER_DEFAULT_FONT, hidden: !!e.hidden };
 };
 
 // WCAG contrast ratio of two "#rrggbb" colours (1 = none, 21 = black on white)
@@ -135,15 +137,16 @@ export const cardFooterLayout = (cw, ch, lines = [], measure = (t) => String(t).
 // The footer's box on a card (footer = resolveFooter(...)) — for the "QR overlaps the footer"
 // warning in Design
 export const footerPill = (cw, ch, footer, measure) =>
-  footer?.lines?.length ? cardFooterLayout(cw, ch, footer.lines, measure, footer.pos, footer.scale, footer.font, footer.phoneFont).pill : null;
+  footer?.lines?.length && !footer.hidden ? cardFooterLayout(cw, ch, footer.lines, measure, footer.pos, footer.scale, footer.font, footer.phoneFont).pill : null;
 // True when two boxes { x, y, w, h } overlap
 export const boxesOverlap = (a, b) => !!a && !!b && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
-// Draws the footer on a card canvas. footer = resolveFooter(...) → { lines, bg, color, pos }.
-// Returns the layout (the pill is where a click selects and drags the footer in Design), or null.
+// Draws the footer on a card canvas. footer = resolveFooter(...) → { lines, bg, color, pos, hidden }.
+// Returns the layout (the pill is where a click selects and drags the footer in Design), or
+// null — also when the event hides its footer.
 export const drawCardFooter = (ctx, cw, ch, footer) => {
   const lines = footer?.lines || [];
-  if (!lines.length) return null;
+  if (!lines.length || footer.hidden) return null;
   const L = cardFooterLayout(cw, ch, lines, (t, font) => { ctx.font = font; return ctx.measureText(t).width; }, footer.pos, footer.scale, footer.font, footer.phoneFont);
   ctx.save();
   ctx.shadowColor = "transparent";

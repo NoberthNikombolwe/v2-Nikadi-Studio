@@ -8077,7 +8077,7 @@ export default function App() {
   // Making cards on a computer without a chosen font (and no uploaded file): say so once per font
   const warnedFonts = useRef(new Set());
   const warnMissingFonts = () => {
-    const families = [...designElements.filter(e => e.type === "text").map(e => e.fontFamily || DEFAULT_CARD_FONT), cardFooter.font];
+    const families = [...designElements.filter(e => e.type === "text").map(e => e.fontFamily || DEFAULT_CARD_FONT), ...(cardFooter.hidden ? [] : [cardFooter.font])];
     const missing = missingCardFonts(families, uploadedCardFonts, fontOnDevice).filter(f => !warnedFonts.current.has(f));
     if (!missing.length) return;
     missing.forEach(f => warnedFonts.current.add(f));
@@ -8832,9 +8832,9 @@ export default function App() {
                   );
                 })}
                 {/* The "Powered by" footer: always on, edited per event */}
-                <div className={`nk-el-pill${selected==="footer"?" active":""}`} onClick={() => setSelected("footer")} title="On every card — click to change its text and colours, drag it on the card to move it">
+                <div className={`nk-el-pill${selected==="footer"?" active":""}`} onClick={() => setSelected("footer")} title="On every card unless hidden — click to change it, drag it on the card to move it">
                   <span style={{fontWeight:600,fontSize:13}}>Card footer</span>
-                  <span className="nk-el-type">footer</span>
+                  <span className="nk-el-type">{cardFooter.hidden ? "hidden" : "footer"}</span>
                 </div>
                 {savedEventId && (
                   <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
@@ -9807,6 +9807,15 @@ export default function App() {
                     <p style={{fontSize:12,color:N.textDim,lineHeight:1.6,marginBottom:10}}>
                       On every card of {savedEventId ? "this event" : "the event"}. Drag it on the card to move it. Empty lines use the defaults from Settings → General.
                     </p>
+                    <Toggle checked={!cardFooter.hidden} disabled={!canEditFooter}
+                      onChange={(on) => editFooter({ hidden: on ? undefined : true })}
+                      label="Show the footer on this event's cards" />
+                    {cardFooter.hidden && (
+                      <p style={{fontSize:12,color:N.textMid,lineHeight:1.6,marginBottom:10}}>
+                        <Icon n="info" /> Hidden — this event's cards are made without the footer. Its text, look and place are kept for when you show it again.
+                      </p>
+                    )}
+                    {!cardFooter.hidden && (<>
                     <label className="nk-label" htmlFor="nk-footer-brand">First line</label>
                     <input id="nk-footer-brand" className="nk-input" value={ev.brand ?? ""} placeholder={footerDefaults[0]} maxLength={60} disabled={!canEditFooter}
                       onChange={e => editFooter({ brand: e.target.value })} />
@@ -9877,6 +9886,7 @@ export default function App() {
                       disabled={!canEditFooter || !Object.keys(ev).length} onClick={() => editFooter(null)}>
                       <Icon n="undo" /> Back to the default footer
                     </button>
+                    </>)}
                     {!savedEventId && <p style={{fontSize:11,color:N.amber,marginTop:8}}><Icon n="info" /> Save the event to keep this footer.</p>}
                   </>
                 );

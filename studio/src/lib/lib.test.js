@@ -1442,3 +1442,21 @@ test("the footer has its own font", () => {
   const P = cardFooterLayout(1080, 1350, ["Powered by Nikadi", "+255"], (t) => t.length * 10, null, 1, "Ananda", "Plus Jakarta Sans");
   assert.ok(P.lines[0].font.includes("'Ananda'") && P.lines[1].font.includes("'Plus Jakarta Sans'"));
 });
+
+// ── Hiding the footer on an event's cards ──
+import { drawCardFooter } from "./cardFooter.js";
+
+test("an event can hide its footer, and showing it again keeps its settings", () => {
+  assert.deepEqual(normaliseFooter({ hidden: true, bg: "#b8860b" }), { hidden: true, bg: "#b8860b" });
+  assert.deepEqual(normaliseFooter({ hidden: "yes" }), {});                 // only a real true hides it
+  const hidden = resolveFooter({}, { hidden: true, brand: "Imeandaliwa na Nikadi", scale: 1.5 });
+  assert.equal(hidden.hidden, true);
+  assert.equal(hidden.lines[0], "Imeandaliwa na Nikadi");                   // kept for when it's shown again
+  assert.equal(resolveFooter({}, {}).hidden, false);
+  // nothing is drawn, and nothing can overlap a QR
+  assert.equal(drawCardFooter(null, 1080, 1350, hidden), null);
+  assert.equal(footerPill(1080, 1350, hidden, (t) => t.length * 10), null);
+  const shown = resolveFooter({}, { ...normaliseFooter({ hidden: true, brand: "X" }), hidden: undefined });
+  assert.equal(shown.hidden, false);
+  assert.equal(shown.lines[0], "X");
+});
