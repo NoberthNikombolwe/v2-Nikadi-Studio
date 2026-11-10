@@ -15,6 +15,15 @@ export const DELIVERY_SOURCES = { send: "send", callback: "webhook", check: "che
 
 const newer = (a, b) => !b || String(a.sent_at || "") >= String(b.sent_at || "");
 
+// False for a delivery sent before the guest's send statuses were reset (a new spreadsheet:
+// event_cards.status_reset_at), so its report no longer speaks for the guest. True when
+// there was no reset or the time can't be read.
+export const sentAfterReset = (d, resetAt) => {
+  if (!d || !resetAt) return !!d;
+  const sent = Date.parse(d.sent_at), reset = Date.parse(resetAt);
+  return !Number.isFinite(sent) || !Number.isFinite(reset) || sent > reset;
+};
+
 // The latest delivery of each guest's main SMS / WhatsApp card, and of each extra message:
 //   byCard:  "sms|main|<cardId>" / "whatsapp|card|<cardId>" → row
 //   byExtra: "<messageKey>|<recipientKey>"                  → row (extra SMS messages)

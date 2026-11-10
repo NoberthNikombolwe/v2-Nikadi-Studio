@@ -473,6 +473,7 @@ The **Feedback** page (Admin by default; set it per role under Settings → Role
 - Import from **Excel (.xlsx)** or **CSV** — columns auto-detected (`name`, `phone`, `cardType`, etc.)
 - Add or remove contacts manually
 - Each contact has a WhatsApp status and SMS status tracked independently
+- Uploading a new spreadsheet in Design for an event that already has guests **resets every guest's WhatsApp card and main SMS status to "not sent"**, so the new list can be sent to everyone. Calls, check-ins, extra SMS messages and card images are kept, and guests are still matched by phone and name. The reset is stored by **Save Cards** (with a History entry). Delivery reports of messages sent before the reset no longer change the guests (needs the latest `supabase-roles-settings-scan.sql`)
 - Export contacts as CSV
 
 ### Data Cleaner (AI)
@@ -484,7 +485,7 @@ The **Feedback** page (Admin by default; set it per role under Settings → Role
 - Ask for changes in the same chat ("ongeza…", "ondoa…")
 - Long one-guest-per-line lists are cleaned in parts of 40 lines (the AI drops or garbles a few guests in one long answer), then joined into one list
 - Every answer is checked in code against what you pasted, and problems are marked in red: numbers missing from the table, numbers that aren't in your list (a slipped digit), numbers not in the 0… format, and card types that differ from your list (**Use the card types from my list** fixes those in one click)
-- **Use as guest list** loads the result like an uploaded spreadsheet (saved guests keep their statuses, calls and check-ins; nothing is saved until **Save Cards**). Or download it as **Excel** or **Copy** it as rows
+- **Use as guest list** loads the result like an uploaded spreadsheet (WhatsApp and SMS statuses are reset; saved guests keep their calls and check-ins; nothing is saved until **Save Cards**). Or download it as **Excel** or **Copy** it as rows
 - The bot only cleans guest lists: its instructions are fixed on the server
 - The chat is kept in memory only (it holds phone numbers) and is cleared on reload
 

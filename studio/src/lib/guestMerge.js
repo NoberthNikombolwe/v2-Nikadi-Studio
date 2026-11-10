@@ -15,6 +15,12 @@ import { normalisePhone } from "./phone.js";
 const nameKey = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
 const phoneKey = (s) => (s ? normalisePhone(String(s)) : "");
 
+// A new spreadsheet starts the sends over: every guest's WhatsApp card status and main SMS
+// status go back to "not sent" (`idle` / `pending`, the WA / SMS constants in App.jsx).
+// Nothing else changes — calls, check-ins, extra messages and card images are kept.
+export const resetSendStatuses = (rows = [], idle = "idle", pending = "pending") =>
+  rows.map(r => ({ ...r, waStatus: idle, smsStatus: pending }));
+
 // Does this event_cards row carry call or check-in history?
 export const hasLedger = (row = {}) =>
   !!(row.call_status || (row.call_comment && String(row.call_comment).trim()) || Number(row.scan_count) > 0);

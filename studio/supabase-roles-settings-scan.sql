@@ -1313,6 +1313,10 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_event   ON message_deliveries(event_id
 CREATE INDEX IF NOT EXISTS idx_deliveries_card    ON message_deliveries(event_card_id, channel, message_key, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON message_deliveries(sent_at) WHERE status = 'sent';
 
+-- When a new spreadsheet last reset the guest's WhatsApp / SMS statuses (written by the app's
+-- Save Cards after an upload in Design). Reports of sends made before it no longer change the guest.
+ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS status_reset_at TIMESTAMPTZ;
+
 ALTER TABLE message_deliveries ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.message_deliveries FROM anon, authenticated;
 GRANT SELECT ON public.message_deliveries TO authenticated;
@@ -1400,7 +1404,8 @@ END $$;
 -- Applies delivery results (webhook, server check or "Check delivery now"). One item per message:
 --   { message_id, status_id, group_id?, status_name?, reason?, done_at? }
 -- Only forwards: sent → delivered / read / failed, delivered → read. The guest's own status changes
--- only for the main SMS / the card, and only when this is that guest's latest send of it. Each
+-- only for the main SMS / the card, only when this is that guest's latest send of it, and not for
+-- a send made before a new spreadsheet reset the guest (event_cards.status_reset_at). Each
 -- change is written to the event History. Signed-in callers only touch events they can see.
 -- → { updated, delivered, read, failed, unknown }
 CREATE OR REPLACE FUNCTION public.apply_delivery_results(p_items JSONB, p_source TEXT DEFAULT 'check') RETURNS JSONB
@@ -1442,7 +1447,9 @@ BEGIN
        AND ((d.channel = 'sms' AND d.message_key = 'main') OR (d.channel = 'whatsapp' AND d.message_key = 'card'))
        AND NOT EXISTS (SELECT 1 FROM message_deliveries n WHERE n.event_card_id = d.event_card_id AND n.channel = d.channel
                           AND n.message_key = d.message_key AND n.sent_at > d.sent_at
-                          AND n.sent_at <= NOW()) THEN                -- a send NextSMS holds for later doesn't count yet
+                          AND n.sent_at <= NOW())                     -- a send NextSMS holds for later doesn't count yet
+       AND NOT EXISTS (SELECT 1 FROM event_cards c WHERE c.id = d.event_card_id
+                          AND c.status_reset_at IS NOT NULL AND d.sent_at <= c.status_reset_at) THEN   -- sent before a new spreadsheet reset the guest
       IF d.channel = 'sms' THEN
         UPDATE event_cards c SET sms_status = CASE v_state WHEN 'read' THEN 'delivered' ELSE v_state END WHERE c.id = d.event_card_id;
       ELSE

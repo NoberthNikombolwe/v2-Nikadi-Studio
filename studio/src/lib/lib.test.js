@@ -1884,3 +1884,29 @@ test("photo helpers: file checks, sizes, and when a screenshot is sent as it is"
   // each try is smaller than the one before
   assert.ok(PHOTO_STEPS.every((s, i) => i === 0 || s.scale * s.quality < PHOTO_STEPS[i - 1].scale * PHOTO_STEPS[i - 1].quality));
 });
+
+// ── A new spreadsheet resets the send statuses ──
+import { resetSendStatuses } from "./guestMerge.js";
+import { sentAfterReset } from "./deliveries.js";
+
+test("resetSendStatuses puts every guest back to not sent, keeping everything else", () => {
+  const rows = [
+    { dbId: "a", name: "Joy", waStatus: "read", smsStatus: "delivered", cardUrl: "https://x/a.jpg", call: "yes" },
+    { name: "Ben", waStatus: "invalid", smsStatus: "failed" },
+  ];
+  const out = resetSendStatuses(rows, "idle", "pending");
+  assert.deepEqual(out.map(r => [r.waStatus, r.smsStatus]), [["idle", "pending"], ["idle", "pending"]]);
+  assert.equal(out[0].cardUrl, "https://x/a.jpg");
+  assert.equal(out[0].call, "yes");
+  assert.equal(rows[0].waStatus, "read");   // the input is not changed
+});
+
+test("sentAfterReset: reports of sends made before the reset no longer count", () => {
+  const reset = "2026-11-10T09:00:00.000Z";
+  assert.equal(sentAfterReset({ sent_at: "2026-11-09T20:00:00+00:00" }, reset), false);
+  assert.equal(sentAfterReset({ sent_at: "2026-11-10T09:00:00+00:00" }, reset), false);   // the same moment: before
+  assert.equal(sentAfterReset({ sent_at: "2026-11-10T09:05:00+00:00" }, reset), true);
+  assert.equal(sentAfterReset({ sent_at: "2026-11-09T20:00:00+00:00" }, null), true);    // never reset
+  assert.equal(sentAfterReset({ sent_at: "" }, reset), true);                             // unreadable time: kept
+  assert.equal(sentAfterReset(null, reset), false);
+});

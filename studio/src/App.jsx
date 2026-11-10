@@ -1,5 +1,5 @@
 import Logo from "./Logo";
-import { planCardSave, splitImport } from "./lib/guestMerge";
+import { planCardSave, splitImport, resetSendStatuses } from "./lib/guestMerge";
 import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
@@ -7,7 +7,7 @@ import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipie
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult,
   parseProviderJson, waCardStatus, parseDeliveryReports, reportsQueries, statusReason, sendSmsMessages } from "./lib/messages";
 import { DELIVERY_STATES, DELIVERY_SOURCES, indexDeliveries, extraStatusOf, deliveryNote, guestStatusCounts, deliveryCounts, failureReasons,
-  filterDeliveries, deliveryExportRows, parseProviderLogs, providerLogsQuery } from "./lib/deliveries";
+  filterDeliveries, deliveryExportRows, parseProviderLogs, providerLogsQuery, sentAfterReset } from "./lib/deliveries";
 import LoginPage from "./LoginPage";
 import Icon from "./Icon";
 import ScanPanel, { ScanTabBar, ScanStats } from "./ScanPanel";
@@ -826,7 +826,9 @@ const waDone = (s) => s === WA.sent || s === WA.delivered || s === WA.read;
 const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"failed" };
 // A saved card's uploaded image (event_cards.card_url), so uploaded cards survive a reload
 // and scheduled WhatsApp sends can attach them
-const cardFromRow = (c) => ({ cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle" });
+// resetAt: when a new spreadsheet last reset the guest's send statuses (status_reset_at) —
+// delivery reports of sends before it no longer speak for the guest
+const cardFromRow = (c) => ({ cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
 // True when a re-uploaded row still has the saved card's name and card type, so the
 // card image made for it still shows the right thing
 const sameCardFace = (r, c) => String(r.name || "").trim() === String(c.name || "").trim()
@@ -6324,6 +6326,9 @@ export default function App() {
   useEffect(() => { recordsRef.current = records; });
   const selectSeq   = useRef(0);          // bumped per selectEvent call so a superseded (slower) load can bail out
   const smsInFlight = useRef(new Set());  // record indexes with an SMS request currently in flight
+  // When a new spreadsheet reset the open event's WhatsApp / SMS statuses (loadGuestRows: the
+  // reset time, ISO), else null. The next Save Cards writes the reset to the database, then clears it.
+  const statusResetRef = useRef(null);
 
   /* ── Navigation ── */
   const [tab, setTab] = useState("events");
@@ -6707,6 +6712,7 @@ export default function App() {
     if (latest && latest.id !== d.id && String(latest.sent_at) > String(d.sent_at)) return;   // an older send's late report
     setRecords(rs => rs.map(r => {
       if (r.dbId !== d.event_card_id) return r;
+      if (!sentAfterReset(d, r.resetAt)) return r;   // sent before a new spreadsheet reset the guest
       if (isMain) return { ...r, smsStatus: d.status === "read" ? SMS.delivered : d.status };
       return r.waStatus === WA.sending ? r : { ...r, waStatus: waCardStatus(d.status, d.status_id) };
     }));
@@ -6715,8 +6721,13 @@ export default function App() {
   const deliveryIndex = useMemo(() => indexDeliveries(deliveries.rows), [deliveries.rows]);
   useEffect(() => { deliveryIndexRef.current = deliveryIndex; }, [deliveryIndex]);
   // The latest delivery note of a guest's main SMS / card / extra message (badge tooltips)
-  const smsNote   = (rec) => (rec?.dbId ? deliveryNote(deliveryIndex.byCard.get(`sms|main|${rec.dbId}`)) : "");
-  const waNote    = (rec) => (rec?.dbId ? deliveryNote(deliveryIndex.byCard.get(`whatsapp|card|${rec.dbId}`)) : "");
+  // (nothing for a delivery sent before a new spreadsheet reset the guest's statuses)
+  const cardNote  = (rec, key) => {
+    const d = rec?.dbId ? deliveryIndex.byCard.get(`${key}|${rec.dbId}`) : null;
+    return d && sentAfterReset(d, rec.resetAt) ? deliveryNote(d) : "";
+  };
+  const smsNote   = (rec) => cardNote(rec, "sms|main");
+  const waNote    = (rec) => cardNote(rec, "whatsapp|card");
   const extraNote = (msgId, rec) => deliveryNote(deliveryIndex.byExtra.get(`${msgId}|${recipientKey(rec)}`));
   const navGroups = (access.setupMissing ? NAV_GROUPS : visibleNav(NAV_GROUPS, access.matrix, access.role))
     .filter(g => !g.eventOnly || savedEventId);
@@ -7130,31 +7141,41 @@ export default function App() {
     // them, so send statuses, calls and check-ins (Reports, Calls, Scanner, the view-only
     // report) are not reset. Each row is matched to its saved card (phone + name, phone,
     // name); guests missing from the sheet but with call/check-in history stay on the list.
-    let kept = 0, matched = 0;
+    // A new list starts the sends over: every guest's WhatsApp card and main SMS status goes
+    // back to "not sent" (calls, check-ins, extra messages and card images are kept), and the
+    // next Save Cards stores that (statusResetRef).
+    // The reset time is the server's (server_time(); the device clock without that RPC), so
+    // reports of sends made before it are ignored and sends made after it count.
+    let kept = 0, matched = 0, reset = null;
     if (supabase && savedEventId) {
       const { data: saved, error } = await supabase.from("event_cards").select("*").eq("event_id", savedEventId);
       if (error) showToast("Could not compare with the saved guest list: " + error.message, "warn");
       else if (saved?.length) {
+        const { data: serverNow, error: clockErr } = await supabase.rpc("server_time");
+        reset = (!clockErr && serverNow) || new Date().toISOString();
         const plan = planCardSave(norm.map((r, i) => ({ r, i })), saved);
         const byIdx = new Map(plan.keep.map(k => [k.i, k.old]));
         matched = byIdx.size;
         norm = norm.map((r, i) => {
           const o = byIdx.get(i); if (!o) return r;
-          return { ...r, dbId: o.id, waStatus: o.wa_status || r.waStatus, smsStatus: o.sms_status || r.smsStatus,
-            ...(sameCardFace(r, o) ? cardFromRow(o) : {}) };   // a renamed guest needs a new card
+          return { ...r, dbId: o.id, ...(sameCardFace(r, o) ? cardFromRow(o) : {}) };   // a renamed guest needs a new card
         });
         kept = plan.retained.length;
         norm = [...norm, ...plan.retained.map(c => ({
           dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
-          waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
+          ...cardFromRow(c),
         }))];
+        norm = resetSendStatuses(norm, WA.idle, SMS.pending).map(r => ({ ...r, resetAt: reset }));
       }
     }
+    statusResetRef.current = reset;
     // Ordered column list for the SMS variable chips: standard columns first, then any extras
     setCsvColumns(columns);
     setRecords(norm); setActiveIdx(0);
-    showToast(matched || kept
-      ? `Loaded ${rows.length} records — ${matched} matched saved guests (statuses, calls and check-ins kept)${kept ? `, ${kept} kept for their call/check-in history` : ""}. Press Save Cards to store the changes.`
+    showToast(reset
+      ? `Loaded ${rows.length} records — WhatsApp and SMS statuses reset, so everyone can be sent again. `
+        + `${matched} matched saved guests keep their calls and check-ins${kept ? `; ${kept} more kept for their call/check-in history` : ""}. `
+        + "Press Save Cards to store the changes."
       : `Loaded ${norm.length} records`, "success");
   };
 
@@ -7258,6 +7279,14 @@ export default function App() {
     // card_url (the uploaded card image) exists once the schedules SQL has been run; only
     // write it when the saved rows show the column, so saving never fails on an older database
     const urlCol = (old || []).some(c => "card_url" in c);
+    // A new spreadsheet reset the statuses (loadGuestRows): this save writes them for every
+    // saved guest, with the reset time (status_reset_at, once the delivery SQL has the column)
+    const resetAt  = statusResetRef.current;
+    const resetCol = (old || []).some(c => "status_reset_at" in c);
+    const resetFields = (wa, sms) => ({
+      ...(resetCol ? { status_reset_at: resetAt } : {}),
+      ...((wa || WA.idle) === WA.idle && (sms || SMS.pending) === SMS.pending ? { sent_at: null } : {}),
+    });
     const toRow = r => ({
       event_id:   eventId,
       name:       r.name||"",
@@ -7279,27 +7308,31 @@ export default function App() {
       const { error } = await supabase.from("event_cards").upsert(keep.map(({ r, id, old: o, matched }) => {
         // Statuses of saved guests are never written from here: sends save them as they happen
         // and delivery reports move them on (delivered / read / failed), so this browser's copy
-        // may be out of date. The guest keeps whatever the database says.
+        // may be out of date. The guest keeps whatever the database says — except right after
+        // a new spreadsheet reset them, when the reset (or a send made since) is written.
         const row = { id, ...toRow(r) };
-        delete row.wa_status;
-        delete row.sms_status;
+        if (resetAt) Object.assign(row, resetFields(r.waStatus, r.smsStatus));
+        else { delete row.wa_status; delete row.sms_status; }
         // The list in memory knows the card image; a row matched from a new sheet keeps the
         // saved image only while its name and card type are unchanged
         if (urlCol) row.card_url = r.cardUrl || (matched !== "id" && sameCardFace(r, o) ? o.card_url : null) || null;
         return row;
       }));
       if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
-      // Matched rows now point at their existing card, with the statuses it already had
+      // Matched rows now point at their existing card, with the statuses it already had (after
+      // a reset, the reset ones just written)
       const byIdx = new Map(keep.filter(k => k.matched !== "id").map(k => [k.i, k]));
       if (byIdx.size) setRecords(rs => rs.map((r, i) => {
         const k = byIdx.get(i); if (!k) return r;
+        if (resetAt) return { ...r, dbId: k.id };
         return { ...r, dbId: k.id,
           waStatus:  (r.waStatus || WA.idle) === WA.idle ? (k.old.wa_status || r.waStatus) : r.waStatus,
           smsStatus: (r.smsStatus || SMS.pending) === SMS.pending ? (k.old.sms_status || r.smsStatus) : r.smsStatus };
       }));
     }
     if (fresh.length) {
-      const { data: inserted, error } = await supabase.from("event_cards").insert(fresh.map(({ r }) => toRow(r))).select("id");
+      const { data: inserted, error } = await supabase.from("event_cards")
+        .insert(fresh.map(({ r }) => ({ ...toRow(r), ...(resetAt && resetCol ? { status_reset_at: resetAt } : {}) }))).select("id");
       if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
       // Remember each new row's database id so per-card status updates (autoSaveCard) can target it
       if (inserted?.length === fresh.length) {
@@ -7317,13 +7350,25 @@ export default function App() {
       const { error: delErr } = await supabase.from("event_cards").delete().in("id", gone);
       if (delErr) { showToast("Cards saved, but removed rows could not be deleted: " + delErr.message, "warn"); return; }
     }
+    // Guests kept for their history but not in the list: reset like everyone else
+    if (resetAt && plan.retained.length) {
+      const { error: resetErr } = await supabase.from("event_cards")
+        .update({ wa_status: WA.idle, sms_status: SMS.pending, sent_at: null, ...(resetCol ? { status_reset_at: resetAt } : {}) })
+        .in("id", plan.retained.map(c => c.id));
+      if (resetErr) { showToast("Cards saved, but some statuses could not be reset: " + resetErr.message, "warn"); return; }
+    }
     if (plan.retained.length) {
       setRecords(rs => [...rs, ...plan.retained.map(c => ({
         dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
         waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
+        ...(resetAt ? { waStatus: WA.idle, smsStatus: SMS.pending, resetAt } : {}),
       }))]);
     }
     const total = toSave.length + plan.retained.length;
+    if (resetAt) {
+      statusResetRef.current = null;
+      logHistory({ channel:"event", action:"contacts", detail:`WhatsApp and SMS statuses reset for ${total} guests (new spreadsheet) — they can all be sent again` }, eventId);
+    }
     // Status-only saves (after every send) keep the same count — only log real list changes
     if ((old?.length || 0) !== total || fresh.length || gone.length) {
       logHistory({ channel:"event", action:"contacts", detail:`Contact list saved: ${total} contacts (was ${old?.length || 0}; ${fresh.length} new, ${gone.length} removed, ${plan.retained.length} kept for call/check-in history)` }, eventId);
@@ -7414,6 +7459,7 @@ export default function App() {
     // this finishes, the older call must stop instead of overwriting the newer event
     const seq    = ++selectSeq.current;
     const stale  = () => seq !== selectSeq.current;
+    statusResetRef.current = null;   // an unsaved reset belonged to the event being left
     setLoadingTemplate(false);
 
     setEventData({
