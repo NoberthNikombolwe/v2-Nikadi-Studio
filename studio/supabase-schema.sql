@@ -755,6 +755,30 @@ END $$;
 REVOKE ALL ON FUNCTION public.scan_card(UUID, TEXT, INT, TEXT, TEXT) FROM public;
 GRANT EXECUTE ON FUNCTION public.scan_card(UUID, TEXT, INT, TEXT, TEXT) TO anon, authenticated;
 
+-- Deletes one guest card that is no longer used (Calls / Scanner → Delete card). Super Admins
+-- only, on an event they can see. The delete is written to the event History first (with the
+-- card's call answer and check-ins); its scan log goes with it (ON DELETE CASCADE) and its
+-- delivery records keep their rows without the card. → { deleted, name }
+CREATE OR REPLACE FUNCTION public.delete_guest_card(p_card_id UUID) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  c event_cards%ROWTYPE;
+BEGIN
+  SELECT * INTO c FROM event_cards WHERE id = p_card_id FOR UPDATE;
+  IF NOT FOUND THEN RETURN jsonb_build_object('deleted', FALSE); END IF;
+  IF public.my_role() IS DISTINCT FROM 'superuser' THEN RAISE EXCEPTION 'Only a Super Admin can delete a guest card'; END IF;
+  IF NOT public.can_see_event(c.event_id) THEN RAISE EXCEPTION 'You are not assigned to this event'; END IF;
+  INSERT INTO event_logs (event_id, channel, action, status, recipient_name, recipient_phone, detail, user_email)
+  VALUES (c.event_id, 'event', 'guest_delete', 'ok', c.name, c.phone,
+          left(format('Deleted card %s (%s) — call: %s, checked in %s/%s', COALESCE(c.name, '—'), COALESCE(NULLIF(c.card_type, ''), 'no card type'),
+                      COALESCE(c.call_status, 'not called'), COALESCE(c.scan_count, 0), COALESCE(c.max_scans, 1)), 500),
+          auth.jwt() ->> 'email');
+  DELETE FROM event_cards WHERE id = p_card_id;
+  RETURN jsonb_build_object('deleted', TRUE, 'name', c.name);
+END $$;
+REVOKE ALL ON FUNCTION public.delete_guest_card(UUID) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.delete_guest_card(UUID) TO authenticated;
+
 -- ─────────────────────────────────────────────────────────────────────
 -- 5. ROW LEVEL SECURITY — per module (replaces the "any signed-in user" policies)
 -- ─────────────────────────────────────────────────────────────────────

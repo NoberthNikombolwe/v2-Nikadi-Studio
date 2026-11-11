@@ -62,19 +62,20 @@ export const planCardSave = (entries = [], oldRows = []) => {
 };
 
 // Import guests from a spreadsheet straight into an event (Calls / Scanner tabs). Adds
-// only: never changes or removes a saved guest. A row whose name AND phone match a saved
-// guest (or an earlier row in the same file) is skipped and reported.
+// only: never changes or removes a saved guest. A row whose name, phone AND card type all
+// match a saved guest (or an earlier row in the same file) is skipped and reported; the same
+// name and phone with another card type (e.g. a SINGLE and a DOUBLE card) is added.
 //   rows:  [{ name, cardType, phone, ... }]   (from normaliseSheetRows)
 //   cards: event_cards rows ({ name, phone, card_type })
 // → { add: [row], skip: [{ row, reason, existing? }], invalid: [{ row, reason }] }
 export const splitImport = (rows = [], cards = []) => {
-  const key = (n, p) => `${nameKey(n)}|${phoneKey(p)}`;
-  const saved = new Map(cards.map(c => [key(c.name, c.phone), c]));
+  const key = (n, p, t) => `${nameKey(n)}|${phoneKey(p)}|${nameKey(t)}`;
+  const saved = new Map(cards.map(c => [key(c.name, c.phone, c.card_type), c]));
   const seen = new Set();
   const add = [], skip = [], invalid = [];
   for (const row of rows) {
     if (!nameKey(row.name)) { invalid.push({ row, reason: "No name" }); continue; }
-    const k = key(row.name, row.phone);
+    const k = key(row.name, row.phone, row.cardType);
     if (saved.has(k)) { skip.push({ row, reason: "Already on the guest list", existing: saved.get(k) }); continue; }
     if (seen.has(k)) { skip.push({ row, reason: "Repeated in this file" }); continue; }
     seen.add(k);

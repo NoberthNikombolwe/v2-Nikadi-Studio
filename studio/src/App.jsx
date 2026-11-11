@@ -608,6 +608,10 @@ const CSS = `
   .nk-gl-act.partial { background: ${alpha(N.amber,"22")}; border-color: ${N.amber}; color: ${N.amber}; }
   .nk-gl-act.complete { background: ${alpha(N.red,"14")}; border-color: ${alpha(N.red,"88")}; color: ${N.red}; cursor: default; }
   .nk-gl-act:disabled:not(.complete) { opacity: .5; cursor: wait; }
+  .nk-gl-del { flex-shrink: 0; width: 40px; min-height: 40px; border-radius: 10px; border: 1.5px solid ${N.border}; background: transparent;
+    color: ${N.red}; cursor: pointer; display: grid; place-items: center; font-size: 16px; }
+  .nk-gl-del:hover { border-color: ${N.red}; background: ${alpha(N.red,"14")}; }
+  .nk-gl-del:focus-visible { outline: 2px solid ${N.sky}; outline-offset: 1px; }
   .nk-gl-chips { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 10px; padding-bottom: 2px; scrollbar-width: none; }
   .nk-gl-chips::-webkit-scrollbar { display: none; }
   .nk-gl-chips > button { flex-shrink: 0; white-space: nowrap; }
@@ -4969,8 +4973,10 @@ const SCAN_VIEWS = [
   { key: "list",  label: "Guests",     icon: "users" },
 ];
 const SCAN_VIEW_TITLE = { stats: "Check-in statistics", scan: "Scan a card", list: "Guest list" };
-function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded, onMenu }) {
+function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded, onDeleteCard, onMenu }) {
   const { cards, error, load, patch } = useEventCards(eventId);
+  const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
+  const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
   const phone = useMediaQuery(SCANNER_PHONE);
   const [view, setView] = useState("scan");          // phones: stats | scan | list
   const [camSignal, setCamSignal] = useState(0);     // bumped when the Scan tab is tapped: opens the camera
@@ -5059,7 +5065,8 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
   const scanner = cards?.length > 0 && (
     <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={myEmail} disabled={!canScan} disabledReason="Your role can view check-ins but not admit guests."
       section={phone ? (view === "stats" ? "none" : view) : "all"} startSignal={camSignal}
-      renderBelow={({ begin, busy }) => <GuestList compact={phone} cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} onComment={canComment ? setCommenting : null} />} />
+      renderBelow={({ begin, busy }) => <GuestList compact={phone} cards={cards} canScan={canScan} busy={busy} onCheckIn={c => begin(c, "manual")} onComment={canComment ? setCommenting : null}
+        onDelete={canDelete && onDeleteCard ? removeCard : null} />} />
   );
   const recentScans = recent.length > 0 && (
     <div className="nk-table-wrap" style={{marginTop:16}}>
@@ -5225,7 +5232,8 @@ function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
 // Tapping the name adds or edits the guest's comment.
 const GUEST_FILTERS = [["all", "All"], ["waiting", "Not scanned"], ["partial", "Partly in"], ["complete", "Fully in"], ["entered", "Scanned"]];
 const GUEST_ACTION = { pending: "Check in", partial: "Check in more", complete: "Fully in" };
-function GuestList({ cards = [], canScan, busy, onCheckIn, onComment, compact }) {
+// onDelete(card): Super Admins only (the Scanner passes it when useCanDelete()) — deletes the card
+function GuestList({ cards = [], canScan, busy, onCheckIn, onComment, onDelete, compact }) {
   const [q, setQ] = useState("");
   const [state, setState] = useState("all");
   const rows = filterGuests(cards, { q, state });
@@ -5264,6 +5272,11 @@ function GuestList({ cards = [], canScan, busy, onCheckIn, onComment, compact })
                   </div>
                   {c.call_comment && <div className="nk-gl-note">{c.call_comment}</div>}
                 </div>
+                {onDelete && (
+                  <button type="button" className="nk-gl-del" onClick={() => onDelete(c)} aria-label={`Delete ${c.name}'s card`} title={`Delete ${c.name}'s card`}>
+                    <Icon n="trash" />
+                  </button>
+                )}
                 {canScan && (
                   <button type="button" className={`nk-gl-act ${st}`} disabled={busy || st === "complete"} onClick={() => onCheckIn(c)} aria-label={tip} title={tip}>
                     {GUEST_ACTION[st]}
@@ -5307,10 +5320,13 @@ function GuestList({ cards = [], canScan, busy, onCheckIn, onComment, compact })
                       </div>
                     </td>
                     <td style={{fontSize:12,color:N.textDim}}>{c.last_scanned_at ? fmtWhen(c.last_scanned_at) : "—"}</td>
-                    <td>{canScan && (
-                      <Sb bg="transparent" col={N.green} border={N.border} label={st === "complete" ? `Everyone on ${c.name}'s card has entered` : `Check in ${c.name} (${placesLeft(c.scan_count, c.max_scans)} left)`}
-                        disabled={busy || st === "complete"} onClick={() => onCheckIn(c)}><Icon n="check" /></Sb>
-                    )}</td>
+                    <td><div className="nk-row-actions">
+                      {canScan && (
+                        <Sb bg="transparent" col={N.green} border={N.border} label={st === "complete" ? `Everyone on ${c.name}'s card has entered` : `Check in ${c.name} (${placesLeft(c.scan_count, c.max_scans)} left)`}
+                          disabled={busy || st === "complete"} onClick={() => onCheckIn(c)}><Icon n="check" /></Sb>
+                      )}
+                      {onDelete && <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${c.name}'s card`} onClick={() => onDelete(c)}><Icon n="trash" /></Sb>}
+                    </div></td>
                   </tr>
                 );
               })}
@@ -5610,8 +5626,10 @@ function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
 }
 
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
-function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded }) {
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard }) {
   const { cards, error, load, patch } = useEventCards(eventId);
+  const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
+  const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
   const [filter, setFilter] = useState({ status: "all", q: "" });
   const [commenting, setCommenting] = useState(null);
   const [sharing, setSharing] = useState(false);
@@ -5713,6 +5731,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                   <div className="nk-row-actions">
                     <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
                     {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
+                    {canDelete && onDeleteCard && <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${c.name}'s card`} onClick={() => removeCard(c)}><Icon n="trash" /></Sb>}
                   </div>
                 </td>
                 <td style={{fontSize:11,color:N.textDim}}>{c.call_updated_at ? <>{fmtWhen(c.call_updated_at)}<br />{c.call_by}</> : "—"}</td>
@@ -7400,6 +7419,39 @@ export default function App() {
 
   // Guests imported in the Calls / Scanner tabs are already saved; add them to the open
   // event's list too, so the Design / send tabs see them and a later Save Cards keeps them.
+  // Calls / Scanner (Super Admins): deletes one guest card for good after asking, through the
+  // delete_guest_card() RPC (it checks the role, writes History, then deletes; the card's
+  // check-in log goes with it). Drops it from the open list too. → true when deleted.
+  const deleteGuestCard = async (c) => {
+    if (!supabase || !c?.id) return false;
+    const digits = String(c.phone || "").replace(/\D/g, "");
+    const ok = await askDialog({
+      title: `Delete ${c.name || "this guest"}'s card?`,
+      body: (
+        <>
+          <p style={{ marginBottom: 8 }}>
+            {c.card_type || "No card type"}{digits ? ` · phone ending ${digits.slice(-3)}` : ""}
+            {` · call: ${c.call_status ? CALL_STATUSES[c.call_status]?.label || c.call_status : "not called"}`}
+            {` · checked in ${c.scan_count || 0} / ${c.max_scans || 1}`}
+          </p>
+          <p>The guest is removed from this event everywhere: the list, Calls, Scanner and sends. A printed QR for this card will no longer work at the door. History keeps a record of the delete. This can't be undone.</p>
+        </>
+      ),
+      actions: [{ value: "yes", label: "Delete card", kind: "danger" }],
+    });
+    if (ok !== "yes") return false;
+    const { data, error } = await supabase.rpc("delete_guest_card", { p_card_id: c.id });
+    if (error) {
+      showToast(/delete_guest_card|schema cache|does not exist/i.test(error.message)
+        ? "Deleting cards needs the latest supabase-roles-settings-scan.sql — run it in Supabase, then try again"
+        : `Could not delete the card: ${error.message}`, "warn");
+      return false;
+    }
+    setRecords(rs => rs.filter(r => r.dbId !== c.id));
+    showToast(data?.deleted === false ? `${c.name || "The card"} was already deleted` : `Deleted ${c.name || "the guest"}'s card`, "success");
+    return true;
+  };
+
   const addImportedGuests = (rows) => setRecords(rs => [...rs.filter(r => !r.sample), ...rows.map(c => ({
     dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
     waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
@@ -9118,11 +9170,12 @@ export default function App() {
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} onGuestsAdded={addImportedGuests}
-                onMenu={() => setMenuOpen(true)} />
+                onDeleteCard={deleteGuestCard} onMenu={() => setMenuOpen(true)} />
             )}
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
-                showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} onGuestsAdded={addImportedGuests} />
+                showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} onGuestsAdded={addImportedGuests}
+                onDeleteCard={deleteGuestCard} />
             )}
 
             {/* ─── GUIDE ─── */}

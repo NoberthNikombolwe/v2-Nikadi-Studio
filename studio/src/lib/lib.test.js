@@ -523,6 +523,19 @@ test("guest import adds only new name + phone pairs", () => {
   assert.equal(r.invalid.length, 1);
 });
 
+test("guest import skips only when name, phone AND card type all match", () => {
+  const cards = [{ name: "Asha Said", phone: "255712000001", card_type: "Single" }];
+  const r = splitImport([
+    { name: "asha  said", phone: "0712 000 001", cardType: " SINGLE " },   // same three → skip
+    { name: "Asha Said", phone: "0712000001", cardType: "Double" },        // another card type → add
+    { name: "Asha Said", phone: "0712000001", cardType: "" },              // no card type is its own type → add
+    { name: "Asha Said", phone: "+255712000001", cardType: "double" },     // repeats the Double row above
+  ], cards);
+  assert.deepEqual(r.add.map(x => x.cardType), ["Double", ""]);
+  assert.deepEqual(r.skip.map(x => x.reason), ["Already on the guest list", "Repeated in this file"]);
+  assert.equal(r.skip[0].existing.card_type, "Single");
+});
+
 /* ── Send logic shared with the Edge Functions ── */
 import { smsStatusFromGroup, matchSmsResults, classifyWaSend, scheduleTargets, describeTargetSkips, placeholdersIn } from "../../supabase/functions/_shared/messaging.js";
 

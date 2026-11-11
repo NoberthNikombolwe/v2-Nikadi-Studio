@@ -474,6 +474,8 @@ The **Feedback** page (Admin by default; set it per role under Settings → Role
 - Add or remove contacts manually
 - Each contact has a WhatsApp status and SMS status tracked independently
 - Uploading a new spreadsheet in Design for an event that already has guests **resets every guest's WhatsApp card and main SMS status to "not sent"**, so the new list can be sent to everyone. Calls, check-ins, extra SMS messages and card images are kept, and guests are still matched by phone and name. The list then holds only the sheet's guests, so **Send All, Download All and the counts** go by the uploaded records: guests left off the sheet who have call or check-in history stay only in Calls, Scanner and History (no cards or messages, including scheduled sends), and come back if a later sheet has them. The reset is stored by **Save Cards** (with a History entry). Delivery reports of messages sent before the reset no longer change the guests (needs the latest `supabase-roles-settings-scan.sql`)
+- Importing guests on the **Calls** or **Scanner** tab only adds: a row is skipped when its **Name, Phone and Card type** all match a saved guest (or an earlier row in the file). The same name and phone with another card type is added as a new card
+- **Super Admins** can delete a guest card that is no longer used, from the Calls and Scanner guest lists (trash button). It removes the guest from the event everywhere, including their check-ins, and History records who deleted it. A printed QR for that card no longer works at the door (needs the latest `supabase-roles-settings-scan.sql`)
 - Export contacts as CSV
 
 ### Data Cleaner (AI)
