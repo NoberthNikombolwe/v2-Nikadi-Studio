@@ -153,6 +153,15 @@ test("a reminder (not the main SMS) leaves guest statuses alone; the audience is
   assert.match(finished[0].p_detail, /1\/1 SMS sent · 2 skipped: 2 not in this audience/);
 });
 
+test("guests left off a newer spreadsheet (in_list false) get no scheduled send", async () => {
+  cards = [...cards, { id: "c4", name: "Old guest", card_type: "Single", phone: "0712000004", sms_status: "pending", wa_status: "idle", call_status: "yes", in_list: false }];
+  claims = [run()];
+  await scheduler()(post());
+  const sent = upstream()[0].body.messages.map((m: any) => m.to);
+  assert.deepEqual(sent, ["255712000001", "255712000002"]);
+  assert.ok(calls.some(c => c.url.startsWith(`${DB}event_cards?`) && c.url.includes("select=*")));
+});
+
 test("the provider failing marks the run failed with the reason", async () => {
   claims = [run()];
   smsReply = () => new Response("down", { status: 503 });

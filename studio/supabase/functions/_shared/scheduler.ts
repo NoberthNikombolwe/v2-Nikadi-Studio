@@ -50,8 +50,12 @@ const database = (url: string, key: string) => {
       const rows = await rpc("claim_schedule_run", {});
       return Array.isArray(rows) && rows[0] ? rows[0] : null;
     },
-    cards: (eventId: string): Promise<Row[]> =>
-      call(`event_cards?event_id=eq.${encodeURIComponent(eventId)}&select=id,name,card_type,phone,wa_status,sms_status,call_status,card_url&order=created_at`),
+    // Guests left off a newer spreadsheet (in_list false, kept only for their call / check-in
+    // history) get no scheduled sends. select=* so this still works before that column exists.
+    cards: async (eventId: string): Promise<Row[]> => {
+      const rows = await call(`event_cards?event_id=eq.${encodeURIComponent(eventId)}&select=*&order=created_at`);
+      return Array.isArray(rows) ? rows.filter((c: Row) => c.in_list !== false) : rows;
+    },
     saveTargets: (runId: string, targets: Row) =>
       call("message_run_targets?on_conflict=run_id", { method: "POST", body: JSON.stringify({ run_id: runId, targets }) }, "resolution=merge-duplicates,return=minimal"),
     targets: async (runId: string): Promise<Row> => {

@@ -6133,7 +6133,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
         ev.customer_id ? supabase.from("customers").select("*").eq("id", ev.customer_id).maybeSingle() : none,
         ev.lead_id ? supabase.from("leads").select("*").eq("id", ev.lead_id).maybeSingle()
                    : supabase.from("leads").select("*").eq("event_id", ev.id).limit(1).maybeSingle(),
-        supabase.from("event_cards").select("wa_status,sms_status").eq("event_id", ev.id),
+        supabase.from("event_cards").select("*").eq("event_id", ev.id),   // filtered to the list below (in_list)
         supabase.from("event_logs").select("*").eq("event_id", ev.id).order("created_at", { ascending:false }).limit(8),
         ev.customer_id ? supabase.from("events").select("id,username,event_type,start_datetime,status").eq("customer_id", ev.customer_id)
                            .order("start_datetime", { ascending:false, nullsFirst:false }) : none,
@@ -6141,7 +6141,7 @@ function EventOverview({ eventId, onClose, onSwitch, onOpen, onEdit, onOpenCusto
         supabase.from("event_transactions").select("kind,amount").eq("event_id", ev.id),
       ]);
       const fu = lead.data ? await supabase.from("lead_followups").select("*").eq("lead_id", lead.data.id).order("created_at", { ascending:false }) : { data: [] };
-      if (live) setD({ ev, customer: cust.data, lead: lead.data, followups: fu.data || [], cards: cards.data || [], logs: logs.data || [], siblings: siblings.data || [], money: txns.error ? null : summariseTransactions(txns.data || []) });
+      if (live) setD({ ev, customer: cust.data, lead: lead.data, followups: fu.data || [], cards: (cards.data || []).filter(c => c.in_list !== false), logs: logs.data || [], siblings: siblings.data || [], money: txns.error ? null : summariseTransactions(txns.data || []) });
     })();
     return () => { live = false; };
   }, [eventId]);
@@ -7160,12 +7160,18 @@ export default function App() {
           const o = byIdx.get(i); if (!o) return r;
           return { ...r, dbId: o.id, ...(sameCardFace(r, o) ? cardFromRow(o) : {}) };   // a renamed guest needs a new card
         });
-        kept = plan.retained.length;
-        norm = [...norm, ...plan.retained.map(c => ({
+        // Saved guests not in the sheet but with call / check-in history: the list (and so
+        // Send All / Download All) is the sheet only; Save Cards keeps them in the database off
+        // the list (in_list false) for Calls, Scanner and History. Without that column (older
+        // database) they stay on the list as before.
+        const offList = (saved || []).some(c => "in_list" in c);
+        kept = plan.retained.filter(c => c.in_list !== false).length;
+        if (!offList) norm = [...norm, ...plan.retained.map(c => ({
           dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
           ...cardFromRow(c),
         }))];
         norm = resetSendStatuses(norm, WA.idle, SMS.pending).map(r => ({ ...r, resetAt: reset }));
+        if (!offList) kept = -kept;   // still on the list: say so below
       }
     }
     statusResetRef.current = reset;
@@ -7173,8 +7179,10 @@ export default function App() {
     setCsvColumns(columns);
     setRecords(norm); setActiveIdx(0);
     showToast(reset
-      ? `Loaded ${rows.length} records — WhatsApp and SMS statuses reset, so everyone can be sent again. `
-        + `${matched} matched saved guests keep their calls and check-ins${kept ? `; ${kept} more kept for their call/check-in history` : ""}. `
+      ? `Loaded ${norm.length} records — WhatsApp and SMS statuses reset, so everyone can be sent again. `
+        + `${matched} matched saved guests keep their calls and check-ins. `
+        + (kept > 0 ? `${kept} guest${kept === 1 ? "" : "s"} not in this sheet will be kept only for their call/check-in history (no cards or messages). `
+          : kept < 0 ? `${-kept} guest${kept === -1 ? "" : "s"} not in this sheet stay on the list for their call/check-in history. ` : "")
         + "Press Save Cards to store the changes."
       : `Loaded ${norm.length} records`, "success");
   };
@@ -7283,6 +7291,10 @@ export default function App() {
     // saved guest, with the reset time (status_reset_at, once the delivery SQL has the column)
     const resetAt  = statusResetRef.current;
     const resetCol = (old || []).some(c => "status_reset_at" in c);
+    // in_list (delivery SQL): guests not in this list but with call / check-in history stay in
+    // the database off the list; a guest in the list is always on it
+    const listCol  = (old || []).some(c => "in_list" in c);
+    const onList   = listCol ? { in_list: true } : {};
     const resetFields = (wa, sms) => ({
       ...(resetCol ? { status_reset_at: resetAt } : {}),
       ...((wa || WA.idle) === WA.idle && (sms || SMS.pending) === SMS.pending ? { sent_at: null } : {}),
@@ -7310,7 +7322,7 @@ export default function App() {
         // and delivery reports move them on (delivered / read / failed), so this browser's copy
         // may be out of date. The guest keeps whatever the database says — except right after
         // a new spreadsheet reset them, when the reset (or a send made since) is written.
-        const row = { id, ...toRow(r) };
+        const row = { id, ...toRow(r), ...onList };
         if (resetAt) Object.assign(row, resetFields(r.waStatus, r.smsStatus));
         else { delete row.wa_status; delete row.sms_status; }
         // The list in memory knows the card image; a row matched from a new sheet keeps the
@@ -7344,38 +7356,46 @@ export default function App() {
       }
     }
     // Guests missing from the new list: delete only those with no call/check-in history.
-    // Guests with history are kept and put back on the list.
+    // Guests with history are kept in the database: off the list (in_list false) once the
+    // delivery SQL has that column, else put back on the list as before.
     const gone = plan.remove;
     if (gone.length) {
       const { error: delErr } = await supabase.from("event_cards").delete().in("id", gone);
       if (delErr) { showToast("Cards saved, but removed rows could not be deleted: " + delErr.message, "warn"); return; }
     }
-    // Guests kept for their history but not in the list: reset like everyone else
-    if (resetAt && plan.retained.length) {
-      const { error: resetErr } = await supabase.from("event_cards")
-        .update({ wa_status: WA.idle, sms_status: SMS.pending, sent_at: null, ...(resetCol ? { status_reset_at: resetAt } : {}) })
-        .in("id", plan.retained.map(c => c.id));
-      if (resetErr) { showToast("Cards saved, but some statuses could not be reset: " + resetErr.message, "warn"); return; }
+    const newlyOff = listCol ? plan.retained.filter(c => c.in_list !== false) : [];   // were on the list until now
+    if (newlyOff.length || (resetAt && plan.retained.length)) {
+      const { error: offErr } = await supabase.from("event_cards")
+        .update({
+          ...(listCol ? { in_list: false } : {}),
+          ...(resetAt ? { wa_status: WA.idle, sms_status: SMS.pending, sent_at: null, ...(resetCol ? { status_reset_at: resetAt } : {}) } : {}),
+        })
+        .in("id", (resetAt ? plan.retained : newlyOff).map(c => c.id));
+      if (offErr) { showToast("Cards saved, but guests left off the sheet could not be updated: " + offErr.message, "warn"); return; }
     }
-    if (plan.retained.length) {
+    if (!listCol && plan.retained.length) {
       setRecords(rs => [...rs, ...plan.retained.map(c => ({
         dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
         waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
         ...(resetAt ? { waStatus: WA.idle, smsStatus: SMS.pending, resetAt } : {}),
       }))]);
     }
-    const total = toSave.length + plan.retained.length;
+    const total = toSave.length + (listCol ? 0 : plan.retained.length);   // guests on the list
+    const oldListed = (old || []).filter(c => c.in_list !== false).length;
     if (resetAt) {
       statusResetRef.current = null;
       logHistory({ channel:"event", action:"contacts", detail:`WhatsApp and SMS statuses reset for ${total} guests (new spreadsheet) — they can all be sent again` }, eventId);
     }
     // Status-only saves (after every send) keep the same count — only log real list changes
-    if ((old?.length || 0) !== total || fresh.length || gone.length) {
-      logHistory({ channel:"event", action:"contacts", detail:`Contact list saved: ${total} contacts (was ${old?.length || 0}; ${fresh.length} new, ${gone.length} removed, ${plan.retained.length} kept for call/check-in history)` }, eventId);
+    const keptNote = listCol ? newlyOff.length : plan.retained.length;
+    if (oldListed !== total || fresh.length || gone.length || newlyOff.length) {
+      logHistory({ channel:"event", action:"contacts", detail:`Contact list saved: ${total} contacts (was ${oldListed}; ${fresh.length} new, ${gone.length} removed, ${keptNote} ${listCol ? "taken off the list but kept" : "kept"} for call/check-in history)` }, eventId);
     }
-    showToast(plan.retained.length
-      ? `${total} cards saved — ${plan.retained.length} guest${plan.retained.length === 1 ? "" : "s"} not in the new sheet kept because they have call or check-in history`
-      : `${total} cards saved — calls and check-ins kept`, plan.retained.length ? "info" : "success");
+    showToast(keptNote
+      ? `${total} cards saved — ${keptNote} guest${keptNote === 1 ? "" : "s"} not in the new sheet ${listCol
+        ? "kept only for their call / check-in history (no cards or messages; still in Calls and Scanner)"
+        : "kept because they have call or check-in history"}`
+      : `${total} cards saved — calls and check-ins kept`, keptNote ? "info" : "success");
   };
 
   // Guests imported in the Calls / Scanner tabs are already saved; add them to the open
@@ -7528,7 +7548,9 @@ export default function App() {
       const { data: cards, error: cardsErr } = await supabase.from("event_cards").select("*").eq("event_id", ev.id);
       if (stale()) return;
       if (cardsErr) showToast("Could not load contacts: " + cardsErr.message, "warn");
-      setRecords(cards?.length ? cards.map(c => ({
+      // Guests left off a newer spreadsheet (kept for their call / check-in history) aren't on the list
+      const listed = (cards || []).filter(c => c.in_list !== false);
+      setRecords(listed.length ? listed.map(c => ({
         dbId:      c.id,
         name:      c.name||"",
         cardType:  c.card_type||"",

@@ -1316,6 +1316,10 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON message_deliveries(sent_at)
 -- When a new spreadsheet last reset the guest's WhatsApp / SMS statuses (written by the app's
 -- Save Cards after an upload in Design). Reports of sends made before it no longer change the guest.
 ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS status_reset_at TIMESTAMPTZ;
+-- FALSE for a guest left off a newer spreadsheet but kept for their call / check-in history:
+-- still in Calls, Scanner and History, but not in the Design list, Send All, Download All or
+-- scheduled sends. Back to TRUE when a later sheet has them again.
+ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS in_list BOOLEAN NOT NULL DEFAULT TRUE;
 
 ALTER TABLE message_deliveries ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.message_deliveries FROM anon, authenticated;
