@@ -1877,4 +1877,97 @@ DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_deliveries; EX
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE event_cards; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE scan_logs;   EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 
+-- ─────────────────────────────────────────────────────────────────────
+-- N. GUEST CARD WEB PAGES — #/g/<event-public-id>/<guest-public-id>
+--    Each event and each guest card gets an 8-character public ID
+--    (uppercase alphanumeric, excluding easily-confused characters).
+--    The public guest page shows the guest's personalised invitation card
+--    without requiring login. No personal contact data is exposed.
+-- ─────────────────────────────────────────────────────────────────────
+
+-- Generate a random 8-character public ID (no 0/O/I/1/L to avoid misreads)
+CREATE OR REPLACE FUNCTION public.gen_public_id() RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+  chars  TEXT := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  result TEXT := '';
+  i      INT;
+BEGIN
+  FOR i IN 1..8 LOOP
+    result := result || substr(chars, floor(random() * length(chars) + 1)::INT, 1);
+  END LOOP;
+  RETURN result;
+END $$;
+
+ALTER TABLE events      ADD COLUMN IF NOT EXISTS public_id TEXT UNIQUE;
+ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS public_id TEXT UNIQUE;
+
+-- Auto-assign a unique public_id to every new event
+CREATE OR REPLACE FUNCTION public.trg_events_public_id() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.public_id IS NULL THEN
+    LOOP
+      NEW.public_id := public.gen_public_id();
+      EXIT WHEN NOT EXISTS (SELECT 1 FROM events WHERE public_id = NEW.public_id);
+    END LOOP;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_events_public_id ON events;
+CREATE TRIGGER trg_events_public_id
+  BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION public.trg_events_public_id();
+
+-- Auto-assign a unique public_id to every new guest card
+CREATE OR REPLACE FUNCTION public.trg_event_cards_public_id() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.public_id IS NULL THEN
+    LOOP
+      NEW.public_id := public.gen_public_id();
+      EXIT WHEN NOT EXISTS (SELECT 1 FROM event_cards WHERE public_id = NEW.public_id);
+    END LOOP;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_event_cards_public_id ON event_cards;
+CREATE TRIGGER trg_event_cards_public_id
+  BEFORE INSERT ON event_cards FOR EACH ROW EXECUTE FUNCTION public.trg_event_cards_public_id();
+
+-- Backfill any existing rows that don't yet have a public_id
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT id FROM events WHERE public_id IS NULL LOOP
+    UPDATE events SET public_id = public.gen_public_id() WHERE id = r.id;
+  END LOOP;
+  FOR r IN SELECT id FROM event_cards WHERE public_id IS NULL LOOP
+    UPDATE event_cards SET public_id = public.gen_public_id() WHERE id = r.id;
+  END LOOP;
+END $$;
+
+-- RPC used by #/g/<event-public-id>/<guest-public-id>: returns enough data to
+-- render the guest's personalised invitation page. No auth required; no phone
+-- numbers or private fields are returned.
+CREATE OR REPLACE FUNCTION public.public_guest_card(p_event_public_id TEXT, p_guest_public_id TEXT)
+RETURNS TABLE (
+  event_name     TEXT,
+  event_type     TEXT,
+  start_datetime TIMESTAMPTZ,
+  venue_name     TEXT,
+  guest_name     TEXT,
+  card_type      TEXT,
+  card_url       TEXT
+)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT e.username, e.event_type, e.start_datetime, e.venue_name,
+         c.name, c.card_type, c.card_url
+    FROM events e
+    JOIN event_cards c ON c.event_id = e.id
+   WHERE e.public_id  = upper(p_event_public_id)
+     AND c.public_id  = upper(p_guest_public_id)
+$$;
+REVOKE ALL ON FUNCTION public.public_guest_card(TEXT, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_guest_card(TEXT, TEXT) TO anon, authenticated;
+
 NOTIFY pgrst, 'reload schema';

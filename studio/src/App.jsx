@@ -3335,7 +3335,7 @@ function CardFontsSettings({ access, canEdit }) {
    totals, share the public scan page) and <CallsTab> (guest confirmation calls).
    Check-ins only ever go through the scan_card() database function.
 ══════════════════════════════════════════════════════════════════════════ */
-const CARD_COLS = "id,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
+const CARD_COLS = "id,public_id,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
 
 // The open event's cards from the database, kept live with realtime updates
 function useEventCards(eventId) {
@@ -5625,6 +5625,80 @@ function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
   );
 }
 
+// Shows every guest's personalised invitation page URL for one event, with copy buttons
+function GuestLinksModal({ eventRow, onClose, showToast }) {
+  const { cards } = useEventCards(eventRow?.id);
+  const [copied, setCopied] = useState(null);
+  const [q, setQ] = useState("");
+  const base = `${location.origin}${location.pathname}`;
+  const copyLink = (c) => {
+    const url = `${base}#/g/${eventRow.public_id}/${c.public_id}`;
+    navigator.clipboard?.writeText(url)
+      .then(() => { setCopied(c.id); showToast(`Copied link for ${c.name}`, "success"); setTimeout(() => setCopied(null), 2000); })
+      .catch(() => showToast("Could not copy — try selecting manually", "warn"));
+  };
+  const copyAll = () => {
+    if (!cards?.length) return;
+    const lines = cards.filter(c => c.public_id).map(c => `${c.name}: ${base}#/g/${eventRow.public_id}/${c.public_id}`);
+    navigator.clipboard?.writeText(lines.join("\n"))
+      .then(() => showToast(`Copied ${lines.length} guest links`, "success"))
+      .catch(() => showToast("Could not copy", "warn"));
+  };
+  const shown = q.trim() ? (cards || []).filter(c => c.name?.toLowerCase().includes(q.trim().toLowerCase())) : (cards || []);
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:640,width:"100%"}} role="dialog" aria-modal="true" aria-labelledby="nk-glinks-title">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title" id="nk-glinks-title"><Icon n="link" /> Guest invitation links — {eventRow?.username}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body" style={{padding:"16px 20px",maxHeight:"60vh",overflowY:"auto"}}>
+          <p style={{fontSize:12,color:N.textDim,marginBottom:14}}>
+            Each link opens a private invitation page for that guest only. Share the link by WhatsApp, SMS or email.
+          </p>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <input className="nk-input" style={{flex:1,marginBottom:0}} placeholder="Search guest name…"
+              value={q} onChange={e => setQ(e.target.value)} />
+            <button className="nk-btn nk-btn-ghost" style={{fontSize:12,flexShrink:0}} onClick={copyAll} disabled={!cards?.length}>
+              <Icon n="copy" /> Copy all
+            </button>
+          </div>
+          {cards === null && <div style={{textAlign:"center",padding:24,color:N.textDim}}><Icon n="loader" /> Loading guests…</div>}
+          {cards !== null && !shown.length && <div style={{textAlign:"center",padding:24,color:N.textDim}}>No guests{q ? " match" : " found"}.</div>}
+          {shown.map(c => {
+            const url = c.public_id ? `${base}#/g/${eventRow.public_id}/${c.public_id}` : null;
+            return (
+              <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:`1px solid ${N.border}`}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13,color:N.text}}>{c.name || "—"}</div>
+                  <div style={{fontSize:11,color:N.textDim}}>{c.card_type || "No type"}</div>
+                  {url && <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}>{url}</div>}
+                  {!url && <div style={{fontSize:11,color:N.amber}}>No link yet — save cards to generate IDs</div>}
+                </div>
+                {url && (
+                  <button className="nk-btn nk-btn-ghost" style={{flexShrink:0,fontSize:12,color:copied===c.id?N.green:undefined}}
+                    onClick={() => copyLink(c)} aria-label={`Copy link for ${c.name}`}>
+                    <Icon n={copied===c.id?"check":"copy"} /> {copied===c.id?"Copied":"Copy"}
+                  </button>
+                )}
+                {url && (
+                  <a href={url} target="_blank" rel="noreferrer" className="nk-btn nk-btn-ghost" style={{flexShrink:0,fontSize:12,textDecoration:"none"}}
+                    aria-label={`Open invitation page for ${c.name}`} title={`Open invitation page for ${c.name}`}>
+                    <Icon n="eye" />
+                  </a>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
 function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard }) {
   const { cards, error, load, patch } = useEventCards(eventId);
@@ -5731,6 +5805,16 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                   <div className="nk-row-actions">
                     <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
                     {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
+                    {c.public_id && eventRow?.public_id && (
+                      <Sb bg="transparent" col={N.sky} border={N.border}
+                        label={`Copy invitation link for ${c.name}`}
+                        onClick={() => {
+                          const url = `${location.origin}${location.pathname}#/g/${eventRow.public_id}/${c.public_id}`;
+                          navigator.clipboard?.writeText(url).then(() => showToast(`Link copied for ${c.name}`, "success")).catch(() => showToast("Could not copy — try manually", "warn"));
+                        }}>
+                        <Icon n="link" />
+                      </Sb>
+                    )}
                     {canDelete && onDeleteCard && <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${c.name}'s card`} onClick={() => removeCard(c)}><Icon n="trash" /></Sb>}
                   </div>
                 </td>
@@ -6824,6 +6908,7 @@ export default function App() {
   const [leadSel,     setLeadSel]     = useState(null);   // lead open in the Leads tab
   const [customerSel, setCustomerSel] = useState(null);   // customer open in the Customers tab
   const [overviewId,  setOverviewId]  = useState(null);   // event shown in <EventOverview>
+  const [guestLinksEv, setGuestLinksEv] = useState(null); // event shown in <GuestLinksModal>
   useEffect(() => { if (userId) crm.loadAll(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the per-customer event counts current as events are created, edited or deleted
   useEffect(() => { if (userId) crm.loadEventCounts(); }, [savedEvents]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -8514,6 +8599,11 @@ export default function App() {
           </div>
         )}
 
+        {/* Guest card links: shareable per-guest invitation page links */}
+        {guestLinksEv && (
+          <GuestLinksModal eventRow={guestLinksEv} onClose={() => setGuestLinksEv(null)} showToast={showToast} />
+        )}
+
         {/* Event overview: everything related to one event */}
         {overviewId && (
           <EventOverview key={overviewId} eventId={overviewId} onClose={() => setOverviewId(null)} onSwitch={setOverviewId}
@@ -9112,6 +9202,13 @@ export default function App() {
                                   title="Every card and SMS sent for this event, with results">
                                   <Icon n="history" /> History
                                 </Sb>
+                                {ev.public_id && (
+                                  <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} className="m-hide"
+                                    onClick={(e)=>{ e.stopPropagation(); setGuestLinksEv(ev); }}
+                                    title="See every guest's personalised invitation link">
+                                    <Icon n="link" /> Guest Links
+                                  </Sb>
+                                )}
                                 <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); editEvent(ev); }}
                                   title="Edit event details">
