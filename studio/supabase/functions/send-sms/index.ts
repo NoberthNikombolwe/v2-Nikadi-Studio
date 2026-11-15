@@ -2,6 +2,7 @@ import { createProxy } from "../_shared/proxy.ts";
 
 // Authenticated proxy to the SMS API. Secret: SMS_BEARER_TOKEN. See ../_shared/proxy.ts.
 // Reports (by messageId, for "Check delivery now") and the account log are GET, so SMS view is enough.
+// proxy v2: service role key used for auth check (supports sb_publishable_* anon key format)
 Deno.serve(createProxy({
   name: "send-sms",
   module: "sms",

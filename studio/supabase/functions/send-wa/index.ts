@@ -2,6 +2,7 @@ import { createProxy } from "../_shared/proxy.ts";
 
 // Authenticated proxy to the WhatsApp API. Secret: WA_BEARER_TOKEN (falls back to
 // SMS_BEARER_TOKEN when the provider issues one token for both). See ../_shared/proxy.ts.
+// proxy v2: service role key used for auth check (supports sb_publishable_* anon key format)
 Deno.serve(createProxy({
   name: "send-wa",
   module: "whatsapp",
