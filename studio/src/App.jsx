@@ -7834,9 +7834,17 @@ export default function App() {
     return choice === "unique" ? unique : choice === "all" ? all : choice === "again" ? everyone : null;
   };
 
-  // Fills the {name}/{cardType} placeholders in an SMS template (default: the main message) for one record
-  // Also supports {phone} and any extra spreadsheet column as {ColumnName}; unknown {x} is left as typed
-  const buildSmsMsg = (rec, body = smsMessage) => fillTemplate(body, rec);
+  // Fills the {name}/{cardType} placeholders in an SMS template (default: the main message) for one record.
+  // Also supports {phone} and any extra spreadsheet column as {ColumnName}; unknown {x} is left as typed.
+  // When guest invitation links are enabled on the event and the record has a publicId, the guest's
+  // personal invitation URL is appended as a new line so every preview, CSV and send uses it.
+  const buildSmsMsg = (rec, body = smsMessage) => {
+    const text = fillTemplate(body, rec);
+    const link = openEventRow?.guest_link_enabled && openEventRow?.public_id && rec?.publicId
+      ? `\n${location.origin}${location.pathname}#/g/${openEventRow.public_id}/${rec.publicId}`
+      : "";
+    return text + link;
+  };
 
   /* ── SMS messages: main + extras ── */
   // The extra message being edited in the SMS tab (null while the main message is selected)
@@ -8443,14 +8451,10 @@ export default function App() {
     // How this run changes `records`; applied to state and to the copy that gets saved
     let applyResults = (rs) => rs;
     try {
-      const guestLinkBase = openEventRow?.guest_link_enabled && openEventRow?.public_id
-        ? `${location.origin}${location.pathname}#/g/${openEventRow.public_id}/`
-        : null;
       const messages = targets.map(({rec}) => ({
         from: smsSender,
         to:   normalisePhone(rec.phone),
-        text: buildSmsMsg(rec, msg ? msg.body : smsMessage)
-          + (guestLinkBase && rec.publicId ? `\n${guestLinkBase}${rec.publicId}` : ""),
+        text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
       }));
       // One bulk request. If NextSMS refuses it as a duplicate (its first message repeats a
       // request's first message from the last 24 hours), sendSmsMessages sends that message
