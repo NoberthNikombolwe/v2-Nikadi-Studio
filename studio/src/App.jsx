@@ -832,12 +832,12 @@ const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"fai
 // and scheduled WhatsApp sends can attach them
 // resetAt: when a new spreadsheet last reset the guest's send statuses (status_reset_at) —
 // delivery reports of sends before it no longer speak for the guest
-const cardFromRow = (c) => ({ cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
+const cardFromRow = (c) => ({ publicId: c.public_id || null, cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
 // True when a re-uploaded row still has the saved card's name and card type, so the
 // card image made for it still shows the right thing
 const sameCardFace = (r, c) => String(r.name || "").trim() === String(c.name || "").trim()
   && String(r.cardType || "").trim() === String(c.card_type || "").trim();
-const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
+const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"", guest_link_enabled:false };
 // Columns the event form may write (persistEvent sends only these). The CRM links are only
 // present once supabase-schema.sql has added them, so they are sent only when the form has them.
 const EVENT_FORM_FIELDS     = [...Object.keys(BLANK_EVENT), "customer_id", "package_price", "region"];
@@ -1309,6 +1309,14 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
             <div>
               <label className="nk-label">End Date & Time</label>
               <input type="datetime-local" className="nk-input" value={form.end_datetime} onChange={set("end_datetime")} />
+            </div>
+            <div style={{ gridColumn:"span 2", marginTop:4, padding:"12px 14px", background:alpha(N.navy700,"cc"), border:`1px solid ${N.border}`, borderRadius:10 }}>
+              <Toggle checked={!!form.guest_link_enabled}
+                onChange={v => setForm(f => ({ ...f, guest_link_enabled: v }))}
+                label="Enable guest invitation links" />
+              <div style={{ fontSize:12, color:N.textDim, marginTop:-6, paddingLeft:26, lineHeight:1.5 }}>
+                Each guest gets a personal invitation page. The link is appended to every SMS sent for this event.
+              </div>
             </div>
           </div>
         </div>
@@ -5805,7 +5813,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                   <div className="nk-row-actions">
                     <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
                     {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
-                    {c.public_id && eventRow?.public_id && (
+                    {c.public_id && eventRow?.public_id && eventRow?.guest_link_enabled && (
                       <Sb bg="transparent" col={N.sky} border={N.border}
                         label={`Copy invitation link for ${c.name}`}
                         onClick={() => {
@@ -7440,20 +7448,20 @@ export default function App() {
       const byIdx = new Map(keep.filter(k => k.matched !== "id").map(k => [k.i, k]));
       if (byIdx.size) setRecords(rs => rs.map((r, i) => {
         const k = byIdx.get(i); if (!k) return r;
-        if (resetAt) return { ...r, dbId: k.id };
-        return { ...r, dbId: k.id,
+        if (resetAt) return { ...r, dbId: k.id, publicId: k.old?.public_id || null };
+        return { ...r, dbId: k.id, publicId: k.old?.public_id || null,
           waStatus:  (r.waStatus || WA.idle) === WA.idle ? (k.old.wa_status || r.waStatus) : r.waStatus,
           smsStatus: (r.smsStatus || SMS.pending) === SMS.pending ? (k.old.sms_status || r.smsStatus) : r.smsStatus };
       }));
     }
     if (fresh.length) {
       const { data: inserted, error } = await supabase.from("event_cards")
-        .insert(fresh.map(({ r }) => ({ ...toRow(r), ...(resetAt && resetCol ? { status_reset_at: resetAt } : {}) }))).select("id");
+        .insert(fresh.map(({ r }) => ({ ...toRow(r), ...(resetAt && resetCol ? { status_reset_at: resetAt } : {}) }))).select("id,public_id");
       if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
       // Remember each new row's database id so per-card status updates (autoSaveCard) can target it
       if (inserted?.length === fresh.length) {
-        const ids = new Map(fresh.map(({ i }, n) => [i, inserted[n].id]));
-        setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
+        const ids = new Map(fresh.map(({ i }, n) => [i, inserted[n]]));
+        setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i).id, publicId: ids.get(i).public_id || null } : r));
         // Cards uploaded before the list was first saved: store their images too (silently
         // ignored on a database without the card_url column)
         fresh.forEach(({ r }, n) => { if (r.cardUrl) saveCardUrl(inserted[n].id, r.cardUrl); });
@@ -7538,7 +7546,7 @@ export default function App() {
   };
 
   const addImportedGuests = (rows) => setRecords(rs => [...rs.filter(r => !r.sample), ...rows.map(c => ({
-    dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
+    dbId: c.id, publicId: c.public_id || null, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
     waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
   }))]);
 
@@ -8435,10 +8443,14 @@ export default function App() {
     // How this run changes `records`; applied to state and to the copy that gets saved
     let applyResults = (rs) => rs;
     try {
+      const guestLinkBase = openEventRow?.guest_link_enabled && openEventRow?.public_id
+        ? `${location.origin}${location.pathname}#/g/${openEventRow.public_id}/`
+        : null;
       const messages = targets.map(({rec}) => ({
         from: smsSender,
         to:   normalisePhone(rec.phone),
-        text: buildSmsMsg(rec, msg ? msg.body : smsMessage),
+        text: buildSmsMsg(rec, msg ? msg.body : smsMessage)
+          + (guestLinkBase && rec.publicId ? `\n${guestLinkBase}${rec.publicId}` : ""),
       }));
       // One bulk request. If NextSMS refuses it as a duplicate (its first message repeats a
       // request's first message from the last 24 hours), sendSmsMessages sends that message
@@ -9202,7 +9214,7 @@ export default function App() {
                                   title="Every card and SMS sent for this event, with results">
                                   <Icon n="history" /> History
                                 </Sb>
-                                {ev.public_id && (
+                                {ev.public_id && ev.guest_link_enabled && (
                                   <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} className="m-hide"
                                     onClick={(e)=>{ e.stopPropagation(); setGuestLinksEv(ev); }}
                                     title="See every guest's personalised invitation link">

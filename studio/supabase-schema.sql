@@ -1970,4 +1970,35 @@ $$;
 REVOKE ALL ON FUNCTION public.public_guest_card(TEXT, TEXT) FROM public;
 GRANT EXECUTE ON FUNCTION public.public_guest_card(TEXT, TEXT) TO anon, authenticated;
 
+-- ── N. Guest link opt-in ───────────────────────────────────────────────────
+-- Events can opt into guest invitation links (default off). The public page
+-- is only served when this flag is TRUE so disabling the feature also
+-- prevents the page from loading even with a valid URL.
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS guest_link_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Regenerate RPC with the guest_link_enabled guard so the page returns no
+-- data when the organiser has not enabled the feature.
+CREATE OR REPLACE FUNCTION public.public_guest_card(p_event_public_id TEXT, p_guest_public_id TEXT)
+RETURNS TABLE (
+  event_name     TEXT,
+  event_type     TEXT,
+  start_datetime TIMESTAMPTZ,
+  venue_name     TEXT,
+  guest_name     TEXT,
+  card_type      TEXT,
+  card_url       TEXT
+)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT e.username, e.event_type, e.start_datetime, e.venue_name,
+         c.name, c.card_type, c.card_url
+    FROM events e
+    JOIN event_cards c ON c.event_id = e.id
+   WHERE e.public_id          = upper(p_event_public_id)
+     AND c.public_id          = upper(p_guest_public_id)
+     AND e.guest_link_enabled = TRUE
+$$;
+REVOKE ALL ON FUNCTION public.public_guest_card(TEXT, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_guest_card(TEXT, TEXT) TO anon, authenticated;
+
 NOTIFY pgrst, 'reload schema';
