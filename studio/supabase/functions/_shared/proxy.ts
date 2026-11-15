@@ -49,12 +49,16 @@ export const json = (req: Request, status: number, body: unknown): Response =>
     headers: { ...corsHeaders(req), "Content-Type": "application/json" },
   });
 
-// True when the request carries a valid signed-in user's access token
+// True when the request carries a valid signed-in user's access token.
+// Uses SUPABASE_SERVICE_ROLE_KEY as the apikey (always a JWT, always auto-injected,
+// compatible with both old eyJhbGci… and new sb_publishable_* anon key formats).
 export const isSignedIn = async (req: Request): Promise<boolean> => {
   const auth = req.headers.get("Authorization") ?? "";
   if (!/^Bearer \S+$/.test(auth)) return false;
   const url = Deno.env.get("SUPABASE_URL");
-  const key = Deno.env.get("SUPABASE_ANON_KEY");
+  // Service role key is always a JWT (anon key may be the new sb_publishable_* format
+  // which some Auth API versions reject as apikey; service role is always accepted).
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY");
   if (!url || !key) return false;
   try {
     const res = await fetch(`${url}/auth/v1/user`, {
@@ -71,7 +75,7 @@ export const isSignedIn = async (req: Request): Promise<boolean> => {
 // true / false from has_perm(); null when the roles SQL isn't installed yet.
 const roleAllows = async (req: Request, module: string, edit: boolean): Promise<boolean | null> => {
   const url = Deno.env.get("SUPABASE_URL");
-  const key = Deno.env.get("SUPABASE_ANON_KEY");
+  const key = Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!url || !key) return false;
   try {
     const res = await fetch(`${url}/rest/v1/rpc/has_perm`, {
