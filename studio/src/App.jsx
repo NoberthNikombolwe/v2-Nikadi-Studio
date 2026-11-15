@@ -1,5 +1,16 @@
 import Logo from "./Logo";
 import { planCardSave, splitImport, resetSendStatuses } from "./lib/guestMerge";
+import { useAutoClearLog } from "./hooks/useAutoClearLog";
+import { useEventCards } from "./hooks/useEventCards";
+import { useDeliveries } from "./hooks/useDeliveries";
+import { useSchedules } from "./hooks/useSchedules";
+import { useScheduleActions } from "./hooks/useScheduleActions";
+import { useServerClock, DEVICE_ZONE } from "./hooks/useServerClock";
+import { useStorageUsage } from "./hooks/useStorageUsage";
+import { Toggle } from "./components/Toggle";
+import { Sb } from "./components/Sb";
+import { EmptyState, TONE, TONE_BG } from "./components/EmptyState";
+import { Pill } from "./components/Pill";
 import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
@@ -832,12 +843,12 @@ const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"fai
 // and scheduled WhatsApp sends can attach them
 // resetAt: when a new spreadsheet last reset the guest's send statuses (status_reset_at) —
 // delivery reports of sends before it no longer speak for the guest
-const cardFromRow = (c) => ({ cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
+const cardFromRow = (c) => ({ publicId: c.public_id || null, cardCode: c.card_code || null, cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
 // True when a re-uploaded row still has the saved card's name and card type, so the
 // card image made for it still shows the right thing
 const sameCardFace = (r, c) => String(r.name || "").trim() === String(c.name || "").trim()
   && String(r.cardType || "").trim() === String(c.card_type || "").trim();
-const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"" };
+const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"", guest_link_enabled:false };
 // Columns the event form may write (persistEvent sends only these). The CRM links are only
 // present once supabase-schema.sql has added them, so they are sent only when the form has them.
 const EVENT_FORM_FIELDS     = [...Object.keys(BLANK_EVENT), "customer_id", "package_price", "region"];
@@ -1145,29 +1156,7 @@ function SmsBadge({ status, reason }) {
   return <span className={`nk-badge ${s[0]}`} title={tip}><Icon n={s[1]} /> {s[2]}</span>;
 }
 
-// Compact icon-style action button used inside table rows (WA/SMS/download/edit actions)
-// Its text is wrapped in .nk-sb-label, which tables hide (icon-only buttons there), and
-// the text + `title` become the tooltip and accessible name so the action is always described.
-function Sb({ bg, col, border, children, onClick, title, disabled, label, className }) {
-  const icons = [], text = [];
-  const walk = (node) => Children.toArray(node).forEach(c => {
-    if (isValidElement(c) && c.type === Fragment) walk(c.props.children);
-    else if (isValidElement(c) && c.type === Icon) icons.push(c);
-    else text.push(c);
-  });
-  walk(children);
-  const plain = (n) => Children.toArray(n).map(c => typeof c === "string" || typeof c === "number" ? c : isValidElement(c) ? plain(c.props.children) : "").join("");
-  const name = (label || plain(text)).trim();
-  const tip  = name && title && title !== name ? `${name} — ${title}` : (name || title);
-  const hasText = text.some(c => typeof c !== "string" || c.trim());
-  return (
-    <button type="button" className={`nk-btn-sm${icons.length ? (hasText ? " has-icon" : " icon-only") : ""}${className ? ` ${className}` : ""}`} onClick={onClick} title={tip} aria-label={tip} disabled={disabled}
-      style={{ background:bg, color:col, borderColor:border||alpha(col,"44"), opacity:disabled?0.5:1 }}>
-      {icons}
-      {hasText && <span className="nk-sb-label">{text}</span>}
-    </button>
-  );
-}
+// Sb is imported from ./components/Sb
 
 // One row of the Contacts table: shows WA/SMS status badges, lets the phone number be
 // edited inline, and exposes per-row Upload / Send WA / Send SMS / Download PNG actions
@@ -1310,6 +1299,14 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
               <label className="nk-label">End Date & Time</label>
               <input type="datetime-local" className="nk-input" value={form.end_datetime} onChange={set("end_datetime")} />
             </div>
+            <div style={{ gridColumn:"span 2", marginTop:4, padding:"12px 14px", background:alpha(N.navy700,"cc"), border:`1px solid ${N.border}`, borderRadius:10 }}>
+              <Toggle checked={!!form.guest_link_enabled}
+                onChange={v => setForm(f => ({ ...f, guest_link_enabled: v }))}
+                label="Enable guest invitation links" />
+              <div style={{ fontSize:12, color:N.textDim, marginTop:-6, paddingLeft:26, lineHeight:1.5 }}>
+                Each guest gets a personal invitation page. The link is appended to every SMS sent for this event.
+              </div>
+            </div>
           </div>
         </div>
         <div className="nk-modal-foot">
@@ -1327,16 +1324,7 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
 const NOTICE_VISIBLE_MS = 5000;   // how long toasts and finished activity logs stay on screen
 const logPending = (x) => x.status === "uploading" || x.status === "sending";
 
-// Empties an activity log NOTICE_VISIBLE_MS after its last change, but only once nothing in
-// it is still in progress — a running upload/send keeps its log on screen. Any later
-// change (e.g. a delayed WhatsApp rejection) restarts the countdown.
-function useAutoClearLog(log, setLog) {
-  useEffect(() => {
-    if (!log.length || log.some(logPending)) return;
-    const t = setTimeout(() => setLog([]), NOTICE_VISIBLE_MS);
-    return () => clearTimeout(t);
-  }, [log, setLog]);
-}
+// useAutoClearLog is imported from ./hooks/useAutoClearLog
 
 // status → [icon name, colour] for each log's rows; anything not listed is still in progress (spinner)
 const LOG_STYLES = {
@@ -1399,8 +1387,7 @@ const MAIN_MSG = "main";
    customers, plus events.customer_id / lead_id (supabase-schema.sql).
 ══════════════════════════════════════════════════════════════════════════ */
 const CRM_LIMIT = 1000;   // leads / customers loaded per list (newest first)
-const TONE    = { good:N.green,   info:N.sky,     warn:N.amber,   bad:N.red };
-const TONE_BG = { good:N.greenBg, info:N.navy700, warn:N.amberBg, bad:N.redBg };
+// TONE / TONE_BG are imported from ./components/EmptyState
 const DUE_LABEL = { overdue:["Overdue","bad"], today:["Today","warn"], soon:["Soon","info"] };
 const BLANK_LEAD     = { name:"", phone:"", event_type:"", event_date:"", package_price:"", region:"", venue:"", description:"" };
 const BLANK_CUSTOMER = { name:"", phone:"", region:"", notes:"" };
@@ -1417,31 +1404,7 @@ const addDays    = (n) => localDate(new Date(Date.now() + n * 86400000));
 const errMsg     = (e) => e?.message || String(e);
 
 // The one empty / loading / error placeholder used across tabs: an icon in a soft circle,
-// a title, a line of help and (optionally) the next action. `loading` shows a spinner;
-// `compact` fits inside a card or panel.
-function EmptyState({ icon = "inbox", title, text, action, loading, tone = "info", compact }) {
-  const col = loading ? N.sky : TONE[tone];
-  return (
-    <div className="nk-empty" style={compact ? { padding:"18px 8px" } : undefined} role={loading ? "status" : undefined}>
-      <div className="nk-empty-icon" style={{color:col,background:alpha(col,"1a"),...(compact ? { width:44, height:44, fontSize:20 } : {})}}>
-        <Icon n={loading ? "loader" : icon} />
-      </div>
-      {title && <div className="nk-empty-title">{title}</div>}
-      {text && <div className="nk-empty-text">{text}</div>}
-      {action && <div style={{marginTop:14,display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>{action}</div>}
-    </div>
-  );
-}
-
-// Small coloured status label
-function Pill({ tone = "info", children }) {
-  return (
-    <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:5,whiteSpace:"nowrap",
-      color:TONE[tone], background:TONE_BG[tone], border:`1px solid ${alpha(TONE[tone],"44")}`}}>
-      {children}
-    </span>
-  );
-}
+// EmptyState and Pill are imported from ./components/EmptyState and ./components/Pill
 
 // A lead's stage as a coloured label
 const LeadStatus = ({ status }) => <Pill tone={LEAD_STATUSES[status]?.tone}>{LEAD_STATUSES[status]?.label || status}</Pill>;
@@ -3102,11 +3065,7 @@ function ListEditor({ title, hint, rows, columns, blank, renderForm, validate, o
   );
 }
 
-const Toggle = ({ checked, onChange, label, disabled }) => (
-  <label style={{display:"inline-flex",alignItems:"center",gap:8,fontSize:13,color:N.textMid,cursor:disabled ? "default" : "pointer",marginBottom:10}}>
-    <input type="checkbox" checked={!!checked} disabled={disabled} onChange={e => onChange(e.target.checked)} style={{width:18,height:18,accentColor:"var(--nk-accent)"}} /> {label}
-  </label>
-);
+// Toggle is imported from ./components/Toggle
 
 const confirmDelete = async (askDialog, what) => (await askDialog({ title: `Delete ${what}?`, body: "This can't be undone.", actions: [{ value: "yes", label: "Delete", kind: "danger" }] })) === "yes";
 
@@ -3335,33 +3294,9 @@ function CardFontsSettings({ access, canEdit }) {
    totals, share the public scan page) and <CallsTab> (guest confirmation calls).
    Check-ins only ever go through the scan_card() database function.
 ══════════════════════════════════════════════════════════════════════════ */
-const CARD_COLS = "id,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
+const CARD_COLS = "id,public_id,card_code,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
 
-// The open event's cards from the database, kept live with realtime updates
-function useEventCards(eventId) {
-  const [cards, setCards] = useState(null);
-  const [error, setError] = useState(null);
-  const load = async () => {
-    if (!supabase || !eventId) { setCards(null); return; }
-    const { data, error: e } = await supabase.from("event_cards").select(CARD_COLS).eq("event_id", eventId).order("name");
-    if (e) { setError(e.message); setCards([]); return; }
-    setError(null); setCards(data);
-  };
-  useEffect(() => {
-    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
-    if (!supabase || !eventId) return;
-    const ch = supabase.channel(`cards-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "event_cards", filter: `event_id=eq.${eventId}` }, (p) => {
-        if (p.eventType === "DELETE") { setCards(cs => cs && cs.filter(c => c.id !== p.old.id)); return; }
-        const row = p.new;
-        setCards(cs => !cs ? cs : cs.some(c => c.id === row.id) ? cs.map(c => c.id === row.id ? { ...c, ...row } : c) : [...cs, row]);
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
-  const patch = (id, changes) => setCards(cs => cs && cs.map(c => c.id === id ? { ...c, ...changes } : c));
-  return { cards, error, load, patch };
-}
+// useEventCards is imported from ./hooks/useEventCards
 
 const NoEventOpen = ({ what, onGo }) => (
   <EmptyState icon="folder" title="No event open" text={`${what} works on one event at a time. Open the event first.`}
@@ -3376,88 +3311,13 @@ const NoEventOpen = ({ what, onGo }) => (
    minute by pg_cron) does the sending, so it works with every browser closed.
    ══════════════════════════════════════════════════════════════════════════ */
 
-// The open event's schedules for one channel and their sends, kept live with realtime.
-// `missing` is true until the schedules SQL (section 9) has been run.
-function useSchedules(eventId, channel) {
-  const [schedules, setSchedules] = useState(null);
-  const [runs, setRuns] = useState([]);
-  const [error, setError] = useState(null);
-  const [missing, setMissing] = useState(false);
-  const load = async () => {
-    if (!supabase || !eventId) { setSchedules(null); setRuns([]); return; }
-    const { data, error: e } = await supabase.from("message_schedules").select("*")
-      .eq("event_id", eventId).eq("channel", channel).order("created_at", { ascending: false });
-    if (e) {
-      const notSetUp = /message_schedules|schema cache|does not exist/i.test(e.message);
-      setMissing(notSetUp); setError(notSetUp ? null : e.message); setSchedules([]); setRuns([]);
-      return;
-    }
-    setMissing(false); setError(null); setSchedules(data || []);
-    const ids = (data || []).map(s => s.id);
-    if (!ids.length) { setRuns([]); return; }
-    const { data: rs, error: re } = await supabase.from("message_schedule_runs")
-      .select("id,schedule_id,run_at,status,sent,failed,skipped,detail,started_at,finished_at").in("schedule_id", ids).order("run_at");
-    if (re) setError(re.message); else setRuns(rs || []);
-  };
-  useEffect(() => {
-    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
-    if (!supabase || !eventId) return;
-    const byTime = (a, b) => new Date(a.run_at) - new Date(b.run_at);
-    const ch = supabase.channel(`schedules-${channel}-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedules", filter: `event_id=eq.${eventId}` }, (p) => {
-        if (p.eventType === "DELETE") {
-          setSchedules(ss => ss && ss.filter(s => s.id !== p.old.id));
-          setRuns(rs => rs.filter(r => r.schedule_id !== p.old.id));
-          return;
-        }
-        const row = p.new;
-        if (row.channel !== channel) return;
-        setSchedules(ss => !ss ? ss : ss.some(s => s.id === row.id) ? ss.map(s => s.id === row.id ? { ...s, ...row } : s) : [row, ...ss]);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedule_runs", filter: `event_id=eq.${eventId}` }, (p) => {
-        if (p.eventType === "DELETE") { setRuns(rs => rs.filter(r => r.id !== p.old.id)); return; }
-        const row = p.new;
-        setRuns(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [...rs, row].sort(byTime));
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [eventId, channel]); // eslint-disable-line react-hooks/exhaustive-deps
-  return { schedules, runs, error, missing, load };
-}
+// useSchedules is imported from ./hooks/useSchedules
 
 const CHANNEL_WORD = { sms: "SMS", whatsapp: "WhatsApp" };
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const SchedBadge = ({ map, status }) => <span className={`nk-badge ${map[status]?.badge || "badge-idle"}`}>{map[status]?.label || status}</span>;
 
-// Pause / resume / cancel (save through the RPC, which checks the role and the event) and
-// delete (Super Admin only — RLS refuses anyone else). Shared by the SMS / WhatsApp panels
-// and the Schedules page; every change is written to that event's History.
-function useScheduleActions({ askDialog, showToast, logHistory, reload }) {
-  const setStatus = async (s, status) => {
-    if (status === "cancelled") {
-      const ok = await askDialog({ title: `Cancel "${s.title}"?`, body: "Sends still waiting won't go out, and a send in progress stops before its next batch. Sends already made stay in the history. This can't be undone — make a new schedule to start again.",
-        actions: [{ value: "yes", label: "Cancel schedule", kind: "danger" }] });
-      if (ok !== "yes") return false;
-    }
-    const { error: e } = await supabase.rpc("set_message_schedule_status", { p_id: s.id, p_status: status });
-    if (e) { showToast(`Could not change the schedule: ${e.message}`, "warn"); return false; }
-    const verb = { paused: "paused", active: "resumed", cancelled: "cancelled" }[status];
-    logHistory({ channel: s.channel, action: "schedule", title: s.title, detail: `Schedule ${verb}` }, s.event_id);
-    showToast(`"${s.title}" ${verb}${status === "active" ? " — sends that came due while paused are skipped" : ""}`, status === "cancelled" ? "info" : "success");
-    reload();
-    return true;
-  };
-  const remove = async (s) => {
-    if (!(await confirmDelete(askDialog, `schedule "${s.title}"${s.sent_by === "nextsms" ? " (NextSMS still sends the SMS it holds)" : ""}`))) return false;
-    const { data, error: e } = await supabase.from("message_schedules").delete().eq("id", s.id).select("id");
-    if (e || !data?.length) { showToast(`Could not delete the schedule${e ? `: ${e.message}` : ""}`, "warn"); return false; }
-    logHistory({ channel: s.channel, action: "schedule", title: s.title, detail: "Schedule deleted" }, s.event_id);
-    showToast(`Deleted "${s.title}"`, "success");
-    reload();
-    return true;
-  };
-  return { setStatus, remove };
-}
+// useScheduleActions is imported from ./hooks/useScheduleActions
 
 // Panel in the SMS / WhatsApp tab: the event's schedules for that channel and "New schedule".
 //   smsMessages: [{ key, title, body }] (main + extra "contacts" messages) — SMS only
@@ -3619,26 +3479,7 @@ function ScheduleDetail({ schedule: s, runs, canEdit, canDelete, onClose, onEdit
 
 // The server's clock against this device's (clockOffset in src/lib/schedule.js): the offset in
 // ms (+ = the device is behind), or null while unknown or when the database has no
-// server_time() yet (then the device's clock is used). Measured once and kept for 10 minutes;
-// remeasure() asks again (after the server refused a time).
-let serverClock = null;   // { offset, at } — shared by every schedule pop-up
-const DEVICE_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
-function useServerClock() {
-  const [offset, setOffset] = useState(() => serverClock?.offset ?? null);
-  const [asked, setAsked] = useState(0);
-  useEffect(() => {
-    if (!supabase || (!asked && serverClock && Date.now() - serverClock.at < 10 * 60_000)) return;
-    let off = false;
-    const sent = Date.now();
-    supabase.rpc("server_time").then(({ data, error }) => {
-      const o = error ? null : clockOffset(data, sent, Date.now());
-      serverClock = { offset: o, at: Date.now() };
-      if (!off) setOffset(o);
-    });
-    return () => { off = true; };
-  }, [asked]);
-  return [offset, () => setAsked(n => n + 1)];
-}
+// useServerClock and DEVICE_ZONE are imported from ./hooks/useServerClock
 
 // New / edit schedule pop-up. Every send time is checked as you type — a date or time that
 // has already passed is refused — and the preview shows who it goes to and what it costs.
@@ -4668,42 +4509,7 @@ function FeedbackTab({ access, events, askDialog, showToast }) {
    Pure logic in src/lib/deliveries.js.
    ══════════════════════════════════════════════════════════════════════════ */
 
-// The open event's delivery results, kept live with realtime. `onChange(row)` sees every live
-// insert / update (the app uses it to move guests' badges). `missing` = the delivery SQL (§11)
-// isn't installed yet.
-function useDeliveries(eventId, onChange) {
-  const [rows, setRows] = useState([]);
-  const [loaded, setLoaded] = useState(false);
-  const [missing, setMissing] = useState(false);
-  const [error, setError] = useState(null);
-  const onChangeRef = useRef(onChange);
-  useEffect(() => { onChangeRef.current = onChange; });
-  const load = async () => {
-    if (!supabase || !eventId) { setRows([]); setLoaded(false); return; }
-    const { data, error: e } = await supabase.from("message_deliveries").select("*")
-      .eq("event_id", eventId).order("sent_at", { ascending: false }).limit(3000);
-    if (e) {
-      const notSetUp = /message_deliveries|schema cache|does not exist/i.test(e.message);
-      setMissing(notSetUp); setError(notSetUp ? null : e.message); setRows([]); setLoaded(true);
-      return;
-    }
-    setMissing(false); setError(null); setRows(data || []); setLoaded(true);
-  };
-  useEffect(() => {
-    load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
-    if (!supabase || !eventId) return;
-    const ch = supabase.channel(`deliveries-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_deliveries", filter: `event_id=eq.${eventId}` }, (p) => {
-        if (p.eventType === "DELETE") { setRows(rs => rs.filter(r => r.id !== p.old.id)); return; }
-        const row = p.new;
-        setRows(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [row, ...rs]);
-        onChangeRef.current?.(row);
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
-  return { rows, loaded, missing, error, load };
-}
+// useDeliveries is imported from ./hooks/useDeliveries
 
 // Status pill for one delivery (sent = waiting, delivered, read, failed)
 const DeliveryBadge = ({ state, title }) => {
@@ -5393,22 +5199,7 @@ function TemplatePicker({ templates = [], currentUrl, currentImage, hasDesign, o
 // (Settings → Storage) manages it: the quota and clearing WhatsApp card images.
 const fmtBytes = (b) => !b ? "0 B" : b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : b < 1073741824 ? `${(b / 1048576).toFixed(1)} MB` : `${(b / 1073741824).toFixed(2)} GB`;
 const BUCKET_LABEL = { "wa-cards": "WhatsApp card images", templates: "Card templates (backgrounds)" };
-function useStorageUsage(quotaMb) {
-  const [rows, setRows] = useState(null);   // null = loading
-  const [error, setError] = useState(null);
-  const load = async () => {
-    if (!supabase) { setRows([]); return; }
-    setError(null);
-    const { data, error: e } = await supabase.rpc("storage_usage");
-    if (e) { setRows([]); setError(/storage_usage|schema cache/i.test(e.message) ? "Run the latest supabase-schema.sql to see storage use." : e.message); return; }
-    setRows((data || []).map(r => ({ ...r, files: Number(r.files) || 0, bytes: Number(r.bytes) || 0 })));
-  };
-  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
-  const used  = (rows || []).reduce((n, r) => n + r.bytes, 0);
-  const total = Math.max(1, Number(quotaMb) || 1024) * 1048576;
-  const cards = (rows || []).find(r => r.bucket === "wa-cards") || { files: 0, bytes: 0 };
-  return { rows, error, load, used, total, left: Math.max(0, total - used), pct: Math.min(100, used / total * 100), cards };
-}
+// useStorageUsage is imported from ./hooks/useStorageUsage
 
 function StorageBar({ pct }) {
   const col = pct >= 90 ? N.red : pct >= 70 ? N.amber : N.green;
@@ -5625,6 +5416,380 @@ function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
   );
 }
 
+// Shows every guest's personalised invitation page URL for one event, with copy buttons
+function GuestLinksModal({ eventRow, onClose, showToast }) {
+  const { cards } = useEventCards(eventRow?.id);
+  const [copied, setCopied] = useState(null);
+  const [q, setQ] = useState("");
+  const base = `${location.origin}${location.pathname}`;
+  const copyLink = (c) => {
+    const url = `${base}#/g/${eventRow.public_id}/${c.public_id}`;
+    navigator.clipboard?.writeText(url)
+      .then(() => { setCopied(c.id); showToast(`Copied link for ${c.name}`, "success"); setTimeout(() => setCopied(null), 2000); })
+      .catch(() => showToast("Could not copy — try selecting manually", "warn"));
+  };
+  const copyAll = () => {
+    if (!cards?.length) return;
+    const lines = cards.filter(c => c.public_id).map(c => `${c.name}: ${base}#/g/${eventRow.public_id}/${c.public_id}`);
+    navigator.clipboard?.writeText(lines.join("\n"))
+      .then(() => showToast(`Copied ${lines.length} guest links`, "success"))
+      .catch(() => showToast("Could not copy", "warn"));
+  };
+  const shown = q.trim() ? (cards || []).filter(c => c.name?.toLowerCase().includes(q.trim().toLowerCase())) : (cards || []);
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:640,width:"100%"}} role="dialog" aria-modal="true" aria-labelledby="nk-glinks-title">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title" id="nk-glinks-title"><Icon n="link" /> Guest invitation links — {eventRow?.username}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body" style={{padding:"16px 20px",maxHeight:"60vh",overflowY:"auto"}}>
+          <p style={{fontSize:12,color:N.textDim,marginBottom:14}}>
+            Each link opens a private invitation page for that guest only. Share the link by WhatsApp, SMS or email.
+          </p>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            <input className="nk-input" style={{flex:1,marginBottom:0}} placeholder="Search guest name…"
+              value={q} onChange={e => setQ(e.target.value)} />
+            <button className="nk-btn nk-btn-ghost" style={{fontSize:12,flexShrink:0}} onClick={copyAll} disabled={!cards?.length}>
+              <Icon n="copy" /> Copy all
+            </button>
+          </div>
+          {cards === null && <div style={{textAlign:"center",padding:24,color:N.textDim}}><Icon n="loader" /> Loading guests…</div>}
+          {cards !== null && !shown.length && <div style={{textAlign:"center",padding:24,color:N.textDim}}>No guests{q ? " match" : " found"}.</div>}
+          {shown.map(c => {
+            const url = c.public_id ? `${base}#/g/${eventRow.public_id}/${c.public_id}` : null;
+            return (
+              <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:`1px solid ${N.border}`}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13,color:N.text}}>{c.name || "—"}</div>
+                  <div style={{fontSize:11,color:N.textDim}}>{c.card_type || "No type"}</div>
+                  {url && <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"100%"}}>{url}</div>}
+                  {!url && <div style={{fontSize:11,color:N.amber}}>No link yet — save cards to generate IDs</div>}
+                </div>
+                {url && (
+                  <button className="nk-btn nk-btn-ghost" style={{flexShrink:0,fontSize:12,color:copied===c.id?N.green:undefined}}
+                    onClick={() => copyLink(c)} aria-label={`Copy link for ${c.name}`}>
+                    <Icon n={copied===c.id?"check":"copy"} /> {copied===c.id?"Copied":"Copy"}
+                  </button>
+                )}
+                {url && (
+                  <a href={url} target="_blank" rel="noreferrer" className="nk-btn nk-btn-ghost" style={{flexShrink:0,fontSize:12,textDecoration:"none"}}
+                    aria-label={`Open invitation page for ${c.name}`} title={`Open invitation page for ${c.name}`}>
+                    <Icon n="eye" />
+                  </a>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── EventPageModal ────────────────────────────────────────────────────────
+// Admin modal to manage the public event microsite (colours, hero image,
+// hosts, schedule, dress code, gallery, RSVP, map). Saves to event_pages.
+const EP_DEFAULTS = {
+  primary_color:"#00C2FF", accent_color:"#7C3AED", bg_color:"#0A0F1E", text_color:"#FFFFFF",
+  web_event_name:"", hero_image_url:"", tagline:"", hosts:[], schedule:[], dress_code_text:"", dress_code_image_url:"",
+  gallery:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_lat:"", venue_lng:"", venue_description:"", show_countdown:true,
+};
+function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
+  const [loading, setLoading] = useState(true);
+  const [pageId,  setPageId]  = useState(null);
+  const [form,    setForm]    = useState(EP_DEFAULTS);
+  const [busy,    setBusy]    = useState(false);
+  const [section, setSection] = useState("appearance");
+  const [uploading, setUploading] = useState(null);
+
+  useEffect(() => {
+    if (!sb) return;
+    sb.from("event_pages").select("*").eq("event_id", eventRow.id).maybeSingle().then(({ data }) => { // eslint-disable-line react-hooks/exhaustive-deps
+      if (data) { setPageId(data.id); setForm({ ...EP_DEFAULTS, ...data }); }
+      setLoading(false);
+    });
+  }, [eventRow.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const setB = (k) => (v) => setForm(f => ({ ...f, [k]: v }));
+
+  const uploadImg = async (file, slot) => {
+    if (!sb || !file) return;
+    setUploading(slot);
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+    const path = `${eventRow.id}/${slot}_${Date.now()}.${ext}`;
+    const { error } = await sb.storage.from("event-pages").upload(path, file, { contentType: file.type, upsert: true });
+    setUploading(null);
+    if (error) { showToast(`Upload failed: ${error.message}`, "warn"); return; }
+    const url = sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl;
+    setForm(f => ({ ...f, [slot]: url }));
+    showToast("Image uploaded", "success");
+  };
+
+  const save = async () => {
+    if (!sb) return;
+    setBusy(true);
+    const payload = {
+      event_id:eventRow.id, ...form,
+      venue_lat: form.venue_lat !== "" ? parseFloat(form.venue_lat) : null,
+      venue_lng: form.venue_lng !== "" ? parseFloat(form.venue_lng) : null,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = pageId
+      ? await sb.from("event_pages").update(payload).eq("id", pageId)
+      : await sb.from("event_pages").insert(payload).select("id").single().then(({ data, error: e }) => { if (data) setPageId(data.id); return { error: e }; });
+    setBusy(false);
+    if (error) { showToast(`Could not save: ${error.message}`, "warn"); return; }
+    showToast("Page settings saved", "success");
+  };
+
+  const addHost     = () => setForm(f => ({ ...f, hosts:    [...f.hosts,    { name:"", role:"", photo_url:"" }] }));
+  const removeHost  = (i) => setForm(f => ({ ...f, hosts:    f.hosts.filter((_,j) => j!==i) }));
+  const setHost     = (i, k, v) => setForm(f => ({ ...f, hosts: f.hosts.map((h,j) => j===i ? {...h,[k]:v} : h) }));
+
+  const addSched    = () => setForm(f => ({ ...f, schedule: [...f.schedule, { time:"", title:"", description:"" }] }));
+  const removeSched = (i) => setForm(f => ({ ...f, schedule: f.schedule.filter((_,j) => j!==i) }));
+  const setSched    = (i, k, v) => setForm(f => ({ ...f, schedule: f.schedule.map((s,j) => j===i ? {...s,[k]:v} : s) }));
+
+  const addGallery    = () => setForm(f => ({ ...f, gallery: [...f.gallery, ""] }));
+  const removeGallery = (i) => setForm(f => ({ ...f, gallery: f.gallery.filter((_,j) => j!==i) }));
+  const setGallery    = (i, v) => setForm(f => ({ ...f, gallery: f.gallery.map((u,j) => j===i ? v : u) }));
+
+  const SECTIONS = [
+    { id:"appearance", label:"Appearance",  icon:"palette" },
+    { id:"hosts",      label:"Hosts / MC",  icon:"users"   },
+    { id:"schedule",   label:"Ratiba",      icon:"clock"   },
+    { id:"dresscode",  label:"Dress Code",  icon:"star"    },
+    { id:"gallery",    label:"Gallery",     icon:"image"   },
+    { id:"rsvp",       label:"RSVP",        icon:"check"   },
+    { id:"location",   label:"Location",    icon:"map"     },
+  ];
+
+  const imgUploadRow = (label, slot, busy) => (
+    <div style={{marginBottom:12}}>
+      <label className="nk-label">{label}</label>
+      {form[slot] && <img src={form[slot]} alt="" style={{display:"block",maxHeight:120,borderRadius:8,marginBottom:6,maxWidth:"100%"}} />}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <input className="nk-input" style={{flex:"1 1 200px",marginBottom:0}} placeholder="Image URL" value={form[slot]||""} onChange={set(slot)} />
+        <label className="nk-btn nk-btn-ghost" style={{cursor:"pointer",whiteSpace:"nowrap"}}>
+          {busy===slot ? <><Icon n="loader" /> Uploading…</> : <><Icon n="upload" /> Upload</>}
+          <input type="file" accept="image/*" style={{display:"none"}} onChange={e => { if (e.target.files[0]) uploadImg(e.target.files[0], slot); e.target.value=""; }} disabled={busy===slot} />
+        </label>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="nk-overlay" role="dialog" aria-modal="true" aria-label="Manage event page">
+      <div className="nk-modal" style={{maxWidth:860,width:"100%",display:"flex",flexDirection:"column",maxHeight:"90vh"}}>
+        <div className="nk-modal-head">
+          <div className="nk-modal-title"><Icon n="palette" /> Manage event page — {eventRow.username}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close"><Icon n="x" /></button>
+        </div>
+        {loading ? (
+          <div style={{padding:40,textAlign:"center",color:N.textDim}}><Icon n="loader" /> Loading…</div>
+        ) : (
+          <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
+            {/* Section nav */}
+            <nav style={{width:150,flexShrink:0,borderRight:`1px solid ${N.border}`,padding:"8px 0",display:"flex",flexDirection:"column",gap:2,overflowY:"auto"}}>
+              {SECTIONS.map(s => (
+                <button key={s.id} type="button" onClick={() => setSection(s.id)}
+                  style={{display:"flex",alignItems:"center",gap:8,padding:"9px 14px",border:"none",background:section===s.id ? alpha(N.accent,"22") : "transparent",
+                    color:section===s.id ? N.accent : N.textMid,fontFamily:"inherit",fontSize:12,fontWeight:section===s.id?700:400,cursor:"pointer",textAlign:"left",borderRadius:0}}>
+                  <Icon n={s.icon} size="0.95em" />{s.label}
+                </button>
+              ))}
+            </nav>
+            {/* Section content */}
+            <div style={{flex:1,overflowY:"auto",padding:"20px 24px"}}>
+
+              {section==="appearance" && (
+                <div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+                    {[["primary_color","Primary colour"],["accent_color","Accent colour"],["bg_color","Background colour"],["text_color","Text colour"]].map(([k,l]) => (
+                      <div key={k}>
+                        <label className="nk-label">{l}</label>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <input type="color" value={form[k]||"#000000"} onChange={set(k)}
+                            style={{width:40,height:36,border:`1px solid ${N.border}`,borderRadius:6,background:"transparent",cursor:"pointer",padding:2}} />
+                          <input className="nk-input" style={{flex:1,marginBottom:0,fontFamily:"JetBrains Mono, monospace",fontSize:12}} value={form[k]||""} onChange={set(k)} placeholder="#rrggbb" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{marginBottom:12}}>
+                    <label className="nk-label">Event name on web page</label>
+                    <input className="nk-input" placeholder={eventRow.username || "Same as internal event name"} value={form.web_event_name||""} onChange={set("web_event_name")} />
+                    <div style={{fontSize:11,color:N.textDim,marginTop:4}}>Leave blank to use the internal event name.</div>
+                  </div>
+                  <div style={{marginBottom:12}}>
+                    <label className="nk-label">Tagline</label>
+                    <input className="nk-input" placeholder="e.g. Join us for a celebration" value={form.tagline||""} onChange={set("tagline")} />
+                  </div>
+                  {imgUploadRow("Hero image (banner)", "hero_image_url", uploading)}
+                  <div style={{marginTop:16,padding:"10px 14px",background:alpha(N.navy700,"cc"),border:`1px solid ${N.border}`,borderRadius:10}}>
+                    <Toggle checked={!!form.show_countdown} onChange={setB("show_countdown")} label="Show countdown timer in hero" />
+                  </div>
+                </div>
+              )}
+
+              {section==="hosts" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Add the host(s), MC or main couple</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addHost}><Icon n="plus" /> Add</button>
+                  </div>
+                  {form.hosts.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No hosts added yet.</div>}
+                  {form.hosts.map((h,i) => (
+                    <div key={i} style={{border:`1px solid ${N.border}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                        <div><label className="nk-label">Name</label><input className="nk-input" value={h.name||""} onChange={e => setHost(i,"name",e.target.value)} placeholder="Jina" /></div>
+                        <div><label className="nk-label">Role / Title</label><input className="nk-input" value={h.role||""} onChange={e => setHost(i,"role",e.target.value)} placeholder="e.g. Bibi Harusi" /></div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                        <div style={{flex:1}}>
+                          <label className="nk-label">Photo URL</label>
+                          <input className="nk-input" style={{marginBottom:0}} value={h.photo_url||""} onChange={e => setHost(i,"photo_url",e.target.value)} placeholder="https://…" />
+                        </div>
+                        <button className="nk-btn nk-btn-ghost" style={{color:N.red,marginBottom:0}} onClick={() => removeHost(i)}><Icon n="trash" /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="schedule" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Ratiba ya siku husika</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addSched}><Icon n="plus" /> Add item</button>
+                  </div>
+                  {form.schedule.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No schedule items yet.</div>}
+                  {form.schedule.map((s,i) => (
+                    <div key={i} style={{border:`1px solid ${N.border}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:8,marginBottom:8}}>
+                        <div><label className="nk-label">Time</label><input className="nk-input" value={s.time||""} onChange={e => setSched(i,"time",e.target.value)} placeholder="10:00" /></div>
+                        <div><label className="nk-label">Title</label><input className="nk-input" value={s.title||""} onChange={e => setSched(i,"title",e.target.value)} placeholder="e.g. Mapokezi" /></div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                        <div style={{flex:1}}>
+                          <label className="nk-label">Description (optional)</label>
+                          <input className="nk-input" style={{marginBottom:0}} value={s.description||""} onChange={e => setSched(i,"description",e.target.value)} placeholder="Details…" />
+                        </div>
+                        <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => removeSched(i)}><Icon n="trash" /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="dresscode" && (
+                <div>
+                  <div style={{marginBottom:12}}>
+                    <label className="nk-label">Dress code description</label>
+                    <textarea className="nk-input" rows={4} style={{resize:"vertical"}} placeholder="Describe the expected dress code…" value={form.dress_code_text||""} onChange={set("dress_code_text")} />
+                  </div>
+                  {imgUploadRow("Dress code image (optional)", "dress_code_image_url", uploading)}
+                </div>
+              )}
+
+              {section==="gallery" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Maharusi / event photos shown in a grid</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addGallery}><Icon n="plus" /> Add photo URL</button>
+                  </div>
+                  {form.gallery.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No gallery images yet. Add a URL or upload.</div>}
+                  {form.gallery.map((url,i) => (
+                    <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
+                      {url && <img src={url} alt="" style={{width:48,height:48,objectFit:"cover",borderRadius:6,flexShrink:0}} />}
+                      <input className="nk-input" style={{flex:1,marginBottom:0}} value={url||""} onChange={e => setGallery(i,e.target.value)} placeholder="https://…" />
+                      <label className="nk-btn nk-btn-ghost" style={{flexShrink:0,cursor:"pointer"}}>
+                        {uploading===`gallery_${i}` ? <Icon n="loader" /> : <Icon n="upload" />}
+                        <input type="file" accept="image/*" style={{display:"none"}} onChange={async e => {
+                          if (!e.target.files[0]) return;
+                          setUploading(`gallery_${i}`);
+                          const file = e.target.files[0];
+                          const ext = (file.name.split(".").pop()||"jpg").toLowerCase();
+                          const path = `${eventRow.id}/gallery_${Date.now()}.${ext}`;
+                          const { error } = await sb.storage.from("event-pages").upload(path, file, { contentType: file.type, upsert: true });
+                          setUploading(null);
+                          if (error) { showToast(`Upload failed: ${error.message}`, "warn"); e.target.value=""; return; }
+                          setGallery(i, sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl);
+                          e.target.value="";
+                        }} />
+                      </label>
+                      <button className="nk-btn nk-btn-ghost" style={{color:N.red,flexShrink:0}} onClick={() => removeGallery(i)}><Icon n="trash" /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="rsvp" && (
+                <div>
+                  <div style={{padding:"12px 14px",background:alpha(N.navy700,"cc"),border:`1px solid ${N.border}`,borderRadius:10,marginBottom:16}}>
+                    <Toggle checked={!!form.rsvp_enabled} onChange={setB("rsvp_enabled")} label="Enable RSVP on the invitation page" />
+                    <div style={{fontSize:12,color:N.textDim,marginTop:-6,paddingLeft:26,lineHeight:1.5}}>
+                      Guests can confirm attendance and leave a congratulations message.
+                    </div>
+                  </div>
+                  {form.rsvp_enabled && (
+                    <div>
+                      <div style={{marginBottom:12}}>
+                        <label className="nk-label">RSVP prompt message (shown above the RSVP form)</label>
+                        <textarea className="nk-input" rows={3} style={{resize:"vertical"}} value={form.rsvp_message||""} onChange={set("rsvp_message")} placeholder="e.g. Tafadhali tuthibitishie kama utafika…" />
+                      </div>
+                      <div>
+                        <label className="nk-label">WhatsApp notification number</label>
+                        <input className="nk-input" type="tel" value={form.rsvp_notify_phone||""} onChange={set("rsvp_notify_phone")} placeholder="e.g. 255712345678" />
+                        <div style={{fontSize:11,color:N.textDim,marginTop:4}}>When a guest submits RSVP, a WhatsApp message is instantly sent to this number. Leave blank to disable.</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {section==="location" && (
+                <div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                    <div>
+                      <label className="nk-label">Latitude</label>
+                      <input className="nk-input" type="number" step="any" placeholder="-6.7924" value={form.venue_lat||""} onChange={set("venue_lat")} />
+                    </div>
+                    <div>
+                      <label className="nk-label">Longitude</label>
+                      <input className="nk-input" type="number" step="any" placeholder="39.2083" value={form.venue_lng||""} onChange={set("venue_lng")} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="nk-label">Venue description / directions</label>
+                    <textarea className="nk-input" rows={3} style={{resize:"vertical"}} placeholder="e.g. Ndani ya Dar es Salaam, karibu na…" value={form.venue_description||""} onChange={set("venue_description")} />
+                  </div>
+                  <div style={{marginTop:12,fontSize:12,color:N.textDim,lineHeight:1.6}}>
+                    The map uses Leaflet.js with a satellite/street toggle and a Google Maps directions button.
+                    Get coordinates from Google Maps: right-click a location and copy the numbers shown.
+                  </div>
+                </div>
+              )}
+
+            </div>
+          </div>
+        )}
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={busy||loading}>
+            {busy ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> Save Page Settings</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
 function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard }) {
   const { cards, error, load, patch } = useEventCards(eventId);
@@ -5703,7 +5868,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
           <tbody>
             {rows.map(c => (
               <tr key={c.id}>
-                <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}</div></td>
+                <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}{c.card_code ? <> · <span style={{fontFamily:"JetBrains Mono, monospace",letterSpacing:1}}>{c.card_code}</span></> : null}</div></td>
                 <td>
                   {c.phone ? (
                     <div className="nk-row-actions">
@@ -5731,6 +5896,16 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                   <div className="nk-row-actions">
                     <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
                     {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
+                    {c.public_id && eventRow?.public_id && eventRow?.guest_link_enabled && (
+                      <Sb bg="transparent" col={N.sky} border={N.border}
+                        label={`Copy invitation link for ${c.name}`}
+                        onClick={() => {
+                          const url = `${location.origin}${location.pathname}#/g/${eventRow.public_id}/${c.public_id}`;
+                          navigator.clipboard?.writeText(url).then(() => showToast(`Link copied for ${c.name}`, "success")).catch(() => showToast("Could not copy — try manually", "warn"));
+                        }}>
+                        <Icon n="link" />
+                      </Sb>
+                    )}
                     {canDelete && onDeleteCard && <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${c.name}'s card`} onClick={() => removeCard(c)}><Icon n="trash" /></Sb>}
                   </div>
                 </td>
@@ -6824,6 +6999,8 @@ export default function App() {
   const [leadSel,     setLeadSel]     = useState(null);   // lead open in the Leads tab
   const [customerSel, setCustomerSel] = useState(null);   // customer open in the Customers tab
   const [overviewId,  setOverviewId]  = useState(null);   // event shown in <EventOverview>
+  const [guestLinksEv, setGuestLinksEv] = useState(null); // event shown in <GuestLinksModal>
+  const [eventPageEv,  setEventPageEv]  = useState(null); // event shown in <EventPageModal>
   useEffect(() => { if (userId) crm.loadAll(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the per-customer event counts current as events are created, edited or deleted
   useEffect(() => { if (userId) crm.loadEventCounts(); }, [savedEvents]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -7355,20 +7532,20 @@ export default function App() {
       const byIdx = new Map(keep.filter(k => k.matched !== "id").map(k => [k.i, k]));
       if (byIdx.size) setRecords(rs => rs.map((r, i) => {
         const k = byIdx.get(i); if (!k) return r;
-        if (resetAt) return { ...r, dbId: k.id };
-        return { ...r, dbId: k.id,
+        if (resetAt) return { ...r, dbId: k.id, publicId: k.old?.public_id || null };
+        return { ...r, dbId: k.id, publicId: k.old?.public_id || null,
           waStatus:  (r.waStatus || WA.idle) === WA.idle ? (k.old.wa_status || r.waStatus) : r.waStatus,
           smsStatus: (r.smsStatus || SMS.pending) === SMS.pending ? (k.old.sms_status || r.smsStatus) : r.smsStatus };
       }));
     }
     if (fresh.length) {
       const { data: inserted, error } = await supabase.from("event_cards")
-        .insert(fresh.map(({ r }) => ({ ...toRow(r), ...(resetAt && resetCol ? { status_reset_at: resetAt } : {}) }))).select("id");
+        .insert(fresh.map(({ r }) => ({ ...toRow(r), ...(resetAt && resetCol ? { status_reset_at: resetAt } : {}) }))).select("id,public_id");
       if (error) { showToast("Cards save error: " + error.message, "warn"); return; }
       // Remember each new row's database id so per-card status updates (autoSaveCard) can target it
       if (inserted?.length === fresh.length) {
-        const ids = new Map(fresh.map(({ i }, n) => [i, inserted[n].id]));
-        setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i) } : r));
+        const ids = new Map(fresh.map(({ i }, n) => [i, inserted[n]]));
+        setRecords(rs => rs.map((r, i) => ids.has(i) ? { ...r, dbId: ids.get(i).id, publicId: ids.get(i).public_id || null } : r));
         // Cards uploaded before the list was first saved: store their images too (silently
         // ignored on a database without the card_url column)
         fresh.forEach(({ r }, n) => { if (r.cardUrl) saveCardUrl(inserted[n].id, r.cardUrl); });
@@ -7453,7 +7630,7 @@ export default function App() {
   };
 
   const addImportedGuests = (rows) => setRecords(rs => [...rs.filter(r => !r.sample), ...rows.map(c => ({
-    dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
+    dbId: c.id, publicId: c.public_id || null, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
     waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
   }))]);
 
@@ -7741,9 +7918,17 @@ export default function App() {
     return choice === "unique" ? unique : choice === "all" ? all : choice === "again" ? everyone : null;
   };
 
-  // Fills the {name}/{cardType} placeholders in an SMS template (default: the main message) for one record
-  // Also supports {phone} and any extra spreadsheet column as {ColumnName}; unknown {x} is left as typed
-  const buildSmsMsg = (rec, body = smsMessage) => fillTemplate(body, rec);
+  // Fills the {name}/{cardType} placeholders in an SMS template (default: the main message) for one record.
+  // Also supports {phone} and any extra spreadsheet column as {ColumnName}; unknown {x} is left as typed.
+  // When guest invitation links are enabled on the event and the record has a publicId, the guest's
+  // personal invitation URL is appended as a new line so every preview, CSV and send uses it.
+  const buildSmsMsg = (rec, body = smsMessage) => {
+    const text = fillTemplate(body, rec);
+    const link = openEventRow?.guest_link_enabled && openEventRow?.public_id && rec?.publicId
+      ? `\n${location.origin}${location.pathname}#/g/${openEventRow.public_id}/${rec.publicId}`
+      : "";
+    return text + link;
+  };
 
   /* ── SMS messages: main + extras ── */
   // The extra message being edited in the SMS tab (null while the main message is selected)
@@ -8514,6 +8699,15 @@ export default function App() {
           </div>
         )}
 
+        {/* Guest card links: shareable per-guest invitation page links */}
+        {guestLinksEv && (
+          <GuestLinksModal eventRow={guestLinksEv} onClose={() => setGuestLinksEv(null)} showToast={showToast} />
+        )}
+        {/* Event web page settings */}
+        {eventPageEv && (
+          <EventPageModal eventRow={eventPageEv} onClose={() => setEventPageEv(null)} showToast={showToast} supabase={supabase} />
+        )}
+
         {/* Event overview: everything related to one event */}
         {overviewId && (
           <EventOverview key={overviewId} eventId={overviewId} onClose={() => setOverviewId(null)} onSwitch={setOverviewId}
@@ -9112,6 +9306,20 @@ export default function App() {
                                   title="Every card and SMS sent for this event, with results">
                                   <Icon n="history" /> History
                                 </Sb>
+                                {ev.public_id && ev.guest_link_enabled && (
+                                  <Sb bg={N.navy600} col={N.teal} border={alpha(N.teal,"44")} className="m-hide"
+                                    onClick={(e)=>{ e.stopPropagation(); setGuestLinksEv(ev); }}
+                                    title="See every guest's personalised invitation link">
+                                    <Icon n="link" /> Guest Links
+                                  </Sb>
+                                )}
+                                {ev.public_id && ev.guest_link_enabled && (
+                                  <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")} className="m-hide"
+                                    onClick={(e)=>{ e.stopPropagation(); setEventPageEv(ev); }}
+                                    title="Edit the public event web page: colours, images, schedule, map and more">
+                                    <Icon n="palette" /> Manage Page
+                                  </Sb>
+                                )}
                                 <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); editEvent(ev); }}
                                   title="Edit event details">

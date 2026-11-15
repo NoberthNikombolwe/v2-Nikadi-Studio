@@ -1877,4 +1877,329 @@ DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE message_deliveries; EX
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE event_cards; EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 DO $$ BEGIN ALTER PUBLICATION supabase_realtime ADD TABLE scan_logs;   EXCEPTION WHEN duplicate_object OR undefined_object THEN NULL; END $$;
 
+-- ─────────────────────────────────────────────────────────────────────
+-- N. GUEST CARD WEB PAGES — #/g/<event-public-id>/<guest-public-id>
+--    Each event and each guest card gets an 8-character public ID
+--    (uppercase alphanumeric, excluding easily-confused characters).
+--    The public guest page shows the guest's personalised invitation card
+--    without requiring login. No personal contact data is exposed.
+-- ─────────────────────────────────────────────────────────────────────
+
+-- Generate a random 8-character public ID (no 0/O/I/1/L to avoid misreads)
+CREATE OR REPLACE FUNCTION public.gen_public_id() RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+  chars  TEXT := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  result TEXT := '';
+  i      INT;
+BEGIN
+  FOR i IN 1..8 LOOP
+    result := result || substr(chars, floor(random() * length(chars) + 1)::INT, 1);
+  END LOOP;
+  RETURN result;
+END $$;
+
+ALTER TABLE events      ADD COLUMN IF NOT EXISTS public_id TEXT UNIQUE;
+ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS public_id TEXT UNIQUE;
+
+-- Auto-assign a unique public_id to every new event
+CREATE OR REPLACE FUNCTION public.trg_events_public_id() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.public_id IS NULL THEN
+    LOOP
+      NEW.public_id := public.gen_public_id();
+      EXIT WHEN NOT EXISTS (SELECT 1 FROM events WHERE public_id = NEW.public_id);
+    END LOOP;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_events_public_id ON events;
+CREATE TRIGGER trg_events_public_id
+  BEFORE INSERT ON events FOR EACH ROW EXECUTE FUNCTION public.trg_events_public_id();
+
+-- Auto-assign a unique public_id to every new guest card
+CREATE OR REPLACE FUNCTION public.trg_event_cards_public_id() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.public_id IS NULL THEN
+    LOOP
+      NEW.public_id := public.gen_public_id();
+      EXIT WHEN NOT EXISTS (SELECT 1 FROM event_cards WHERE public_id = NEW.public_id);
+    END LOOP;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS trg_event_cards_public_id ON event_cards;
+CREATE TRIGGER trg_event_cards_public_id
+  BEFORE INSERT ON event_cards FOR EACH ROW EXECUTE FUNCTION public.trg_event_cards_public_id();
+
+-- Backfill any existing rows that don't yet have a public_id
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT id FROM events WHERE public_id IS NULL LOOP
+    UPDATE events SET public_id = public.gen_public_id() WHERE id = r.id;
+  END LOOP;
+  FOR r IN SELECT id FROM event_cards WHERE public_id IS NULL LOOP
+    UPDATE event_cards SET public_id = public.gen_public_id() WHERE id = r.id;
+  END LOOP;
+END $$;
+
+-- RPC used by #/g/<event-public-id>/<guest-public-id>: returns enough data to
+-- render the guest's personalised invitation page. No auth required; no phone
+-- numbers or private fields are returned.
+CREATE OR REPLACE FUNCTION public.public_guest_card(p_event_public_id TEXT, p_guest_public_id TEXT)
+RETURNS TABLE (
+  event_name     TEXT,
+  event_type     TEXT,
+  start_datetime TIMESTAMPTZ,
+  venue_name     TEXT,
+  guest_name     TEXT,
+  card_type      TEXT,
+  card_url       TEXT
+)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT e.username, e.event_type, e.start_datetime, e.venue_name,
+         c.name, c.card_type, c.card_url
+    FROM events e
+    JOIN event_cards c ON c.event_id = e.id
+   WHERE e.public_id  = upper(p_event_public_id)
+     AND c.public_id  = upper(p_guest_public_id)
+$$;
+REVOKE ALL ON FUNCTION public.public_guest_card(TEXT, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_guest_card(TEXT, TEXT) TO anon, authenticated;
+
+-- ── N. Guest link opt-in ───────────────────────────────────────────────────
+-- Events can opt into guest invitation links (default off). The public page
+-- is only served when this flag is TRUE so disabling the feature also
+-- prevents the page from loading even with a valid URL.
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS guest_link_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Regenerate RPC with the guest_link_enabled guard so the page returns no
+-- data when the organiser has not enabled the feature.
+CREATE OR REPLACE FUNCTION public.public_guest_card(p_event_public_id TEXT, p_guest_public_id TEXT)
+RETURNS TABLE (
+  event_name     TEXT,
+  event_type     TEXT,
+  start_datetime TIMESTAMPTZ,
+  venue_name     TEXT,
+  guest_name     TEXT,
+  card_type      TEXT,
+  card_url       TEXT
+)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT e.username, e.event_type, e.start_datetime, e.venue_name,
+         c.name, c.card_type, c.card_url
+    FROM events e
+    JOIN event_cards c ON c.event_id = e.id
+   WHERE e.public_id          = upper(p_event_public_id)
+     AND c.public_id          = upper(p_guest_public_id)
+     AND e.guest_link_enabled = TRUE
+$$;
+REVOKE ALL ON FUNCTION public.public_guest_card(TEXT, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_guest_card(TEXT, TEXT) TO anon, authenticated;
+
+-- ── O. Card codes, event pages & RSVP ────────────────────────────────────
+-- Each printed guest card carries a 4-character human-readable code
+-- (3 digits + 1 uppercase letter, randomly ordered) for quick visual
+-- identification at the door. The event_pages table holds the microsite
+-- settings the organiser can edit per event.
+
+-- 4-char card code generator: 3 digits + 1 letter from the unambiguous set,
+-- placed at a random one of the four positions (e.g. "7B42", "A395").
+CREATE OR REPLACE FUNCTION public.gen_card_code()
+RETURNS TEXT LANGUAGE plpgsql AS $$
+DECLARE
+  digits  TEXT := '0123456789';
+  letters TEXT := 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  d1 CHAR; d2 CHAR; d3 CHAR; l1 CHAR; pos INT;
+BEGIN
+  d1  := substr(digits,  (floor(random()*10))::int + 1, 1);
+  d2  := substr(digits,  (floor(random()*10))::int + 1, 1);
+  d3  := substr(digits,  (floor(random()*10))::int + 1, 1);
+  l1  := substr(letters, (floor(random()*23))::int + 1, 1);
+  pos := (floor(random()*4))::int;
+  RETURN CASE pos
+    WHEN 0 THEN l1 || d1 || d2 || d3
+    WHEN 1 THEN d1 || l1 || d2 || d3
+    WHEN 2 THEN d1 || d2 || l1 || d3
+    ELSE        d1 || d2 || d3 || l1
+  END;
+END;
+$$;
+
+ALTER TABLE event_cards ADD COLUMN IF NOT EXISTS card_code TEXT;
+
+CREATE OR REPLACE FUNCTION public.trg_fn_event_cards_card_code()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.card_code IS NULL THEN
+    NEW.card_code := gen_card_code();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_event_cards_card_code ON event_cards;
+CREATE TRIGGER trg_event_cards_card_code
+  BEFORE INSERT ON event_cards
+  FOR EACH ROW EXECUTE FUNCTION trg_fn_event_cards_card_code();
+
+-- Backfill existing cards
+UPDATE event_cards SET card_code = gen_card_code() WHERE card_code IS NULL;
+
+-- ── Event web-page settings ───────────────────────────────────────────────
+-- One row per event; organiser edits via EventPageModal in the admin UI.
+-- Images are stored in the "event-pages" storage bucket
+-- (create it in Supabase: Storage > New bucket "event-pages", set to public).
+CREATE TABLE IF NOT EXISTS event_pages (
+  id                   UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  event_id             UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  primary_color        TEXT DEFAULT '#00C2FF',
+  accent_color         TEXT DEFAULT '#7C3AED',
+  bg_color             TEXT DEFAULT '#0A0F1E',
+  text_color           TEXT DEFAULT '#FFFFFF',
+  hero_image_url       TEXT,
+  tagline              TEXT,
+  hosts                JSONB DEFAULT '[]'::jsonb,
+  schedule             JSONB DEFAULT '[]'::jsonb,
+  dress_code_text      TEXT,
+  dress_code_image_url TEXT,
+  gallery              JSONB DEFAULT '[]'::jsonb,
+  rsvp_enabled         BOOLEAN DEFAULT FALSE,
+  rsvp_message         TEXT,
+  venue_lat            DOUBLE PRECISION,
+  venue_lng            DOUBLE PRECISION,
+  venue_description    TEXT,
+  show_countdown       BOOLEAN DEFAULT TRUE,
+  created_at           TIMESTAMPTZ DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT event_pages_event_id_key UNIQUE (event_id)
+);
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS web_event_name   TEXT;
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS rsvp_notify_phone TEXT;
+
+-- ── RSVP submissions ──────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS event_rsvps (
+  id           UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  event_id     UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  card_id      UUID REFERENCES event_cards(id) ON DELETE SET NULL,
+  attending    BOOLEAN NOT NULL,
+  message      TEXT,
+  submitted_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ── RLS: authenticated only; anon submits only via submit_rsvp RPC ────────
+ALTER TABLE event_pages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_rsvps ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "auth_all_event_pages" ON event_pages;
+DROP POLICY IF EXISTS "auth_all_event_rsvps" ON event_rsvps;
+CREATE POLICY "auth_all_event_pages" ON event_pages FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "auth_all_event_rsvps" ON event_rsvps FOR ALL USING (auth.role() = 'authenticated');
+
+REVOKE ALL ON TABLE event_pages FROM anon;
+REVOKE ALL ON TABLE event_rsvps FROM anon;
+GRANT ALL ON TABLE event_pages TO authenticated;
+GRANT ALL ON TABLE event_rsvps TO authenticated;
+
+-- ── Public RPC: full event page data ─────────────────────────────────────
+-- Returns all data the public microsite needs in one JSONB object.
+-- p_guest_public_id is optional; pass NULL (or omit) for a plain event page.
+CREATE OR REPLACE FUNCTION public.public_event_page_data(
+  p_event_public_id TEXT,
+  p_guest_public_id TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_event events%ROWTYPE;
+  v_page  event_pages%ROWTYPE;
+  v_card  event_cards%ROWTYPE;
+BEGIN
+  SELECT * INTO v_event FROM events
+  WHERE public_id = upper(p_event_public_id)
+    AND guest_link_enabled = TRUE;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+
+  SELECT * INTO v_page FROM event_pages WHERE event_id = v_event.id;
+
+  IF p_guest_public_id IS NOT NULL THEN
+    SELECT * INTO v_card FROM event_cards
+    WHERE event_id = v_event.id
+      AND public_id = upper(p_guest_public_id);
+  END IF;
+
+  RETURN jsonb_build_object(
+    'event_name',     v_event.username,
+    'event_type',     v_event.event_type,
+    'start_datetime', v_event.start_datetime,
+    'end_datetime',   v_event.end_datetime,
+    'venue_name',     v_event.venue_name,
+    'venue_address',  v_event.venue_address,
+    'page_settings',  CASE WHEN v_page.id IS NOT NULL THEN jsonb_build_object(
+      'primary_color',       v_page.primary_color,
+      'accent_color',        v_page.accent_color,
+      'bg_color',            v_page.bg_color,
+      'text_color',          v_page.text_color,
+      'hero_image_url',      v_page.hero_image_url,
+      'tagline',             v_page.tagline,
+      'hosts',               v_page.hosts,
+      'schedule',            v_page.schedule,
+      'dress_code_text',     v_page.dress_code_text,
+      'dress_code_image_url', v_page.dress_code_image_url,
+      'gallery',             v_page.gallery,
+      'rsvp_enabled',        v_page.rsvp_enabled,
+      'rsvp_message',        v_page.rsvp_message,
+      'venue_lat',           v_page.venue_lat,
+      'venue_lng',           v_page.venue_lng,
+      'venue_description',   v_page.venue_description,
+      'show_countdown',      v_page.show_countdown,
+      'web_event_name',      v_page.web_event_name
+    ) ELSE '{}'::jsonb END,
+    'guest_name', v_card.name,
+    'card_type',  v_card.card_type,
+    'card_url',   v_card.card_url,
+    'card_code',  v_card.card_code
+  );
+END;
+$$;
+REVOKE ALL ON FUNCTION public.public_event_page_data(TEXT, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.public_event_page_data(TEXT, TEXT) TO anon, authenticated;
+
+-- ── Public RPC: submit RSVP ───────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.submit_rsvp(
+  p_event_public_id TEXT,
+  p_guest_public_id TEXT,
+  p_attending       BOOLEAN,
+  p_message         TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_event_id UUID;
+  v_card_id  UUID;
+BEGIN
+  SELECT id INTO v_event_id FROM events
+  WHERE public_id = upper(p_event_public_id)
+    AND guest_link_enabled = TRUE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', FALSE, 'error', 'Event not found');
+  END IF;
+
+  SELECT id INTO v_card_id FROM event_cards
+  WHERE event_id = v_event_id
+    AND public_id = upper(p_guest_public_id);
+
+  INSERT INTO event_rsvps (event_id, card_id, attending, message)
+  VALUES (v_event_id, v_card_id, p_attending, p_message);
+
+  RETURN jsonb_build_object('ok', TRUE);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.submit_rsvp(TEXT, TEXT, BOOLEAN, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.submit_rsvp(TEXT, TEXT, BOOLEAN, TEXT) TO anon, authenticated;
+
 NOTIFY pgrst, 'reload schema';
