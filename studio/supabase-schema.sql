@@ -2078,6 +2078,8 @@ CREATE TABLE IF NOT EXISTS event_pages (
   updated_at           TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT event_pages_event_id_key UNIQUE (event_id)
 );
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS web_event_name   TEXT;
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS rsvp_notify_phone TEXT;
 
 -- ── RSVP submissions ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS event_rsvps (
@@ -2154,7 +2156,8 @@ BEGIN
       'venue_lat',           v_page.venue_lat,
       'venue_lng',           v_page.venue_lng,
       'venue_description',   v_page.venue_description,
-      'show_countdown',      v_page.show_countdown
+      'show_countdown',      v_page.show_countdown,
+      'web_event_name',      v_page.web_event_name
     ) ELSE '{}'::jsonb END,
     'guest_name', v_card.name,
     'card_type',  v_card.card_type,
