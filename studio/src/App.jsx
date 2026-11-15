@@ -832,7 +832,7 @@ const SMS = { pending:"pending", sent:"sent", delivered:"delivered", failed:"fai
 // and scheduled WhatsApp sends can attach them
 // resetAt: when a new spreadsheet last reset the guest's send statuses (status_reset_at) —
 // delivery reports of sends before it no longer speak for the guest
-const cardFromRow = (c) => ({ publicId: c.public_id || null, cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
+const cardFromRow = (c) => ({ publicId: c.public_id || null, cardCode: c.card_code || null, cardUrl: c.card_url || null, uploadStatus: c.card_url ? "uploaded" : "idle", resetAt: c.status_reset_at || null });
 // True when a re-uploaded row still has the saved card's name and card type, so the
 // card image made for it still shows the right thing
 const sameCardFace = (r, c) => String(r.name || "").trim() === String(c.name || "").trim()
@@ -3343,7 +3343,7 @@ function CardFontsSettings({ access, canEdit }) {
    totals, share the public scan page) and <CallsTab> (guest confirmation calls).
    Check-ins only ever go through the scan_card() database function.
 ══════════════════════════════════════════════════════════════════════════ */
-const CARD_COLS = "id,public_id,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
+const CARD_COLS = "id,public_id,card_code,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
 
 // The open event's cards from the database, kept live with realtime updates
 function useEventCards(eventId) {
@@ -5707,6 +5707,294 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
   );
 }
 
+// ── EventPageModal ────────────────────────────────────────────────────────
+// Admin modal to manage the public event microsite (colours, hero image,
+// hosts, schedule, dress code, gallery, RSVP, map). Saves to event_pages.
+const EP_DEFAULTS = {
+  primary_color:"#00C2FF", accent_color:"#7C3AED", bg_color:"#0A0F1E", text_color:"#FFFFFF",
+  hero_image_url:"", tagline:"", hosts:[], schedule:[], dress_code_text:"", dress_code_image_url:"",
+  gallery:[], rsvp_enabled:false, rsvp_message:"", venue_lat:"", venue_lng:"", venue_description:"", show_countdown:true,
+};
+function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
+  const [loading, setLoading] = useState(true);
+  const [pageId,  setPageId]  = useState(null);
+  const [form,    setForm]    = useState(EP_DEFAULTS);
+  const [busy,    setBusy]    = useState(false);
+  const [section, setSection] = useState("appearance");
+  const [uploading, setUploading] = useState(null);
+
+  useEffect(() => {
+    if (!sb) return;
+    sb.from("event_pages").select("*").eq("event_id", eventRow.id).maybeSingle().then(({ data }) => { // eslint-disable-line react-hooks/exhaustive-deps
+      if (data) { setPageId(data.id); setForm({ ...EP_DEFAULTS, ...data }); }
+      setLoading(false);
+    });
+  }, [eventRow.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const setB = (k) => (v) => setForm(f => ({ ...f, [k]: v }));
+
+  const uploadImg = async (file, slot) => {
+    if (!sb || !file) return;
+    setUploading(slot);
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
+    const path = `${eventRow.id}/${slot}_${Date.now()}.${ext}`;
+    const { error } = await sb.storage.from("event-pages").upload(path, file, { contentType: file.type, upsert: true });
+    setUploading(null);
+    if (error) { showToast(`Upload failed: ${error.message}`, "warn"); return; }
+    const url = sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl;
+    setForm(f => ({ ...f, [slot]: url }));
+    showToast("Image uploaded", "success");
+  };
+
+  const save = async () => {
+    if (!sb) return;
+    setBusy(true);
+    const payload = {
+      event_id:eventRow.id, ...form,
+      venue_lat: form.venue_lat !== "" ? parseFloat(form.venue_lat) : null,
+      venue_lng: form.venue_lng !== "" ? parseFloat(form.venue_lng) : null,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = pageId
+      ? await sb.from("event_pages").update(payload).eq("id", pageId)
+      : await sb.from("event_pages").insert(payload).select("id").single().then(({ data, error: e }) => { if (data) setPageId(data.id); return { error: e }; });
+    setBusy(false);
+    if (error) { showToast(`Could not save: ${error.message}`, "warn"); return; }
+    showToast("Page settings saved", "success");
+  };
+
+  const addHost     = () => setForm(f => ({ ...f, hosts:    [...f.hosts,    { name:"", role:"", photo_url:"" }] }));
+  const removeHost  = (i) => setForm(f => ({ ...f, hosts:    f.hosts.filter((_,j) => j!==i) }));
+  const setHost     = (i, k, v) => setForm(f => ({ ...f, hosts: f.hosts.map((h,j) => j===i ? {...h,[k]:v} : h) }));
+
+  const addSched    = () => setForm(f => ({ ...f, schedule: [...f.schedule, { time:"", title:"", description:"" }] }));
+  const removeSched = (i) => setForm(f => ({ ...f, schedule: f.schedule.filter((_,j) => j!==i) }));
+  const setSched    = (i, k, v) => setForm(f => ({ ...f, schedule: f.schedule.map((s,j) => j===i ? {...s,[k]:v} : s) }));
+
+  const addGallery    = () => setForm(f => ({ ...f, gallery: [...f.gallery, ""] }));
+  const removeGallery = (i) => setForm(f => ({ ...f, gallery: f.gallery.filter((_,j) => j!==i) }));
+  const setGallery    = (i, v) => setForm(f => ({ ...f, gallery: f.gallery.map((u,j) => j===i ? v : u) }));
+
+  const SECTIONS = [
+    { id:"appearance", label:"Appearance",  icon:"palette" },
+    { id:"hosts",      label:"Hosts / MC",  icon:"users"   },
+    { id:"schedule",   label:"Ratiba",      icon:"clock"   },
+    { id:"dresscode",  label:"Dress Code",  icon:"star"    },
+    { id:"gallery",    label:"Gallery",     icon:"image"   },
+    { id:"rsvp",       label:"RSVP",        icon:"check"   },
+    { id:"location",   label:"Location",    icon:"map"     },
+  ];
+
+  const imgUploadRow = (label, slot, busy) => (
+    <div style={{marginBottom:12}}>
+      <label className="nk-label">{label}</label>
+      {form[slot] && <img src={form[slot]} alt="" style={{display:"block",maxHeight:120,borderRadius:8,marginBottom:6,maxWidth:"100%"}} />}
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <input className="nk-input" style={{flex:"1 1 200px",marginBottom:0}} placeholder="Image URL" value={form[slot]||""} onChange={set(slot)} />
+        <label className="nk-btn nk-btn-ghost" style={{cursor:"pointer",whiteSpace:"nowrap"}}>
+          {busy===slot ? <><Icon n="loader" /> Uploading…</> : <><Icon n="upload" /> Upload</>}
+          <input type="file" accept="image/*" style={{display:"none"}} onChange={e => { if (e.target.files[0]) uploadImg(e.target.files[0], slot); e.target.value=""; }} disabled={busy===slot} />
+        </label>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="nk-overlay" role="dialog" aria-modal="true" aria-label="Manage event page">
+      <div className="nk-modal" style={{maxWidth:860,width:"100%",display:"flex",flexDirection:"column",maxHeight:"90vh"}}>
+        <div className="nk-modal-head">
+          <div className="nk-modal-title"><Icon n="palette" /> Manage event page — {eventRow.username}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close"><Icon n="x" /></button>
+        </div>
+        {loading ? (
+          <div style={{padding:40,textAlign:"center",color:N.textDim}}><Icon n="loader" /> Loading…</div>
+        ) : (
+          <div style={{display:"flex",flex:1,overflow:"hidden",minHeight:0}}>
+            {/* Section nav */}
+            <nav style={{width:150,flexShrink:0,borderRight:`1px solid ${N.border}`,padding:"8px 0",display:"flex",flexDirection:"column",gap:2,overflowY:"auto"}}>
+              {SECTIONS.map(s => (
+                <button key={s.id} type="button" onClick={() => setSection(s.id)}
+                  style={{display:"flex",alignItems:"center",gap:8,padding:"9px 14px",border:"none",background:section===s.id ? alpha(N.accent,"22") : "transparent",
+                    color:section===s.id ? N.accent : N.textMid,fontFamily:"inherit",fontSize:12,fontWeight:section===s.id?700:400,cursor:"pointer",textAlign:"left",borderRadius:0}}>
+                  <Icon n={s.icon} size="0.95em" />{s.label}
+                </button>
+              ))}
+            </nav>
+            {/* Section content */}
+            <div style={{flex:1,overflowY:"auto",padding:"20px 24px"}}>
+
+              {section==="appearance" && (
+                <div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+                    {[["primary_color","Primary colour"],["accent_color","Accent colour"],["bg_color","Background colour"],["text_color","Text colour"]].map(([k,l]) => (
+                      <div key={k}>
+                        <label className="nk-label">{l}</label>
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <input type="color" value={form[k]||"#000000"} onChange={set(k)}
+                            style={{width:40,height:36,border:`1px solid ${N.border}`,borderRadius:6,background:"transparent",cursor:"pointer",padding:2}} />
+                          <input className="nk-input" style={{flex:1,marginBottom:0,fontFamily:"JetBrains Mono, monospace",fontSize:12}} value={form[k]||""} onChange={set(k)} placeholder="#rrggbb" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{marginBottom:12}}>
+                    <label className="nk-label">Tagline</label>
+                    <input className="nk-input" placeholder="e.g. Tunaalikuwa kwa furaha" value={form.tagline||""} onChange={set("tagline")} />
+                  </div>
+                  {imgUploadRow("Hero image (banner)", "hero_image_url", uploading)}
+                  <div style={{marginTop:16,padding:"10px 14px",background:alpha(N.navy700,"cc"),border:`1px solid ${N.border}`,borderRadius:10}}>
+                    <Toggle checked={!!form.show_countdown} onChange={setB("show_countdown")} label="Show countdown timer in hero" />
+                  </div>
+                </div>
+              )}
+
+              {section==="hosts" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Add the host(s), MC or main couple</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addHost}><Icon n="plus" /> Add</button>
+                  </div>
+                  {form.hosts.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No hosts added yet.</div>}
+                  {form.hosts.map((h,i) => (
+                    <div key={i} style={{border:`1px solid ${N.border}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                        <div><label className="nk-label">Name</label><input className="nk-input" value={h.name||""} onChange={e => setHost(i,"name",e.target.value)} placeholder="Jina" /></div>
+                        <div><label className="nk-label">Role / Title</label><input className="nk-input" value={h.role||""} onChange={e => setHost(i,"role",e.target.value)} placeholder="e.g. Bibi Harusi" /></div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                        <div style={{flex:1}}>
+                          <label className="nk-label">Photo URL</label>
+                          <input className="nk-input" style={{marginBottom:0}} value={h.photo_url||""} onChange={e => setHost(i,"photo_url",e.target.value)} placeholder="https://…" />
+                        </div>
+                        <button className="nk-btn nk-btn-ghost" style={{color:N.red,marginBottom:0}} onClick={() => removeHost(i)}><Icon n="trash" /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="schedule" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Ratiba ya siku husika</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addSched}><Icon n="plus" /> Add item</button>
+                  </div>
+                  {form.schedule.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No schedule items yet.</div>}
+                  {form.schedule.map((s,i) => (
+                    <div key={i} style={{border:`1px solid ${N.border}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 2fr",gap:8,marginBottom:8}}>
+                        <div><label className="nk-label">Time</label><input className="nk-input" value={s.time||""} onChange={e => setSched(i,"time",e.target.value)} placeholder="10:00" /></div>
+                        <div><label className="nk-label">Title</label><input className="nk-input" value={s.title||""} onChange={e => setSched(i,"title",e.target.value)} placeholder="e.g. Mapokezi" /></div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                        <div style={{flex:1}}>
+                          <label className="nk-label">Description (optional)</label>
+                          <input className="nk-input" style={{marginBottom:0}} value={s.description||""} onChange={e => setSched(i,"description",e.target.value)} placeholder="Details…" />
+                        </div>
+                        <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => removeSched(i)}><Icon n="trash" /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="dresscode" && (
+                <div>
+                  <div style={{marginBottom:12}}>
+                    <label className="nk-label">Dress code description</label>
+                    <textarea className="nk-input" rows={4} style={{resize:"vertical"}} placeholder="Describe the expected dress code…" value={form.dress_code_text||""} onChange={set("dress_code_text")} />
+                  </div>
+                  {imgUploadRow("Dress code image (optional)", "dress_code_image_url", uploading)}
+                </div>
+              )}
+
+              {section==="gallery" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Maharusi / event photos shown in a grid</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addGallery}><Icon n="plus" /> Add photo URL</button>
+                  </div>
+                  {form.gallery.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No gallery images yet. Add a URL or upload.</div>}
+                  {form.gallery.map((url,i) => (
+                    <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
+                      {url && <img src={url} alt="" style={{width:48,height:48,objectFit:"cover",borderRadius:6,flexShrink:0}} />}
+                      <input className="nk-input" style={{flex:1,marginBottom:0}} value={url||""} onChange={e => setGallery(i,e.target.value)} placeholder="https://…" />
+                      <label className="nk-btn nk-btn-ghost" style={{flexShrink:0,cursor:"pointer"}}>
+                        {uploading===`gallery_${i}` ? <Icon n="loader" /> : <Icon n="upload" />}
+                        <input type="file" accept="image/*" style={{display:"none"}} onChange={async e => {
+                          if (!e.target.files[0]) return;
+                          setUploading(`gallery_${i}`);
+                          const file = e.target.files[0];
+                          const ext = (file.name.split(".").pop()||"jpg").toLowerCase();
+                          const path = `${eventRow.id}/gallery_${Date.now()}.${ext}`;
+                          const { error } = await sb.storage.from("event-pages").upload(path, file, { contentType: file.type, upsert: true });
+                          setUploading(null);
+                          if (error) { showToast(`Upload failed: ${error.message}`, "warn"); e.target.value=""; return; }
+                          setGallery(i, sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl);
+                          e.target.value="";
+                        }} />
+                      </label>
+                      <button className="nk-btn nk-btn-ghost" style={{color:N.red,flexShrink:0}} onClick={() => removeGallery(i)}><Icon n="trash" /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="rsvp" && (
+                <div>
+                  <div style={{padding:"12px 14px",background:alpha(N.navy700,"cc"),border:`1px solid ${N.border}`,borderRadius:10,marginBottom:16}}>
+                    <Toggle checked={!!form.rsvp_enabled} onChange={setB("rsvp_enabled")} label="Enable RSVP on the invitation page" />
+                    <div style={{fontSize:12,color:N.textDim,marginTop:-6,paddingLeft:26,lineHeight:1.5}}>
+                      Guests can confirm attendance and leave a congratulations message.
+                    </div>
+                  </div>
+                  {form.rsvp_enabled && (
+                    <div>
+                      <label className="nk-label">RSVP prompt message (shown above the RSVP form)</label>
+                      <textarea className="nk-input" rows={3} style={{resize:"vertical"}} value={form.rsvp_message||""} onChange={set("rsvp_message")} placeholder="e.g. Tafadhali tuthibitishie kama utafika…" />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {section==="location" && (
+                <div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                    <div>
+                      <label className="nk-label">Latitude</label>
+                      <input className="nk-input" type="number" step="any" placeholder="-6.7924" value={form.venue_lat||""} onChange={set("venue_lat")} />
+                    </div>
+                    <div>
+                      <label className="nk-label">Longitude</label>
+                      <input className="nk-input" type="number" step="any" placeholder="39.2083" value={form.venue_lng||""} onChange={set("venue_lng")} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="nk-label">Venue description / directions</label>
+                    <textarea className="nk-input" rows={3} style={{resize:"vertical"}} placeholder="e.g. Ndani ya Dar es Salaam, karibu na…" value={form.venue_description||""} onChange={set("venue_description")} />
+                  </div>
+                  <div style={{marginTop:12,fontSize:12,color:N.textDim,lineHeight:1.6}}>
+                    The map uses Leaflet.js with a satellite/street toggle and a Google Maps directions button.
+                    Get coordinates from Google Maps: right-click a location and copy the numbers shown.
+                  </div>
+                </div>
+              )}
+
+            </div>
+          </div>
+        )}
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="nk-btn nk-btn-primary" onClick={save} disabled={busy||loading}>
+            {busy ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> Save Page Settings</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
 function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard }) {
   const { cards, error, load, patch } = useEventCards(eventId);
@@ -5785,7 +6073,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
           <tbody>
             {rows.map(c => (
               <tr key={c.id}>
-                <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}</div></td>
+                <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}{c.card_code ? <> · <span style={{fontFamily:"JetBrains Mono, monospace",letterSpacing:1}}>{c.card_code}</span></> : null}</div></td>
                 <td>
                   {c.phone ? (
                     <div className="nk-row-actions">
@@ -6917,6 +7205,7 @@ export default function App() {
   const [customerSel, setCustomerSel] = useState(null);   // customer open in the Customers tab
   const [overviewId,  setOverviewId]  = useState(null);   // event shown in <EventOverview>
   const [guestLinksEv, setGuestLinksEv] = useState(null); // event shown in <GuestLinksModal>
+  const [eventPageEv,  setEventPageEv]  = useState(null); // event shown in <EventPageModal>
   useEffect(() => { if (userId) crm.loadAll(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the per-customer event counts current as events are created, edited or deleted
   useEffect(() => { if (userId) crm.loadEventCounts(); }, [savedEvents]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -8619,6 +8908,10 @@ export default function App() {
         {guestLinksEv && (
           <GuestLinksModal eventRow={guestLinksEv} onClose={() => setGuestLinksEv(null)} showToast={showToast} />
         )}
+        {/* Event web page settings */}
+        {eventPageEv && (
+          <EventPageModal eventRow={eventPageEv} onClose={() => setEventPageEv(null)} showToast={showToast} supabase={supabase} />
+        )}
 
         {/* Event overview: everything related to one event */}
         {overviewId && (
@@ -9223,6 +9516,13 @@ export default function App() {
                                     onClick={(e)=>{ e.stopPropagation(); setGuestLinksEv(ev); }}
                                     title="See every guest's personalised invitation link">
                                     <Icon n="link" /> Guest Links
+                                  </Sb>
+                                )}
+                                {ev.public_id && ev.guest_link_enabled && (
+                                  <Sb bg={N.navy600} col={N.purple} border={alpha(N.purple,"44")} className="m-hide"
+                                    onClick={(e)=>{ e.stopPropagation(); setEventPageEv(ev); }}
+                                    title="Edit the public event web page: colours, images, schedule, map and more">
+                                    <Icon n="palette" /> Manage Page
                                   </Sb>
                                 )}
                                 <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
