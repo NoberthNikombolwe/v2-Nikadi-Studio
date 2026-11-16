@@ -82,6 +82,8 @@ const loadXlsx  = () => import("xlsx");
 // production (it adds the provider token). At module level so pop-ups outside <App> (a
 // schedule handed to NextSMS) send the same way as Send All.
 const SMS_BASE = import.meta.env.DEV ? "/sms-proxy" : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-sms`;
+// Canonical public origin for shareable links (set VITE_SITE_URL on Heroku to the custom domain)
+const SITE_ORIGIN = (import.meta.env.VITE_SITE_URL || "").replace(/\/$/, "") || location.origin;
 const SMS_API = `${SMS_BASE}/api/sms/v2`;
 // Bearer token for the SMS/WhatsApp proxy. Dev: the provider token from
 // .env.development.local (the Vite proxy forwards it as-is). Production: the
@@ -5421,7 +5423,7 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
   const { cards } = useEventCards(eventRow?.id);
   const [copied, setCopied] = useState(null);
   const [q, setQ] = useState("");
-  const base = location.origin;
+  const base = SITE_ORIGIN;
   const copyLink = (c) => {
     const url = `${base}/g/${eventRow.public_id}/${c.public_id}`;
     navigator.clipboard?.writeText(url)
@@ -5900,7 +5902,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                       <Sb bg="transparent" col={N.sky} border={N.border}
                         label={`Copy invitation link for ${c.name}`}
                         onClick={() => {
-                          const url = `${location.origin}/g/${eventRow.public_id}/${c.public_id}`;
+                          const url = `${SITE_ORIGIN}/g/${eventRow.public_id}/${c.public_id}`;
                           navigator.clipboard?.writeText(url).then(() => showToast(`Link copied for ${c.name}`, "success")).catch(() => showToast("Could not copy — try manually", "warn"));
                         }}>
                         <Icon n="link" />
@@ -7925,7 +7927,7 @@ export default function App() {
   const buildSmsMsg = (rec, body = smsMessage) => {
     const text = fillTemplate(body, rec);
     const link = openEventRow?.guest_link_enabled && openEventRow?.public_id && rec?.publicId
-      ? `\n${location.origin}/g/${openEventRow.public_id}/${rec.publicId}`
+      ? `\n${SITE_ORIGIN}/g/${openEventRow.public_id}/${rec.publicId}`
       : "";
     return text + link;
   };
