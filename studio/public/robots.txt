@@ -1,4 +1,4 @@
-# Nikadi Studio — https://www.nikadi.co.tz
+# Nikadi Studio — https://www.studio.nikadi.co.tz
 # Allow search engines to crawl the site and discover public event pages.
 
 User-agent: *
@@ -16,4 +16,4 @@ Disallow: /
 User-agent: Mediapartners-Google
 Disallow: /
 
-Sitemap: https://www.nikadi.co.tz/sitemap.xml
+Sitemap: https://www.studio.nikadi.co.tz/sitemap.xml
