@@ -2730,7 +2730,7 @@ function useAccess({ userId, email, showToast }) {
     setBusy(true);
     const id = row[idKey];
     const body = { ...row }; if (idKey === "id") delete body.id;
-    const q = id && idKey === "id" ? supabase.from(table).update(body).eq("id", id) : supabase.from(table).upsert([row]);
+    const q = id && idKey === "id" ? supabase.from(table).update(body).eq("id", id) : supabase.from(table).upsert([body]);
     const { error } = await q;
     setBusy(false);
     if (error) return fail(`Could not save ${what}`, error);
