@@ -1268,7 +1268,7 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
 // Create/Edit form modal for an event's details (username, type, venue, dates, status).
 // Purely local form state until "Save Event" calls onSave(form) — the parent (App)
 // owns the actual Supabase write via persistEvent/onModalSave.
-function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
+function EventModal({ initial, onSave, onClose, saving, customers = [], eventTypes = [] }) {
   const [form, setForm] = useState({ ...BLANK_EVENT, ...initial });
   const [priceError, setPriceError] = useState(null);
   // Returns a field-specific onChange handler that writes one key into the form state
@@ -1298,7 +1298,7 @@ function EventModal({ initial, onSave, onClose, saving, customers = [] }) {
               <label className="nk-label">Event Type</label>
               <select className="nk-select" value={form.event_type} onChange={set("event_type")}>
                 <option value="">— Select —</option>
-                {EVENT_TYPES.map(t => <option key={t}>{t}</option>)}
+                {(eventTypes.length ? eventTypes : EVENT_TYPES).map(t => <option key={t}>{t}</option>)}
               </select>
             </div>
             <div>
@@ -1530,7 +1530,7 @@ function PackagePicker({ value, onChange }) {
 }
 
 // Create / edit a lead. Validates with validateLead before calling onSave(form).
-function LeadModal({ initial, onSave, onClose, saving }) {
+function LeadModal({ initial, onSave, onClose, saving, eventTypes = [] }) {
   const [form, setForm] = useState(() =>
     Object.fromEntries(Object.keys(BLANK_LEAD).map(k => [k, initial?.[k] == null ? "" : String(initial[k])])));
   const [errors, setErrors] = useState({});
@@ -1558,7 +1558,7 @@ function LeadModal({ initial, onSave, onClose, saving }) {
             <Field label="Event Type">
               <select className="nk-select" value={form.event_type} onChange={set("event_type")}>
                 <option value="">— Select —</option>
-                {EVENT_TYPES.map(t => <option key={t}>{t}</option>)}
+                {(eventTypes.length ? eventTypes : EVENT_TYPES).map(t => <option key={t}>{t}</option>)}
               </select>
             </Field>
             <Field label="Event Date" error={errors.event_date}>
@@ -2687,7 +2687,7 @@ const isMissingTable = (e) => !!e && (e.code === "42P01" || e.code === "PGRST205
 
 function useAccess({ userId, email, showToast }) {
   const [st, setSt] = useState({ loading: true, setupMissing: false, me: null, matrix: null,
-    settings: DEFAULT_SETTINGS, waTemplates: [], senderIds: [], cardRules: [] });
+    settings: DEFAULT_SETTINGS, waTemplates: [], senderIds: [], cardRules: [], eventTypeOptions: [] });
   const [users, setUsers] = useState(null);
   const [busy, setBusy]   = useState(false);
   const fail = (what, e) => { showToast(`${what}: ${errMsg(e)}`, "warn"); return null; };
@@ -2701,17 +2701,19 @@ function useAccess({ userId, email, showToast }) {
       setSt(s => ({ ...s, loading: false, setupMissing: true, me: { email, role: "superuser", active: true } }));
       return;
     }
-    const [perms, sets, tpl, snd, rules, roleRows] = await Promise.all([
+    const [perms, sets, tpl, snd, rules, roleRows, evTypes] = await Promise.all([
       supabase.from("role_permissions").select("*"),
       supabase.from("app_settings").select("*"),
       supabase.from("wa_templates").select("*").order("sort").order("name"),
       supabase.from("sender_ids").select("*").order("sender_id"),
       supabase.from("card_type_rules").select("*").order("sort").order("name"),
       supabase.from("app_roles").select("*").order("sort"),
+      supabase.from("event_type_options").select("*").order("sort").order("name"),
     ]);
     setSt({ loading: false, setupMissing: false, me: me.data || null, roleRows: roleRows.data || [],
       matrix: perms.error ? null : matrixFromRows(perms.data),
-      settings: settingsFromRows(sets.data || []), waTemplates: tpl.data || [], senderIds: snd.data || [], cardRules: rules.data || [] });
+      settings: settingsFromRows(sets.data || []), waTemplates: tpl.data || [], senderIds: snd.data || [],
+      cardRules: rules.data || [], eventTypeOptions: isMissingTable(evTypes.error) ? [] : (evTypes.data || []) });
     if (me.data?.active) supabase.rpc("touch_last_seen").then(() => {}, () => {});
   };
   useEffect(() => { loadAll(); }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- loads data from the database
@@ -2858,13 +2860,14 @@ const RoleBadge = ({ role }) => role ? <Pill tone={ROLE_TONE[role] || "info"}>{R
 // Settings tab: users, roles & permissions, WhatsApp templates, sender IDs, card types, general
 function SettingsTab({ access, askDialog, myEmail, showToast }) {
   const sections = [
-    ["users",     "Users",                "users",    access.can("users")],
-    ["perms",     "Roles & permissions",  "shield",   access.can("users")],
-    ["templates", "WhatsApp templates",   "whatsapp", access.can("settings")],
-    ["senders",   "Sender IDs",           "sms",      access.can("settings")],
-    ["cards",     "Card types",           "contact",  access.can("settings")],
-    ["storage",   "Storage",              "database", access.can("settings")],
-    ["general",   "General",              "settings", access.can("settings")],
+    ["users",      "Users",                "users",    access.can("users")],
+    ["perms",      "Roles & permissions",  "shield",   access.can("users")],
+    ["templates",  "WhatsApp templates",   "whatsapp", access.can("settings")],
+    ["senders",    "Sender IDs",           "sms",      access.can("settings")],
+    ["cards",      "Card types",           "contact",  access.can("settings")],
+    ["eventtypes", "Event types",          "folder",   access.can("settings")],
+    ["storage",    "Storage",              "database", access.can("settings")],
+    ["general",    "General",              "settings", access.can("settings")],
   ].filter(s => s[3]);
   const [sec, setSec] = useState(sections[0]?.[0] || "users");
   if (access.setupMissing) return (
@@ -2887,13 +2890,14 @@ function SettingsTab({ access, askDialog, myEmail, showToast }) {
           </button>
         ))}
       </div>
-      {sec === "users"     && <UsersSettings access={access} askDialog={askDialog} myEmail={myEmail} />}
-      {sec === "perms"     && <PermissionsSettings access={access} />}
-      {sec === "templates" && <TemplatesSettings access={access} askDialog={askDialog} />}
-      {sec === "senders"   && <SendersSettings access={access} askDialog={askDialog} />}
-      {sec === "cards"     && <CardTypeSettings access={access} askDialog={askDialog} />}
-      {sec === "storage"   && <StorageSettings access={access} askDialog={askDialog} showToast={showToast} />}
-      {sec === "general"   && <GeneralSettings access={access} />}
+      {sec === "users"      && <UsersSettings access={access} askDialog={askDialog} myEmail={myEmail} />}
+      {sec === "perms"      && <PermissionsSettings access={access} />}
+      {sec === "templates"  && <TemplatesSettings access={access} askDialog={askDialog} />}
+      {sec === "senders"    && <SendersSettings access={access} askDialog={askDialog} />}
+      {sec === "cards"      && <CardTypeSettings access={access} askDialog={askDialog} />}
+      {sec === "eventtypes" && <EventTypesSettings access={access} askDialog={askDialog} />}
+      {sec === "storage"    && <StorageSettings access={access} askDialog={askDialog} showToast={showToast} />}
+      {sec === "general"    && <GeneralSettings access={access} />}
     </div>
   );
 }
@@ -3231,6 +3235,36 @@ function CardTypeSettings({ access, askDialog }) {
           </div>
         )} />
     </>
+  );
+}
+
+function EventTypesSettings({ access, askDialog }) {
+  const canEdit = access.can("settings", "edit");
+  return (
+    <ListEditor title="Event types" canEdit={canEdit} busy={access.busy} rows={access.eventTypeOptions} rowLabel={r => r.name}
+      hint="Types shown in the Event type dropdown when creating or editing an event or lead. Active types appear in the dropdown; inactive ones are hidden."
+      blank={{ name: "", sort: (access.eventTypeOptions?.length || 0) + 1, active: true }}
+      columns={[
+        { h: "Event type", cell: r => <span style={{fontWeight:700,color:N.text}}>{r.name}</span> },
+        { h: "Status",     cell: r => r.active !== false ? <Pill tone="good">Active</Pill> : <Pill tone="bad">Off</Pill> },
+      ]}
+      validate={f => {
+        const errors = {};
+        if (!f.name?.trim()) errors.name = "Required";
+        else if ((access.eventTypeOptions || []).some(x => x.id !== f.id && x.name.trim().toLowerCase() === f.name.trim().toLowerCase())) errors.name = "Already exists";
+        return errors;
+      }}
+      onSave={f => access.save("event_type_options", { id: f.id, name: f.name.trim(), sort: Number(f.sort) || 0, active: f.active !== false }, "event type")}
+      onDelete={async r => (await confirmDelete(askDialog, `event type ${r.name}`)) && access.remove("event_type_options", r.id, "event type")}
+      renderForm={(f, set, e) => (
+        <>
+          <div className="nk-form-grid">
+            <Field label="Event type *" error={e.name}><input className="nk-input" autoFocus value={f.name || ""} onChange={x => set(v => ({ ...v, name: x.target.value }))} placeholder="e.g. Wedding" /></Field>
+            <Field label="Order"><input className="nk-input" type="number" min="0" value={f.sort ?? 0} onChange={x => set(v => ({ ...v, sort: x.target.value }))} /></Field>
+          </div>
+          <Toggle checked={f.active !== false} onChange={c => set(v => ({ ...v, active: c }))} label="Active (shown in dropdowns)" />
+        </>
+      )} />
   );
 }
 
@@ -6099,7 +6133,7 @@ function CommentModal({ card: c, onSave, onClose }) {
 
 // Leads tab: pipeline numbers, filterable list (open leads with due follow-ups first) and
 // the selected lead's details, follow-ups and actions (qualify → customer, lost, reopen)
-function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
+function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer, eventTypes = [] }) {
   const canDelete = useCanDelete();
   const [filter,  setFilter]  = useState({ status:"open", q:"" });
   const [editing, setEditing] = useState(null);   // null | {} (new) | lead row
@@ -6245,7 +6279,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer }) {
         )}
       </div>
 
-      {editing && <LeadModal initial={editing} saving={crm.busy} onSave={onSave} onClose={() => setEditing(null)} />}
+      {editing && <LeadModal initial={editing} saving={crm.busy} onSave={onSave} onClose={() => setEditing(null)} eventTypes={eventTypes} />}
     </div>
   );
 }
@@ -8834,7 +8868,7 @@ export default function App() {
 
         {/* Event modal */}
         {modalEvent !== null && (
-          <EventModal initial={modalEvent} onSave={onModalSave} onClose={() => setModalEvent(null)} saving={isSaving} customers={crm.customers} />
+          <EventModal initial={modalEvent} onSave={onModalSave} onClose={() => setModalEvent(null)} saving={isSaving} customers={crm.customers} eventTypes={access.eventTypeOptions?.filter(t => t.active !== false).map(t => t.name)} />
         )}
 
         {/* Activity logs — floating (position: fixed) so they never shift the page; each clears
@@ -9499,7 +9533,8 @@ export default function App() {
             {/* ─── LEADS / CUSTOMERS ─── */}
             {tab === "leads" && (
               <LeadsTab crm={crm} selectedId={leadSel} onSelect={setLeadSel}
-                onOpenEvent={setOverviewId} onOpenCustomer={openCustomer} />
+                onOpenEvent={setOverviewId} onOpenCustomer={openCustomer}
+                eventTypes={access.eventTypeOptions?.filter(t => t.active !== false).map(t => t.name)} />
             )}
             {tab === "customers" && (
               <CustomersTab crm={crm} selectedId={customerSel} onSelect={setCustomerSel} eventsVersion={savedEvents}
