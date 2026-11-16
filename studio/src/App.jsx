@@ -4574,15 +4574,21 @@ const DeliveryBadge = ({ state, title }) => {
 const fmtShort = (t) => (t ? new Date(t).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
 
 // A group of numbered tiles, e.g. SMS: Delivered / Waiting / Failed / Not sent
-function StatGroup({ title, icon, items }) {
+function StatGroup({ title, icon, items, accent }) {
   return (
-    <div style={{flex:"1 1 300px",minWidth:0}}>
-      <div style={{fontSize:12,fontWeight:700,color:N.textMid,marginBottom:8}}><Icon n={icon} /> {title}</div>
-      <div className="nk-stats" style={{marginBottom:0}}>
+    <div style={{flex:"1 1 300px",minWidth:0,background:N.navy800,border:`1px solid ${N.border}`,
+      borderRadius:14,padding:"14px 16px",borderTop:`3px solid ${accent || N.border}`}}>
+      <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:12}}>
+        <span style={{color:accent || N.text,fontSize:16,lineHeight:1}}><Icon n={icon} /></span>
+        <span style={{fontSize:13,fontWeight:700,color:N.text}}>{title}</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill, minmax(90px, 1fr))",gap:7}}>
         {items.map(([label, value, color, hint]) => (
-          <div key={label} className="nk-stat" style={{borderColor:alpha(color,"33")}} title={hint}>
-            <div className="nk-stat-num" style={{color}}>{value}</div>
-            <div className="nk-stat-label">{label}</div>
+          <div key={label} title={hint}
+            style={{textAlign:"center",padding:"8px 6px",borderRadius:10,
+              background:alpha(color,"0a"),border:`1px solid ${alpha(color,"22")}`}}>
+            <div style={{fontSize:22,fontWeight:800,color,lineHeight:1.1,fontVariantNumeric:"tabular-nums"}}>{value}</div>
+            <div style={{fontSize:10,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:0.5,marginTop:4}}>{label}</div>
           </div>
         ))}
       </div>
@@ -5412,8 +5418,21 @@ function ShareViewModal({ eventRow, showToast, onClose, reloadEvents }) {
             <div style={{display:"flex",gap:8,alignItems:"center"}}><code style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:N.sky}}>{link}</code>
               <Sb bg="transparent" col={N.sky} border={N.border} label="Copy link" onClick={() => copy(link, "Link")}><Icon n="copy" /></Sb></div></div>
           <div className="nk-guide-block"><div className="nk-guide-block-label">Code</div>
-            <div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{flex:1,fontSize:28,fontWeight:800,letterSpacing:6,fontFamily:"JetBrains Mono, monospace",color:N.text}}>{code}</span>
-              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy code" onClick={() => copy(code, "Code")}><Icon n="copy" /></Sb></div></div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <div style={{flex:1,display:"flex",gap:5}}>
+                {code.split("").map((ch, i) => (
+                  <span key={i} style={{
+                    display:"inline-flex",alignItems:"center",justifyContent:"center",
+                    width:38,height:46,fontSize:20,fontWeight:800,
+                    fontFamily:"JetBrains Mono, monospace",
+                    border:`2px solid ${alpha(N.sky,"55")}`,borderRadius:8,
+                    background:alpha(N.sky,"0d"),color:N.sky,letterSpacing:0,
+                  }}>{ch}</span>
+                ))}
+              </div>
+              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy code" onClick={() => copy(code, "Code")}><Icon n="copy" /></Sb>
+            </div>
+          </div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end",marginTop:12}}>
             <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setViewCode(null)}><Icon n="ban" /> Turn off</button>
             <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setViewCode(newScanCode())} title="The old code stops working immediately"><Icon n="refresh" /> New code</button>
@@ -5457,8 +5476,21 @@ function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
             <div style={{display:"flex",gap:8,alignItems:"center"}}><code style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:N.sky}}>{link}</code>
               <Sb bg="transparent" col={N.sky} border={N.border} label="Copy link" onClick={() => copy(link, "Link")}><Icon n="copy" /></Sb></div></div>
           <div className="nk-guide-block"><div className="nk-guide-block-label">Code</div>
-            <div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{flex:1,fontSize:28,fontWeight:800,letterSpacing:6,fontFamily:"JetBrains Mono, monospace",color:N.text}}>{code}</span>
-              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy code" onClick={() => copy(code, "Code")}><Icon n="copy" /></Sb></div></div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <div style={{flex:1,display:"flex",gap:5}}>
+                {code.split("").map((ch, i) => (
+                  <span key={i} style={{
+                    display:"inline-flex",alignItems:"center",justifyContent:"center",
+                    width:38,height:46,fontSize:20,fontWeight:800,
+                    fontFamily:"JetBrains Mono, monospace",
+                    border:`2px solid ${alpha(N.sky,"55")}`,borderRadius:8,
+                    background:alpha(N.sky,"0d"),color:N.sky,letterSpacing:0,
+                  }}>{ch}</span>
+                ))}
+              </div>
+              <Sb bg="transparent" col={N.sky} border={N.border} label="Copy code" onClick={() => copy(code, "Code")}><Icon n="copy" /></Sb>
+            </div>
+          </div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end",marginTop:12}}>
             <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setScanCode(null)}><Icon n="ban" /> Turn off</button>
             <button className="nk-btn nk-btn-ghost" disabled={busy} onClick={() => setScanCode(newScanCode())} title="The old code stops working immediately"><Icon n="refresh" /> New code</button>
@@ -5555,7 +5587,7 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
 const EP_DEFAULTS = {
   primary_color:"#00C2FF", accent_color:"#7C3AED", bg_color:"#0A0F1E", text_color:"#FFFFFF",
   web_event_name:"", hero_image_url:"", tagline:"", hosts:[], schedule:[], dress_code_text:"", dress_code_image_url:"",
-  gallery:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_lat:"", venue_lng:"", venue_description:"", show_countdown:true,
+  gallery:[], sponsors:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_lat:"", venue_lng:"", venue_description:"", show_countdown:true,
 };
 function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   const [loading, setLoading] = useState(true);
@@ -5608,11 +5640,11 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     showToast("Page settings saved", "success");
   };
 
-  const addHost     = () => setForm(f => ({ ...f, hosts:    [...f.hosts,    { name:"", role:"", photo_url:"" }] }));
+  const addHost     = () => setForm(f => ({ ...f, hosts:    [...f.hosts,    { name:"", role:"", photo_url:"", bio:"" }] }));
   const removeHost  = (i) => setForm(f => ({ ...f, hosts:    f.hosts.filter((_,j) => j!==i) }));
   const setHost     = (i, k, v) => setForm(f => ({ ...f, hosts: f.hosts.map((h,j) => j===i ? {...h,[k]:v} : h) }));
 
-  const addSched    = () => setForm(f => ({ ...f, schedule: [...f.schedule, { time:"", title:"", description:"" }] }));
+  const addSched    = () => setForm(f => ({ ...f, schedule: [...f.schedule, { time:"", title:"", description:"", location:"" }] }));
   const removeSched = (i) => setForm(f => ({ ...f, schedule: f.schedule.filter((_,j) => j!==i) }));
   const setSched    = (i, k, v) => setForm(f => ({ ...f, schedule: f.schedule.map((s,j) => j===i ? {...s,[k]:v} : s) }));
 
@@ -5620,14 +5652,19 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   const removeGallery = (i) => setForm(f => ({ ...f, gallery: f.gallery.filter((_,j) => j!==i) }));
   const setGallery    = (i, v) => setForm(f => ({ ...f, gallery: f.gallery.map((u,j) => j===i ? v : u) }));
 
+  const addSponsor    = () => setForm(f => ({ ...f, sponsors: [...f.sponsors, { name:"", category:"Sponsor", logo_url:"", website:"", description:"" }] }));
+  const removeSponsor = (i) => setForm(f => ({ ...f, sponsors: f.sponsors.filter((_,j) => j!==i) }));
+  const setSponsor    = (i, k, v) => setForm(f => ({ ...f, sponsors: f.sponsors.map((s,j) => j===i ? {...s,[k]:v} : s) }));
+
   const SECTIONS = [
-    { id:"appearance", label:"Appearance",  icon:"palette" },
-    { id:"hosts",      label:"Hosts / MC",  icon:"users"   },
-    { id:"schedule",   label:"Ratiba",      icon:"clock"   },
-    { id:"dresscode",  label:"Dress Code",  icon:"star"    },
-    { id:"gallery",    label:"Gallery",     icon:"image"   },
-    { id:"rsvp",       label:"RSVP",        icon:"check"   },
-    { id:"location",   label:"Location",    icon:"map"     },
+    { id:"appearance", label:"Appearance",       icon:"palette" },
+    { id:"hosts",      label:"Hosts / MC",       icon:"users"   },
+    { id:"schedule",   label:"Ratiba",           icon:"clock"   },
+    { id:"dresscode",  label:"Dress Code",       icon:"star"    },
+    { id:"gallery",    label:"Gallery",          icon:"image"   },
+    { id:"sponsors",   label:"Sponsors & Vendors", icon:"zap"   },
+    { id:"rsvp",       label:"RSVP",             icon:"check"   },
+    { id:"location",   label:"Location",         icon:"map"     },
   ];
 
   const imgUploadRow = (label, slot, busy) => (
@@ -5711,10 +5748,16 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                         <div><label className="nk-label">Name</label><input className="nk-input" value={h.name||""} onChange={e => setHost(i,"name",e.target.value)} placeholder="Jina" /></div>
                         <div><label className="nk-label">Role / Title</label><input className="nk-input" value={h.role||""} onChange={e => setHost(i,"role",e.target.value)} placeholder="e.g. Bibi Harusi" /></div>
                       </div>
+                      <div style={{marginBottom:8}}>
+                        <label className="nk-label">Photo URL</label>
+                        <input className="nk-input" value={h.photo_url||""} onChange={e => setHost(i,"photo_url",e.target.value)} placeholder="https://…" />
+                      </div>
                       <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
                         <div style={{flex:1}}>
-                          <label className="nk-label">Photo URL</label>
-                          <input className="nk-input" style={{marginBottom:0}} value={h.photo_url||""} onChange={e => setHost(i,"photo_url",e.target.value)} placeholder="https://…" />
+                          <label className="nk-label">Bio / Description (optional — shown as paragraph)</label>
+                          <textarea className="nk-input" style={{marginBottom:0,minHeight:64,resize:"vertical"}}
+                            value={h.bio||""} onChange={e => setHost(i,"bio",e.target.value)}
+                            placeholder="Short biography or note shown on the web page…" />
                         </div>
                         <button className="nk-btn nk-btn-ghost" style={{color:N.red,marginBottom:0}} onClick={() => removeHost(i)}><Icon n="trash" /></button>
                       </div>
@@ -5736,10 +5779,14 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                         <div><label className="nk-label">Time</label><input className="nk-input" value={s.time||""} onChange={e => setSched(i,"time",e.target.value)} placeholder="10:00" /></div>
                         <div><label className="nk-label">Title</label><input className="nk-input" value={s.title||""} onChange={e => setSched(i,"title",e.target.value)} placeholder="e.g. Mapokezi" /></div>
                       </div>
+                      <div style={{marginBottom:8}}>
+                        <label className="nk-label">Description (optional)</label>
+                        <input className="nk-input" value={s.description||""} onChange={e => setSched(i,"description",e.target.value)} placeholder="Details…" />
+                      </div>
                       <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
                         <div style={{flex:1}}>
-                          <label className="nk-label">Description (optional)</label>
-                          <input className="nk-input" style={{marginBottom:0}} value={s.description||""} onChange={e => setSched(i,"description",e.target.value)} placeholder="Details…" />
+                          <label className="nk-label">Venue / directions (optional — shown as a "Get Directions" link)</label>
+                          <input className="nk-input" style={{marginBottom:0}} value={s.location||""} onChange={e => setSched(i,"location",e.target.value)} placeholder="e.g. Mlimani City Hall, Dar es Salaam" />
                         </div>
                         <button className="nk-btn nk-btn-ghost" style={{color:N.red}} onClick={() => removeSched(i)}><Icon n="trash" /></button>
                       </div>
@@ -5785,6 +5832,49 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                         }} />
                       </label>
                       <button className="nk-btn nk-btn-ghost" style={{color:N.red,flexShrink:0}} onClick={() => removeGallery(i)}><Icon n="trash" /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {section==="sponsors" && (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                    <div style={{fontSize:13,color:N.textMid}}>Sponsors and vendors shown on the event web page</div>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={addSponsor}><Icon n="plus" /> Add</button>
+                  </div>
+                  {form.sponsors.length===0 && <div style={{textAlign:"center",padding:24,color:N.textDim,fontSize:13}}>No sponsors or vendors added yet.</div>}
+                  {form.sponsors.map((s,i) => (
+                    <div key={i} style={{border:`1px solid ${N.border}`,borderRadius:10,padding:"12px 14px",marginBottom:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                        <div><label className="nk-label">Name</label><input className="nk-input" value={s.name||""} onChange={e => setSponsor(i,"name",e.target.value)} placeholder="Company / Person" /></div>
+                        <div>
+                          <label className="nk-label">Category</label>
+                          <select className="nk-input" value={s.category||"Sponsor"} onChange={e => setSponsor(i,"category",e.target.value)}>
+                            <option>Sponsor</option>
+                            <option>Vendor</option>
+                            <option>Partner</option>
+                            <option>Media</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div style={{marginBottom:8}}>
+                        <label className="nk-label">Logo URL (optional)</label>
+                        <input className="nk-input" value={s.logo_url||""} onChange={e => setSponsor(i,"logo_url",e.target.value)} placeholder="https://…" />
+                      </div>
+                      <div style={{marginBottom:8}}>
+                        <label className="nk-label">Website (optional)</label>
+                        <input className="nk-input" value={s.website||""} onChange={e => setSponsor(i,"website",e.target.value)} placeholder="https://…" />
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                        <div style={{flex:1}}>
+                          <label className="nk-label">Description (optional)</label>
+                          <textarea className="nk-input" style={{marginBottom:0,minHeight:52,resize:"vertical"}}
+                            value={s.description||""} onChange={e => setSponsor(i,"description",e.target.value)}
+                            placeholder="Short note shown under the logo…" />
+                        </div>
+                        <button className="nk-btn nk-btn-ghost" style={{color:N.red,marginBottom:0}} onClick={() => removeSponsor(i)}><Icon n="trash" /></button>
+                      </div>
                     </div>
                   ))}
                 </div>

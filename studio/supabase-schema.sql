@@ -262,9 +262,11 @@ GRANT ALL ON public.event_transactions TO service_role;
 -- =====================================================================
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES
-  ('templates', 'templates', true, 10485760,
+  ('templates',   'templates',   true, 10485760,
      ARRAY['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml']),
-  ('wa-cards',  'wa-cards',  true,  5242880,
+  ('wa-cards',    'wa-cards',    true,  5242880,
+     ARRAY['image/jpeg']),
+  ('event-pages', 'event-pages', true,  5242880,
      ARRAY['image/jpeg'])
 ON CONFLICT (id) DO UPDATE
   SET public             = EXCLUDED.public,
@@ -275,11 +277,14 @@ ON CONFLICT (id) DO UPDATE
 DROP POLICY IF EXISTS "public_read_templates"   ON storage.objects;
 DROP POLICY IF EXISTS "public_insert_templates" ON storage.objects;
 
-DROP POLICY IF EXISTS "authenticated_read_templates"   ON storage.objects;
-DROP POLICY IF EXISTS "authenticated_insert_templates" ON storage.objects;
-DROP POLICY IF EXISTS "authenticated_delete_templates" ON storage.objects;
-DROP POLICY IF EXISTS "authenticated_read_wa_cards"    ON storage.objects;
-DROP POLICY IF EXISTS "authenticated_insert_wa_cards"  ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_read_templates"    ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_insert_templates"  ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_delete_templates"  ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_read_wa_cards"     ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_insert_wa_cards"   ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_read_event_pages"  ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_insert_event_pages" ON storage.objects;
+DROP POLICY IF EXISTS "authenticated_delete_event_pages" ON storage.objects;
 
 CREATE POLICY "authenticated_read_templates"
   ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'templates');
@@ -291,6 +296,12 @@ CREATE POLICY "authenticated_read_wa_cards"
   ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'wa-cards');
 CREATE POLICY "authenticated_insert_wa_cards"
   ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'wa-cards');
+CREATE POLICY "authenticated_read_event_pages"
+  ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'event-pages');
+CREATE POLICY "authenticated_insert_event_pages"
+  ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'event-pages');
+CREATE POLICY "authenticated_delete_event_pages"
+  ON storage.objects FOR DELETE TO authenticated USING (bucket_id = 'event-pages');
 
 -- If the wa-cards bucket was created by hand in the dashboard earlier, also open
 -- Storage > Policies and delete any leftover policy that grants INSERT/SELECT to
@@ -2054,8 +2065,7 @@ UPDATE event_cards SET card_code = gen_card_code() WHERE card_code IS NULL;
 
 -- ── Event web-page settings ───────────────────────────────────────────────
 -- One row per event; organiser edits via EventPageModal in the admin UI.
--- Images are stored in the "event-pages" storage bucket
--- (create it in Supabase: Storage > New bucket "event-pages", set to public).
+-- Images are stored in the "event-pages" storage bucket (created in the STORAGE BUCKETS section above).
 CREATE TABLE IF NOT EXISTS event_pages (
   id                   UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   event_id             UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -2080,8 +2090,9 @@ CREATE TABLE IF NOT EXISTS event_pages (
   updated_at           TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT event_pages_event_id_key UNIQUE (event_id)
 );
-ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS web_event_name   TEXT;
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS web_event_name    TEXT;
 ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS rsvp_notify_phone TEXT;
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS sponsors          JSONB DEFAULT '[]'::jsonb;
 
 -- ── RSVP submissions ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS event_rsvps (
@@ -2159,13 +2170,15 @@ BEGIN
       'venue_lng',           v_page.venue_lng,
       'venue_description',   v_page.venue_description,
       'show_countdown',      v_page.show_countdown,
-      'web_event_name',      v_page.web_event_name
+      'web_event_name',      v_page.web_event_name,
+      'sponsors',            COALESCE(v_page.sponsors, '[]'::jsonb)
     ) ELSE '{}'::jsonb END,
     'cover_image_url', v_event.cover_image_url,
-    'guest_name', v_card.name,
-    'card_type',  v_card.card_type,
-    'card_url',   v_card.card_url,
-    'card_code',  v_card.card_code
+    'guest_name',  v_card.name,
+    'guest_phone', v_card.phone,
+    'card_type',   v_card.card_type,
+    'card_url',    v_card.card_url,
+    'card_code',   v_card.card_code
   );
 END;
 $$;
