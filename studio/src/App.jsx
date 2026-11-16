@@ -5421,16 +5421,16 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
   const { cards } = useEventCards(eventRow?.id);
   const [copied, setCopied] = useState(null);
   const [q, setQ] = useState("");
-  const base = `${location.origin}${location.pathname}`;
+  const base = location.origin;
   const copyLink = (c) => {
-    const url = `${base}#/g/${eventRow.public_id}/${c.public_id}`;
+    const url = `${base}/g/${eventRow.public_id}/${c.public_id}`;
     navigator.clipboard?.writeText(url)
       .then(() => { setCopied(c.id); showToast(`Copied link for ${c.name}`, "success"); setTimeout(() => setCopied(null), 2000); })
       .catch(() => showToast("Could not copy — try selecting manually", "warn"));
   };
   const copyAll = () => {
     if (!cards?.length) return;
-    const lines = cards.filter(c => c.public_id).map(c => `${c.name}: ${base}#/g/${eventRow.public_id}/${c.public_id}`);
+    const lines = cards.filter(c => c.public_id).map(c => `${c.name}: ${base}/g/${eventRow.public_id}/${c.public_id}`);
     navigator.clipboard?.writeText(lines.join("\n"))
       .then(() => showToast(`Copied ${lines.length} guest links`, "success"))
       .catch(() => showToast("Could not copy", "warn"));
@@ -5457,7 +5457,7 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
           {cards === null && <div style={{textAlign:"center",padding:24,color:N.textDim}}><Icon n="loader" /> Loading guests…</div>}
           {cards !== null && !shown.length && <div style={{textAlign:"center",padding:24,color:N.textDim}}>No guests{q ? " match" : " found"}.</div>}
           {shown.map(c => {
-            const url = c.public_id ? `${base}#/g/${eventRow.public_id}/${c.public_id}` : null;
+            const url = c.public_id ? `${base}/g/${eventRow.public_id}/${c.public_id}` : null;
             return (
               <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:`1px solid ${N.border}`}}>
                 <div style={{flex:1,minWidth:0}}>
@@ -5900,7 +5900,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                       <Sb bg="transparent" col={N.sky} border={N.border}
                         label={`Copy invitation link for ${c.name}`}
                         onClick={() => {
-                          const url = `${location.origin}${location.pathname}#/g/${eventRow.public_id}/${c.public_id}`;
+                          const url = `${location.origin}/g/${eventRow.public_id}/${c.public_id}`;
                           navigator.clipboard?.writeText(url).then(() => showToast(`Link copied for ${c.name}`, "success")).catch(() => showToast("Could not copy — try manually", "warn"));
                         }}>
                         <Icon n="link" />
@@ -7925,7 +7925,7 @@ export default function App() {
   const buildSmsMsg = (rec, body = smsMessage) => {
     const text = fillTemplate(body, rec);
     const link = openEventRow?.guest_link_enabled && openEventRow?.public_id && rec?.publicId
-      ? `\n${location.origin}${location.pathname}#/g/${openEventRow.public_id}/${rec.publicId}`
+      ? `\n${location.origin}/g/${openEventRow.public_id}/${rec.publicId}`
       : "";
     return text + link;
   };

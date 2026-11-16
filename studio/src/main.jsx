@@ -14,8 +14,9 @@ applyTheme(getThemePref())
 const scanMatch = window.location.hash.match(/^#\/scan\/([0-9a-f-]{36})/i)
 // #/view/<eventId> is the public, code-protected view-only report (guests, calls, card history)
 const viewMatch = window.location.hash.match(/^#\/view\/([0-9a-f-]{36})/i)
-// #/g/<eventPublicId>/<guestPublicId> is each guest's personalised invitation card page (no login)
-const guestMatch = window.location.hash.match(/^#\/g\/([A-Z0-9]{6,12})\/([A-Z0-9]{6,12})/i)
+// /g/<eventPublicId>/<guestPublicId> — path-based (new, for OG preview) or hash-based (legacy)
+const guestMatch = window.location.pathname.match(/\/g\/([A-Z0-9]{6,12})\/([A-Z0-9]{6,12})/i)
+  || window.location.hash.match(/^#\/g\/([A-Z0-9]{6,12})\/([A-Z0-9]{6,12})/i)
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
