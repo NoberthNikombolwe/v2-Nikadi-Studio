@@ -6603,6 +6603,7 @@ export default function App() {
     senderId:    import.meta.env.VITE_SMS_SENDER_ID || "NIKADI",
   };
   const [smsSending,      setSmsSending]      = useState(false);
+  const [smsAutoUploading, setSmsAutoUploading] = useState(false); // uploading cards before SMS send
   const [smsLog,          setSmsLog]          = useState([]);
   const [smsBalance,      setSmsBalance]      = useState(null);
   const [smsBalanceLoading, setSmsBalanceLoading] = useState(false);
@@ -8522,10 +8523,24 @@ export default function App() {
   // contacts already sent and asks in a modal first (it costs credits) — including whether to
   // skip or include repeated numbers. `msgId` picks which message (and so which recipient list) is sent.
   const sendAllSms = async (msgId = MAIN_MSG) => {
-    if (smsSending) return;
+    if (smsSending || smsAutoUploading) return;
     const msg = findMessage(msgId);
     if (msgId !== MAIN_MSG && !msg) return;
     if (msg && !msg.body.trim()) { showToast(`"${msg.title}" has no text yet`, "warn"); return; }
+    // When this event has guest invitation links, auto-upload any cards that are not yet uploaded
+    // so the OG thumbnail in the SMS link shows the guest's own card image
+    if (openEventRow?.guest_link_enabled) {
+      const needUpload = records.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample && r.uploadStatus !== "uploaded");
+      if (needUpload.length > 0) {
+        setSmsAutoUploading(true);
+        let failCount = 0;
+        for (const { i } of needUpload) {
+          try { await uploadCardSingle(i); } catch { failCount++; }
+        }
+        setSmsAutoUploading(false);
+        if (failCount > 0) showToast(`${failCount} card${failCount === 1 ? "" : "s"} failed to upload — sending SMS anyway`, "warn");
+      }
+    }
     const recs = messageRecipients(msg);
     const targets = await pickBulkRecipients({
       title:    msg ? `Send "${msg.title}"` : "Send SMS",
@@ -9700,8 +9715,8 @@ export default function App() {
                       onChange={e => rememberForEvent("sms_sender_id", e.target.value, "sms")} title="The name guests see as the SMS sender">
                       {(access.senderIds.filter(x => x.active).length ? access.senderIds.filter(x => x.active).map(x => x.sender_id) : [smsSender]).map(id => <option key={id} value={id}>{id}</option>)}
                     </select>
-                    <button className="nk-btn nk-btn-teal nk-btn-full" onClick={()=>sendAllSms(activeMsgId)} disabled={smsSending}>
-                      {smsSending?<><Icon n="loader" /> Sending…</>:<><Icon n="sms" /> {`Send ${activeExtra ? `"${activeExtra.title}"` : "SMS"} to All (${activeRecipients.filter(r=>r.phone).length})`}</>}
+                    <button className="nk-btn nk-btn-teal nk-btn-full" onClick={()=>sendAllSms(activeMsgId)} disabled={smsSending || smsAutoUploading}>
+                      {smsAutoUploading ? <><Icon n="loader" /> Uploading cards…</> : smsSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="sms" /> {`Send ${activeExtra ? `"${activeExtra.title}"` : "SMS"} to All (${activeRecipients.filter(r=>r.phone).length})`}</>}
                     </button>
                     <button className="nk-btn nk-btn-ghost nk-btn-full" onClick={downloadSmsCsv}>
                       <Icon n="download" /> Download SMS CSV
@@ -9832,18 +9847,26 @@ export default function App() {
                   <div style={{flex:"0 0 260px"}}>
                     {/* Step 1 */}
                     <div className="nk-sec" style={{color:N.sky}}>Step 1 — Upload Cards</div>
-                    <div className="nk-chip" style={{marginBottom:10,fontSize:11,lineHeight:1.8}}>
-                      Renders each personalized card<br/>
-                      and uploads to Supabase Storage<br/>
-                      to get a public image URL.<br/>
-                      <span style={{color:N.green}}>
-                        {records.filter(r=>r.uploadStatus==="uploaded").length} / {records.length} uploaded
-                      </span>
-                    </div>
-                    <button className="nk-btn nk-btn-primary nk-btn-full" style={{marginBottom:20}}
-                      onClick={uploadAllCards} disabled={uploadingCards}>
-                      {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
-                    </button>
+                    {openEventRow?.guest_link_enabled && records.filter(r=>!r.sample).length > 0 && records.filter(r=>!r.sample).every(r=>r.uploadStatus==="uploaded") ? (
+                      <div className="nk-chip" style={{marginBottom:20,fontSize:11,lineHeight:1.8,color:N.green}}>
+                        <Icon n="check" /> All {records.filter(r=>!r.sample).length} cards uploaded — linked to guest invitations.
+                      </div>
+                    ) : (
+                      <>
+                        <div className="nk-chip" style={{marginBottom:10,fontSize:11,lineHeight:1.8}}>
+                          Renders each personalized card<br/>
+                          and uploads to Supabase Storage<br/>
+                          to get a public image URL.<br/>
+                          <span style={{color:N.green}}>
+                            {records.filter(r=>r.uploadStatus==="uploaded").length} / {records.length} uploaded
+                          </span>
+                        </div>
+                        <button className="nk-btn nk-btn-primary nk-btn-full" style={{marginBottom:20}}
+                          onClick={uploadAllCards} disabled={uploadingCards}>
+                          {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
+                        </button>
+                      </>
+                    )}
                     {/* Template */}
                     <div className="nk-sec" style={{color:N.amber}}>WhatsApp Template</div>
                     <label className="nk-label">Template Name</label>
