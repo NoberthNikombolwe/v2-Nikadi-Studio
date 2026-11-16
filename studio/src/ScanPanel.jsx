@@ -434,9 +434,9 @@ export default function ScanPanel({ findCard, search, checkIn, scannerName, disa
           )}
 
           <form className="sp-card" onSubmit={doSearch}>
-            <label style={{fontSize:12,fontWeight:700,color:N.textDim,display:"block",marginBottom:6}} htmlFor={camId + "q"}>No QR? Search the guest by name</label>
+            <label style={{fontSize:12,fontWeight:700,color:N.textDim,display:"block",marginBottom:6}} htmlFor={camId + "q"}>No QR? Search by name or passcode</label>
             <div style={{display:"flex",gap:8}}>
-              <input id={camId + "q"} className="sp-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Type a guest's name" disabled={disabled} />
+              <input id={camId + "q"} className="sp-input" value={q} onChange={e => setQ(e.target.value)} placeholder="Name or passcode" disabled={disabled} />
               <button className="sp-btn" type="submit" disabled={disabled || busy} aria-label="Search guests"><Icon n="search" /></button>
             </div>
             <div style={{marginTop:10}}>
