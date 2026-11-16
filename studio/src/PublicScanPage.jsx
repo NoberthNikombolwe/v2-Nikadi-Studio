@@ -17,6 +17,62 @@ import { N, alpha } from "./lib/theme";
 
 const codeKey = (id) => `nikadi_scan_code_${id}`;
 
+const CODE_LEN = 6;
+
+// 6-box OTP-style code entry — each character gets its own box, auto-advances on input
+function CodeBoxes({ value, onChange, disabled, autoFocus }) {
+  const boxRefs = useRef([]);
+  const chars = value.toUpperCase().padEnd(CODE_LEN, "").slice(0, CODE_LEN).split("");
+  const focus = (i) => { const el = boxRefs.current[Math.max(0, Math.min(CODE_LEN - 1, i))]; el?.focus(); el?.select(); };
+
+  const handleKeyDown = (i, e) => {
+    if (e.key === "Backspace") {
+      e.preventDefault();
+      if (chars[i]) { const n = chars.map((c, j) => j === i ? "" : c); onChange(n.join("").trimEnd()); }
+      else if (i > 0) { const n = chars.map((c, j) => j === i - 1 ? "" : c); onChange(n.join("").trimEnd()); focus(i - 1); }
+    } else if (e.key === "ArrowLeft")  { e.preventDefault(); focus(i - 1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); focus(i + 1); }
+  };
+  const handleChange = (i, e) => {
+    const raw = e.target.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    const ch = raw.slice(0, 1);
+    const n = chars.map((c, j) => j === i ? ch : c);
+    onChange(n.join("").trimEnd());
+    if (ch && i < CODE_LEN - 1) requestAnimationFrame(() => focus(i + 1));
+  };
+  const handlePaste = (e) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData("text").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, CODE_LEN);
+    onChange(pasted);
+    requestAnimationFrame(() => focus(Math.min(pasted.length, CODE_LEN - 1)));
+  };
+  return (
+    <div style={{display:"flex",gap:6,justifyContent:"center",margin:"4px 0 20px"}}>
+      {Array.from({length: CODE_LEN}, (_, i) => (
+        <input key={i} ref={el => { boxRefs.current[i] = el; }}
+          value={chars[i]} maxLength={1} inputMode="text" autoCapitalize="characters"
+          autoFocus={autoFocus && i === 0}
+          onFocus={e => e.target.select()}
+          onChange={e => handleChange(i, e)}
+          onKeyDown={e => handleKeyDown(i, e)}
+          onPaste={handlePaste}
+          disabled={disabled}
+          aria-label={`Code character ${i + 1}`}
+          style={{
+            width:46,height:58,textAlign:"center",
+            fontSize:26,fontWeight:800,fontFamily:"JetBrains Mono, monospace",textTransform:"uppercase",
+            border:`2.5px solid ${chars[i] ? N.sky : N.border}`,
+            borderRadius:10,
+            background:chars[i] ? alpha(N.sky,"14") : N.navy900,
+            color:N.text,outline:"none",caretColor:"transparent",
+            cursor:disabled ? "not-allowed" : "text",
+            transition:"border-color .15s, background .15s",
+          }} />
+      ))}
+    </div>
+  );
+}
+
 export default function PublicScanPage({ eventId }) {
   const [code, setCode]   = useState(() => { try { return sessionStorage.getItem(codeKey(eventId)) || ""; } catch { return ""; } });
   const [input, setInput] = useState("");
@@ -64,16 +120,15 @@ export default function PublicScanPage({ eventId }) {
     return () => clearInterval(t);
   }, [state, refresh]);
 
-  const unlock = async (e) => {
-    e.preventDefault();
-    const c = input.trim().toUpperCase();
-    if (!c) return;
+  const doUnlock = useCallback(async (c) => {
+    if (!c || c.length < CODE_LEN) return;
     setState("checking"); setError(null);
     if (await refresh(c)) {
       setCode(c);
       try { sessionStorage.setItem(codeKey(eventId), c); } catch { /* private mode */ }
     } else setError("That code isn't right, or it was changed. Ask the organiser for the current code.");
-  };
+  }, [refresh, eventId]);
+  const unlock = (e) => { e.preventDefault(); doUnlock(input); };
 
   const findCard = async ({ id, name }) => {
     const { data, error: e } = await supabase.rpc("public_find_cards", id ? { p_event: eventId, p_code: code, p_card: id }
@@ -109,19 +164,44 @@ export default function PublicScanPage({ eventId }) {
   if (state !== "open") return (
     <div style={page}><div style={{...box, maxWidth:420}}>
       {brand}
-      <form onSubmit={unlock} style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16,padding:22}}>
-        <div style={{width:52,height:52,borderRadius:"50%",display:"grid",placeItems:"center",fontSize:24,color:N.sky,background:alpha(N.sky,"1a"),marginBottom:12}}><Icon n="lock" /></div>
-        <h1 style={{fontSize:18,fontWeight:800,marginBottom:6}}>Enter the scan code</h1>
-        <p style={{fontSize:13,color:N.textDim,marginBottom:14}}>The event organiser gives each door a 6-character code.</p>
-        <input autoFocus value={input} onChange={e => setInput(e.target.value)} placeholder="e.g. K7Q2MX" aria-label="Scan code"
-          style={{width:"100%",minHeight:48,padding:"10px 14px",borderRadius:10,border:`1.5px solid ${N.border}`,background:N.navy900,color:N.text,fontSize:20,letterSpacing:4,textTransform:"uppercase",fontFamily:"JetBrains Mono, monospace"}} />
-        <label style={{display:"block",fontSize:12,color:N.textDim,margin:"12px 0 6px"}} htmlFor="door">Your name or door (shown in the scan log)</label>
+      <form onSubmit={unlock} style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16,padding:28}}>
+        <div style={{display:"flex",justifyContent:"center",marginBottom:18}}>
+          <div style={{
+            width:64,height:64,borderRadius:"50%",display:"grid",placeItems:"center",
+            background:`radial-gradient(circle, ${alpha(N.accent,"33")} 0%, ${alpha(N.accent,"11")} 100%)`,
+            border:`2px solid ${alpha(N.accent,"55")}`,fontSize:28,color:N.sky,
+            boxShadow:`0 0 28px ${alpha(N.accent,"33")}`,
+          }}><Icon n="lock" /></div>
+        </div>
+        <h1 style={{fontSize:20,fontWeight:800,marginBottom:4,textAlign:"center"}}>Enter the scan code</h1>
+        <p style={{fontSize:13,color:N.textDim,marginBottom:18,textAlign:"center"}}>The event organiser gives each door a 6-character code.</p>
+        <div style={{fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:1,textAlign:"center",marginBottom:8}}>Scan Code</div>
+        <CodeBoxes
+          value={input}
+          autoFocus
+          disabled={state === "checking"}
+          onChange={v => { setInput(v); if (v.length === CODE_LEN) doUnlock(v); }}
+        />
+        <div style={{borderTop:`1px solid ${N.border}`,margin:"4px 0 16px"}} />
+        <label style={{display:"block",fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}} htmlFor="door">
+          Your name or door <span style={{fontWeight:400,textTransform:"none"}}>(shown in the scan log)</span>
+        </label>
         <input id="door" value={door} onChange={e => { setDoor(e.target.value); try { localStorage.setItem("nikadi_door_name", e.target.value); } catch { /* ignore */ } }}
           placeholder="e.g. Main gate – Asha"
-          style={{width:"100%",minHeight:44,padding:"10px 12px",borderRadius:10,border:`1.5px solid ${N.border}`,background:N.navy900,color:N.text,fontSize:16}} />
-        {error && <div style={{color:N.red,fontSize:13,marginTop:12}} role="alert"><Icon n="alert" /> {error}</div>}
-        <button type="submit" disabled={state === "checking"} style={{width:"100%",marginTop:16,minHeight:48,borderRadius:10,border:"none",background:N.accent,color:"#fff",fontWeight:700,fontSize:15,cursor:"pointer"}}>
-          {state === "checking" ? <><Icon n="loader" /> Checking…</> : "Open scanner"}
+          style={{width:"100%",minHeight:44,padding:"10px 12px",borderRadius:10,border:`1.5px solid ${N.border}`,background:N.navy900,color:N.text,fontSize:16,boxSizing:"border-box"}} />
+        {error && (
+          <div style={{marginTop:12,padding:"10px 12px",borderRadius:8,background:alpha(N.red,"14"),border:`1px solid ${alpha(N.red,"44")}`,color:N.red,fontSize:13,display:"flex",gap:8,alignItems:"flex-start"}} role="alert">
+            <span style={{flexShrink:0,marginTop:1}}><Icon n="alert" /></span> {error}
+          </div>
+        )}
+        <button type="submit" disabled={state === "checking"}
+          style={{width:"100%",marginTop:16,minHeight:50,borderRadius:10,border:"none",
+            background: state === "checking" ? N.border : N.accent,
+            color: state === "checking" ? N.textDim : "#fff",
+            fontWeight:700,fontSize:15,cursor: state === "checking" ? "not-allowed" : "pointer",
+            display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+            transition:"background .15s, color .15s"}}>
+          {state === "checking" ? <><Icon n="loader" /> Checking…</> : <><Icon n="scan" /> Open scanner</>}
         </button>
       </form>
     </div></div>
