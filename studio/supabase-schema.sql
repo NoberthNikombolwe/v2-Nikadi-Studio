@@ -2159,6 +2159,7 @@ BEGIN
       'show_countdown',      v_page.show_countdown,
       'web_event_name',      v_page.web_event_name
     ) ELSE '{}'::jsonb END,
+    'cover_image_url', v_event.cover_image_url,
     'guest_name', v_card.name,
     'card_type',  v_card.card_type,
     'card_url',   v_card.card_url,

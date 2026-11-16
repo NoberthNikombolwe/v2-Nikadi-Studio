@@ -71,11 +71,19 @@ const serveGuestPreview = async (req, res, eid, gid) => {
         body: JSON.stringify({ p_event_public_id: eid.toUpperCase(), p_guest_public_id: gid.toUpperCase() }),
       });
       if (r.ok && r.json) {
-        cardUrl    = r.json.card_url   || null;
-        eventName  = r.json.page_settings?.web_event_name || r.json.event_name || "";
-        guestName  = r.json.guest_name || "";
+        // Fallback chain: guest's card → event page hero → event cover template → og-image.jpg
+        cardUrl   = r.json.card_url
+                 || r.json.page_settings?.hero_image_url
+                 || r.json.cover_image_url
+                 || null;
+        eventName = r.json.page_settings?.web_event_name || r.json.event_name || "";
+        guestName = r.json.guest_name || "";
+      } else {
+        console.error(`[guest-preview] RPC failed ${r.ok ? "null response" : "status non-2xx"} for ${eid}/${gid}`);
       }
-    } catch { /* fall through to generic image */ }
+    } catch (err) {
+      console.error(`[guest-preview] RPC error for ${eid}/${gid}:`, err.message);
+    }
   }
   const spaUrl = `/#/g/${eid.toUpperCase()}/${gid.toUpperCase()}`;
   const title  = [eventName, guestName].filter(Boolean).join(" — ") || "Your Invitation";
