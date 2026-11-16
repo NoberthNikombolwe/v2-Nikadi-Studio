@@ -6,6 +6,7 @@
 //   - basic security headers
 // Data never passes through here: the browser talks to Supabase and the Edge Functions directly.
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -38,6 +39,66 @@ if (!fs.existsSync(path.join(ROOT, "index.html"))) {
   console.error(`No build found at ${ROOT}. Run "npm run build" (Heroku runs heroku-postbuild).`);
   process.exit(1);
 }
+
+// Fetch JSON from a URL using the built-in https module (no npm deps)
+const fetchJson = (url, options = {}) => new Promise((resolve, reject) => {
+  const req = https.request(url, { ...options, headers: { "Content-Type": "application/json", Accept: "application/json", ...(options.headers || {}) } }, (res) => {
+    let data = "";
+    res.on("data", (c) => data += c);
+    res.on("end", () => {
+      try { resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, json: JSON.parse(data) }); }
+      catch { resolve({ ok: false, json: null }); }
+    });
+  });
+  req.on("error", reject);
+  if (options.body) req.write(options.body);
+  req.end();
+});
+
+// /g/<eventPublicId>/<guestPublicId> — serve dynamic OG preview HTML so WhatsApp/SMS
+// link previews show the guest's own invitation card instead of the generic site image.
+// Regular browsers are immediately JS-redirected to the actual SPA page (/#/g/...).
+const GUEST_PATH = /^\/g\/([A-Z0-9]{6,12})\/([A-Z0-9]{6,12})\/?$/i;
+const serveGuestPreview = async (req, res, eid, gid) => {
+  const SB_URL = process.env.VITE_SUPABASE_URL;
+  const SB_KEY = process.env.VITE_SUPABASE_ANON_KEY;
+  let cardUrl = null, eventName = "", guestName = "";
+  if (SB_URL && SB_KEY) {
+    try {
+      const r = await fetchJson(`${SB_URL}/rest/v1/rpc/public_event_page_data`, {
+        method: "POST",
+        headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+        body: JSON.stringify({ p_event_public_id: eid.toUpperCase(), p_guest_public_id: gid.toUpperCase() }),
+      });
+      if (r.ok && r.json) {
+        cardUrl    = r.json.card_url   || null;
+        eventName  = r.json.page_settings?.web_event_name || r.json.event_name || "";
+        guestName  = r.json.guest_name || "";
+      }
+    } catch { /* fall through to generic image */ }
+  }
+  const spaUrl = `/#/g/${eid.toUpperCase()}/${gid.toUpperCase()}`;
+  const title  = [eventName, guestName].filter(Boolean).join(" — ") || "Your Invitation";
+  const image  = cardUrl || `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}/og-image.jpg`;
+  const html = `<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escHtml(title)}</title>
+<meta property="og:type" content="website">
+<meta property="og:title" content="${escHtml(title)}">
+<meta property="og:image" content="${escHtml(image)}">
+<meta property="og:image:width" content="800">
+<meta property="og:image:height" content="600">
+<meta property="twitter:card" content="summary_large_image">
+<meta property="twitter:title" content="${escHtml(title)}">
+<meta property="twitter:image" content="${escHtml(image)}">
+<script>window.location.replace(${JSON.stringify(spaUrl)});</script>
+<noscript><meta http-equiv="refresh" content="0;url=${escHtml(spaUrl)}"></noscript>
+</head><body></body></html>`;
+  res.writeHead(200, { ...SECURITY, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+  res.end(html);
+};
+const escHtml = (s) => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
 // Resolve a URL path to a file inside ROOT (never outside it); null if missing
 const resolveFile = (urlPath) => {
@@ -76,6 +137,8 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
   if (req.url === "/healthz") { res.writeHead(200, { "Content-Type": "text/plain" }); return res.end("ok"); }
+  const guestPreviewMatch = GUEST_PATH.exec((req.url || "").split("?")[0]);
+  if (guestPreviewMatch) { serveGuestPreview(req, res, guestPreviewMatch[1], guestPreviewMatch[2]).catch(() => send(req, res, path.join(ROOT, "index.html"))); return; }
   const file = resolveFile(req.url || "/");
   if (file) return send(req, res, file);
   // A missing hashed asset is a real 404; everything else is the app
