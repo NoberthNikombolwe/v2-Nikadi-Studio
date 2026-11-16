@@ -78,6 +78,57 @@ import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeH
 // from node_modules — nothing is fetched from a third-party CDN at runtime)
 const loadXlsx  = () => import("xlsx");
 
+// Compresses an image (dataUrl string or File/Blob) to a JPEG Blob.
+// Uses canvas.toBlob() for accurate size; binary-searches for the highest JPEG quality
+// that stays under maxKb. Never drops below quality 0.65 — if still too large at that
+// point it scales to 75% width and encodes at 0.75, which looks far better than
+// pushing quality below 0.65. SVG sources are uploaded as-is.
+const compressImageToBlob = (source, { maxKb = 500, maxWidth = 1600, quality = 0.85 } = {}) =>
+  new Promise((resolve, reject) => {
+    const isBlob = source instanceof Blob || source instanceof File;
+    const url    = isBlob ? URL.createObjectURL(source) : source;
+    const img    = new Image();
+    img.onerror  = () => { if (isBlob) URL.revokeObjectURL(url); reject(new Error("Image load failed")); };
+    img.onload   = () => {
+      if (isBlob) URL.revokeObjectURL(url);
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (!w || !h) { resolve(isBlob ? source : null); return; }
+      if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
+      const draw = (sw, sh) => {
+        const c = document.createElement("canvas");
+        c.width = sw; c.height = sh;
+        const ctx = c.getContext("2d");
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, sw, sh);
+        return c;
+      };
+      const toBlob = (canvas, q) => new Promise(res => canvas.toBlob(b => res(b), "image/jpeg", q));
+      (async () => {
+        const canvas = draw(w, h);
+        const full   = await toBlob(canvas, quality);
+        if (!full) { reject(new Error("Canvas encode failed")); return; }
+        if (full.size / 1024 <= maxKb) { resolve(full); return; }
+        // Binary-search for the highest quality that stays under the limit
+        let lo = 0.65, hi = quality, best = null;
+        for (let i = 0; i < 8; i++) {
+          const q = (lo + hi) / 2;
+          const b = await toBlob(canvas, q);
+          if (!b) break;
+          if (b.size / 1024 <= maxKb) { best = b; lo = q; }
+          else                         { hi   = q; }
+          if (hi - lo < 0.02) break;
+        }
+        if (best) { resolve(best); return; }
+        // Still over limit — scale to 75% and encode at 0.75 (looks better than quality < 0.65)
+        const c2 = draw(Math.round(w * 0.75), Math.round(h * 0.75));
+        const b2 = await toBlob(c2, 0.75);
+        resolve(b2 || full);
+      })().catch(reject);
+    };
+    img.src = url;
+  });
+
 // The SMS provider through our proxy: the Vite proxy in dev, the send-sms Edge Function in
 // production (it adds the provider token). At module level so pop-ups outside <App> (a
 // schedule handed to NextSMS) send the same way as Send All.
@@ -5522,14 +5573,16 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   const uploadImg = async (file, slot) => {
     if (!sb || !file) return;
     setUploading(slot);
-    const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-    const path = `${eventRow.id}/${slot}_${Date.now()}.${ext}`;
-    const { error } = await sb.storage.from("event-pages").upload(path, file, { contentType: file.type, upsert: true });
-    setUploading(null);
-    if (error) { showToast(`Upload failed: ${error.message}`, "warn"); return; }
-    const url = sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl;
-    setForm(f => ({ ...f, [slot]: url }));
-    showToast("Image uploaded", "success");
+    try {
+      const blob = await compressImageToBlob(file, { maxKb: 500, maxWidth: 1920, quality: 0.85 });
+      const path = `${eventRow.id}/${slot}_${Date.now()}.jpg`;
+      const { error } = await sb.storage.from("event-pages").upload(path, blob, { contentType: "image/jpeg", upsert: true });
+      if (error) { showToast(`Upload failed: ${error.message}`, "warn"); return; }
+      const url = sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl;
+      setForm(f => ({ ...f, [slot]: url }));
+      showToast("Image uploaded", "success");
+    } catch (e) { showToast(`Upload failed: ${e.message}`, "warn"); }
+    finally { setUploading(null); }
   };
 
   const save = async () => {
@@ -5715,14 +5768,14 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                         <input type="file" accept="image/*" style={{display:"none"}} onChange={async e => {
                           if (!e.target.files[0]) return;
                           setUploading(`gallery_${i}`);
-                          const file = e.target.files[0];
-                          const ext = (file.name.split(".").pop()||"jpg").toLowerCase();
-                          const path = `${eventRow.id}/gallery_${Date.now()}.${ext}`;
-                          const { error } = await sb.storage.from("event-pages").upload(path, file, { contentType: file.type, upsert: true });
-                          setUploading(null);
-                          if (error) { showToast(`Upload failed: ${error.message}`, "warn"); e.target.value=""; return; }
-                          setGallery(i, sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl);
-                          e.target.value="";
+                          try {
+                            const blob = await compressImageToBlob(e.target.files[0], { maxKb: 400, maxWidth: 1200, quality: 0.85 });
+                            const path = `${eventRow.id}/gallery_${Date.now()}.jpg`;
+                            const { error } = await sb.storage.from("event-pages").upload(path, blob, { contentType: "image/jpeg", upsert: true });
+                            if (error) { showToast(`Upload failed: ${error.message}`, "warn"); }
+                            else setGallery(i, sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl);
+                          } catch (err) { showToast(`Upload failed: ${err.message}`, "warn"); }
+                          finally { setUploading(null); e.target.value = ""; }
                         }} />
                       </label>
                       <button className="nk-btn nk-btn-ghost" style={{color:N.red,flexShrink:0}} onClick={() => removeGallery(i)}><Icon n="trash" /></button>
@@ -7138,11 +7191,12 @@ export default function App() {
   const uploadTemplateToStorage = async (dataUrl) => {
     if (!supabase) return null;
     try {
-      const res  = await fetch(dataUrl);
-      const blob = await res.blob();
-      const ext  = blob.type.split("/")[1] || "png";
-      const path = `templates/tmpl_${Date.now()}.${ext}`;
-      const { error } = await supabase.storage.from("templates").upload(path, blob, { contentType:blob.type });
+      // Compress to JPEG at high quality (1200 KB max, 1600 px wide) so the template stays
+      // sharp for card rendering while keeping Storage usage manageable
+      const blob = await compressImageToBlob(dataUrl, { maxKb: 1200, maxWidth: 1600, quality: 0.90 });
+      if (!blob) return null;
+      const path = `templates/tmpl_${Date.now()}.jpg`;
+      const { error } = await supabase.storage.from("templates").upload(path, blob, { contentType: "image/jpeg" });
       if (error) { console.warn("Storage:", error.message); return null; }
       const { data: { publicUrl } } = supabase.storage.from("templates").getPublicUrl(path);
       return publicUrl;
@@ -8039,32 +8093,9 @@ export default function App() {
   };
 
   /* Step 1 — Upload personalized card to Supabase Storage, save public URL on record */
-  // Re-encodes a card PNG as JPEG, iteratively lowering quality (and downscaling
-  // width first) until the result is under `maxKb` — keeps WhatsApp image uploads
-  // fast and comfortably under the provider's size limit
-  const compressCard = (dataUrl, maxKb = 2800, quality = 0.88) => new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onerror = () => reject(new Error("Could not read the rendered card"));
-    img.onload = () => {
-      // Scale down if needed so the JPEG stays well under 3 MB
-      let w = img.width, h = img.height;
-      const MAX_W = 1200;
-      if (w > MAX_W) { h = Math.round(h * MAX_W / w); w = MAX_W; }
-      const canvas = document.createElement("canvas");
-      canvas.width = w; canvas.height = h;
-      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-      // Try progressively lower quality until under maxKb
-      let q = quality;
-      const tryEncode = () => {
-        const result = canvas.toDataURL("image/jpeg", q);
-        const kb = Math.round((result.length * 3) / 4 / 1024);
-        if (kb > maxKb && q > 0.4) { q = Math.max(q - 0.08, 0.4); tryEncode(); }
-        else resolve(result);
-      };
-      tryEncode();
-    };
-    img.src = dataUrl;
-  });
+  // Compresses a card dataUrl to a JPEG Blob: max 500 KB at 1200 px wide.
+  // Delegates to the module-level compressImageToBlob.
+  const compressCard = (dataUrl) => compressImageToBlob(dataUrl, { maxKb: 500, maxWidth: 1200, quality: 0.85 });
 
   // Renders one record's card, compresses it to JPEG, and uploads it to the
   // `wa-cards` Storage bucket; stores the resulting public URL on the record so
@@ -8076,8 +8107,7 @@ export default function App() {
     setRecords(rs => rs.map((r,i) => i===idx ? {...r, uploadStatus:"uploading"} : r));
     try {
       const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
-      const dataUrl = await compressCard(rawDataUrl);
-      const blob = await fetch(dataUrl).then(r => r.blob());
+      const blob = await compressCard(rawDataUrl);
       const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.jpg`;
       const { error: upErr } = await supabase.storage
         .from("wa-cards")
