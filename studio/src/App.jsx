@@ -6527,7 +6527,7 @@ export default function App() {
   const statusResetRef = useRef(null);
 
   /* ── Navigation ── */
-  const [tab, setTab] = useState("events");
+  const [tab, setTab] = useState(() => localStorage.getItem("nikadi_last_tab") || "events");
   const [menuOpen, setMenuOpen] = useState(false);   // mobile navigation drawer
   const [feedbackOpen, setFeedbackOpen] = useState(false);   // header "Feedback" pop-up
   const [navOpen, setNavOpen]   = useState(null);    // desktop: group whose sub-menu is open by click/tap (hover opens via CSS)
@@ -6767,7 +6767,7 @@ export default function App() {
       const lastId = localStorage.getItem("nikadi_last_event");
       if (lastId) {
         const ev = events.find(e => e.id === lastId);
-        if (ev) selectEvent(ev);
+        if (ev) selectEvent(ev, localStorage.getItem("nikadi_last_tab") || "design");
       }
     });
   }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6777,6 +6777,9 @@ export default function App() {
     if (savedEventId) localStorage.setItem("nikadi_last_event", savedEventId);
     else localStorage.removeItem("nikadi_last_event");
   }, [savedEventId]);
+
+  /* Persist active tab so the user lands back on the same section after a refresh */
+  useEffect(() => { localStorage.setItem("nikadi_last_tab", tab); }, [tab]);
 
   /* Auto-save the SMS draft to the event (debounced 1.5 s). This is separate from the manual
      "Save Template" button (events.sms_message): the draft is the working copy, and it is only
