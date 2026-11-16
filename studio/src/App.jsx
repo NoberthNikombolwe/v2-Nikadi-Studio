@@ -1358,7 +1358,7 @@ function LogSection({ title, color, styles, log, onClose }) {
   );
 }
 
-const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari. Imepakiwa na Nikadi Studio. Asante!";
+const DEFAULT_SMS_MESSAGE = "Habari {name}, kadi yako ya {cardType} ipo tayari.  Passcode: {passcode}, Imepakiwa na Nikadi Studio. Asante!";
 // Main navigation, in groups. eventOnly groups work on one event, so they only appear once an event is open.
 // Main navigation, in groups (tab bar on wide screens, drawer on phones / tablets)
 const NAV_GROUPS = [
