@@ -4879,7 +4879,13 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
     }
     return matchByName(cards || [], { name, cardType });
   };
-  const search = async (q) => (cards || []).filter(c => String(c.name || "").toLowerCase().includes(q.toLowerCase())).slice(0, 20);
+  const search = async (q) => {
+    const lq = q.trim().toLowerCase();
+    return (cards || []).filter(c =>
+      String(c.name     || "").toLowerCase().includes(lq) ||
+      String(c.card_code|| "").toLowerCase().includes(lq)
+    ).slice(0, 20);
+  };
   const checkIn = async (c, count, method) => {
     const { data, error: e } = await supabase.rpc("scan_card", { p_card_id: c.id, p_method: method, p_count: count, p_scanned_by: myEmail });
     if (e) throw e;

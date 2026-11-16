@@ -933,7 +933,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
     FROM event_cards c
    WHERE c.event_id = p_event AND public.scan_code_ok(p_event, p_code)
      AND ( (p_card IS NOT NULL AND c.id = p_card)
-        OR (p_card IS NULL AND length(trim(COALESCE(p_query,''))) >= 2 AND c.name ILIKE '%' || trim(p_query) || '%') )
+        OR (p_card IS NULL AND length(trim(COALESCE(p_query,''))) >= 2
+            AND (c.name ILIKE '%' || trim(p_query) || '%'
+              OR c.card_code ILIKE '%' || trim(p_query) || '%')) )
    ORDER BY c.name LIMIT 20
 $$;
 
