@@ -9605,7 +9605,7 @@ export default function App() {
                     <div style={{marginBottom:14}}>
                       <div style={{fontSize:10,color:N.textDim,marginBottom:6}}>Click to insert variable:</div>
                       <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                        {activeColumns.map(col => (
+                        {[...CARD_PLACEHOLDERS, ...activeColumns.filter(c => !CARD_PLACEHOLDERS.includes(c))].map(col => (
                           <button key={col}
                             onClick={() => {
                               const ta  = smsTextareaRef.current;

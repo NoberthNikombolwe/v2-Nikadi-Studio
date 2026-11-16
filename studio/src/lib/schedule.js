@@ -159,7 +159,7 @@ export const validateSchedule = (form = {}, ctx = {}) => {
     else {
       const unknown = placeholdersIn(body).filter(p => !CARD_PLACEHOLDERS.includes(p));
       if (unknown.length) {
-        errors.body = `${unknown.map(p => `{${p}}`).join(", ")} can't be filled in on a schedule — use {name}, {cardType} or {phone}`;
+        errors.body = `${unknown.map(p => `{${p}}`).join(", ")} can't be filled in on a schedule — use ${CARD_PLACEHOLDERS.map(p => `{${p}}`).join(", ")}`;
       }
     }
   }
