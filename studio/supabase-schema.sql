@@ -2218,4 +2218,30 @@ $$;
 REVOKE ALL ON FUNCTION public.submit_rsvp(TEXT, TEXT, BOOLEAN, TEXT) FROM public;
 GRANT EXECUTE ON FUNCTION public.submit_rsvp(TEXT, TEXT, BOOLEAN, TEXT) TO anon, authenticated;
 
+-- ── P. Event types ───────────────────────────────────────────────────────
+-- Managed in Settings → Event types; shown in the event and lead form dropdowns.
+-- Falls back to the hardcoded list in src/lib/crm.js when this table doesn't exist.
+CREATE TABLE IF NOT EXISTS event_type_options (
+  id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name       TEXT NOT NULL,
+  sort       INT  NOT NULL DEFAULT 0,
+  active     BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_event_type_options_name ON event_type_options (lower(trim(name)));
+INSERT INTO event_type_options (name, sort) VALUES
+  ('Wedding', 1), ('Conference', 2), ('Birthday', 3), ('Corporate', 4),
+  ('Graduation', 5), ('Religious', 6), ('Workshop', 7), ('Michango', 8), ('Other', 9)
+ON CONFLICT DO NOTHING;
+ALTER TABLE event_type_options ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.event_type_options FROM anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.event_type_options TO authenticated;
+GRANT ALL ON public.event_type_options TO service_role;
+DROP POLICY IF EXISTS p_event_type_options_select ON event_type_options;
+DROP POLICY IF EXISTS p_event_type_options_write  ON event_type_options;
+DROP POLICY IF EXISTS p_event_type_options_delete_super_admin ON event_type_options;
+CREATE POLICY p_event_type_options_select ON event_type_options FOR SELECT TO authenticated USING (public.is_active_user());
+CREATE POLICY p_event_type_options_write  ON event_type_options FOR ALL    TO authenticated USING (public.has_perm('settings', TRUE)) WITH CHECK (public.has_perm('settings', TRUE));
+CREATE POLICY p_event_type_options_delete_super_admin ON event_type_options AS RESTRICTIVE FOR DELETE TO authenticated USING (public.my_role() = 'superuser');
+
 NOTIFY pgrst, 'reload schema';
