@@ -1,0 +1,19 @@
+# Nikadi Studio — https://www.nikadi.co.tz
+# Allow search engines to crawl the site and discover public event pages.
+
+User-agent: *
+Allow: /
+Disallow: /assets/
+
+# Block Google Ads crawlers — the app is not ad-funded and does not need
+# ad relevance scoring.
+User-agent: AdsBot-Google
+Disallow: /
+
+User-agent: AdsBot-Google-Mobile
+Disallow: /
+
+User-agent: Mediapartners-Google
+Disallow: /
+
+Sitemap: https://www.nikadi.co.tz/sitemap.xml

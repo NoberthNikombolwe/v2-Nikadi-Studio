@@ -5,35 +5,91 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <!-- Page title + description (browser tab, search results) -->
-    <title>Nikadi Studio — Event Card Design &amp; Dispatch</title>
-    <meta name="description" content="Design personalised event invitation cards with QR codes and send them to every guest by WhatsApp and SMS. Nikadi Studio — www.nikadi.co.tz" />
+    <!-- Primary SEO -->
+    <title>Nikadi Studio — Event eCards &amp; Digital Invitations | Tanzania</title>
+    <meta name="description" content="Design personalised digital invitation cards for weddings, birthdays and corporate events. Send to every guest instantly by WhatsApp and SMS with QR codes. Tanzania's leading event eCard platform — www.nikadi.co.tz" />
+    <meta name="keywords" content="event cards Tanzania, wedding invitations Tanzania, digital invitations, ecards Tanzania, invitation cards, harusi ecards, birthday invitations Tanzania, WhatsApp invitations, SMS invitations, online wedding invitations, event invitation cards, digital event cards, Dar es Salaam events, Tanzania events, QR code invitations, Nikadi Studio" />
+    <meta name="author" content="Nikadi Studio" />
     <meta name="application-name" content="Nikadi Studio" />
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
     <meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0a1628" media="(prefers-color-scheme: dark)" />
 
-    <!-- Link previews (WhatsApp, Facebook, LinkedIn, X). Crawlers need absolute URLs:
-         %SITE_URL% is filled in at build time (vite.config.js; the Pages workflow sets it).
-         og-image.jpg: 1200x630, logo kept in the centre square for square crops -->
+    <!-- Local / geo SEO -->
+    <meta name="geo.region" content="TZ" />
+    <meta name="geo.placename" content="Tanzania" />
+    <meta name="DC.language" content="en" />
+
+    <!-- Canonical -->
+    <link rel="canonical" href="%SITE_URL%" />
+
+    <!-- Open Graph (WhatsApp, Facebook, LinkedIn, X) — crawlers need absolute URLs;
+         %SITE_URL% is replaced at build time by vite.config.js -->
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="Nikadi" />
-    <meta property="og:title" content="Nikadi Studio — Event Card Design &amp; Dispatch" />
-    <meta property="og:description" content="Design personalised event invitation cards with QR codes and send them to every guest by WhatsApp and SMS." />
+    <meta property="og:site_name" content="Nikadi Studio" />
+    <meta property="og:locale" content="en_TZ" />
+    <meta property="og:title" content="Nikadi Studio — Event eCards &amp; Digital Invitations" />
+    <meta property="og:description" content="Tanzania's event card platform. Design personalised digital invitations for weddings, birthdays and corporate events, then send to every guest by WhatsApp and SMS." />
     <meta property="og:url" content="%SITE_URL%" />
     <meta property="og:image" content="%SITE_URL%og-image.jpg" />
     <meta property="og:image:secure_url" content="%SITE_URL%og-image.jpg" />
     <meta property="og:image:type" content="image/jpeg" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Nikadi Studio logo over a lit event stage — event invitation cards by WhatsApp and SMS, www.nikadi.co.tz" />
+    <meta property="og:image:alt" content="Nikadi Studio — event invitation cards for Tanzania" />
 
+    <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Nikadi Studio — Event Card Design &amp; Dispatch" />
-    <meta name="twitter:description" content="Design personalised event invitation cards with QR codes and send them to every guest by WhatsApp and SMS." />
+    <meta name="twitter:title" content="Nikadi Studio — Event eCards &amp; Digital Invitations" />
+    <meta name="twitter:description" content="Tanzania's event card platform. Design personalised digital invitations for weddings, birthdays and corporate events, then send by WhatsApp and SMS." />
     <meta name="twitter:image" content="%SITE_URL%og-image.jpg" />
-    <meta name="twitter:image:alt" content="Nikadi Studio logo over a lit event stage — event invitation cards by WhatsApp and SMS, www.nikadi.co.tz" />
+    <meta name="twitter:image:alt" content="Nikadi Studio — event invitation cards for Tanzania" />
+
+    <!-- Structured data: Organization + WebSite -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Organization",
+          "@id": "%SITE_URL%#organization",
+          "name": "Nikadi Studio",
+          "url": "%SITE_URL%",
+          "logo": {
+            "@type": "ImageObject",
+            "url": "%SITE_URL%icon-512.png",
+            "width": 512,
+            "height": 512
+          },
+          "description": "Tanzania's event card design and delivery platform. Create personalised digital invitations for weddings, birthdays and corporate events, then send to every guest by WhatsApp and SMS.",
+          "areaServed": { "@type": "Country", "name": "Tanzania" },
+          "inLanguage": ["en", "sw"]
+        },
+        {
+          "@type": "WebSite",
+          "@id": "%SITE_URL%#website",
+          "url": "%SITE_URL%",
+          "name": "Nikadi Studio",
+          "description": "Event eCards and digital invitation cards for Tanzania",
+          "publisher": { "@id": "%SITE_URL%#organization" },
+          "inLanguage": ["en", "sw"]
+        },
+        {
+          "@type": "SoftwareApplication",
+          "name": "Nikadi Studio",
+          "applicationCategory": "BusinessApplication",
+          "operatingSystem": "Web",
+          "url": "%SITE_URL%",
+          "description": "Design and send personalised event invitation cards with QR codes via WhatsApp and SMS. Perfect for weddings, birthdays and corporate events in Tanzania.",
+          "offers": { "@type": "Offer", "priceCurrency": "TZS" },
+          "publisher": { "@id": "%SITE_URL%#organization" }
+        }
+      ]
+    }
+    </script>
   </head>
   <body>
     <div id="root"></div>

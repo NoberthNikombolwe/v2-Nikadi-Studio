@@ -440,22 +440,41 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
 
   useEffect(() => {
     if (!data) return;
-    const ps = data.page_settings || {};
+    const ps      = data.page_settings || {};
     const webName = ps.web_event_name || data.event_name || "Event";
-    const title = `${data.guest_name || "You"} — ${webName}`;
-    const desc  = `${data.event_type || "Invitation"} · ${fmtDate(data.start_datetime) || ""} · ${data.venue_name || ""}`.replace(/ · $/, "");
-    const img   = data.card_url || ps.hero_image_url || "";
+    const title   = `${data.guest_name || "You"} — ${webName}`;
+    const datePart = fmtDate(data.start_datetime) || "";
+    const descParts = [ps.tagline, data.event_type, data.venue_name, datePart].filter(Boolean);
+    const desc    = descParts.length ? descParts.join(" · ") : `Personalised event invitation — Nikadi Studio`;
+    const img     = data.card_url || ps.hero_image_url || "";
+    const canonical = `${window.location.origin}/g/${eventPublicId}/${guestPublicId}`;
+    const keywords  = [webName, data.event_type, data.venue_name, "event invitation", "Nikadi Studio"].filter(Boolean).join(", ");
+
     const setMeta = (prop, content, attr = "property") => {
       let el = document.querySelector(`meta[${attr}="${prop}"]`);
       if (!el) { el = document.createElement("meta"); el.setAttribute(attr, prop); document.head.appendChild(el); }
       el.content = content;
     };
+    const setLink = (rel, href) => {
+      let el = document.querySelector(`link[rel="${rel}"]`);
+      if (!el) { el = document.createElement("link"); el.rel = rel; document.head.appendChild(el); }
+      el.href = href;
+    };
+
     document.title = title;
-    setMeta("og:title", title); setMeta("og:description", desc); setMeta("og:type", "website");
+    setMeta("description",    desc,    "name");
+    setMeta("keywords",       keywords,"name");
+    setMeta("robots",         "noindex, nofollow", "name");
+    setLink("canonical",      canonical);
+    setMeta("og:title",       title);
+    setMeta("og:description", desc);
+    setMeta("og:type",        "website");
+    setMeta("og:url",         canonical);
+    setMeta("twitter:card",   "summary_large_image", "name");
+    setMeta("twitter:title",  title,   "name");
+    setMeta("twitter:description", desc, "name");
     if (img) { setMeta("og:image", img); setMeta("twitter:image", img, "name"); }
-    setMeta("twitter:card", "summary_large_image", "name");
-    setMeta("twitter:title", title, "name");
-  }, [data]);
+  }, [data, eventPublicId, guestPublicId]);
 
   const downloadCard = async () => {
     if (!data?.card_url) return;

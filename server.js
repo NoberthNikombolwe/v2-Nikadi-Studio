@@ -62,7 +62,7 @@ const GUEST_PATH = /^\/g\/([A-Z0-9]{6,12})\/([A-Z0-9]{6,12})\/?$/i;
 const serveGuestPreview = async (req, res, eid, gid) => {
   const SB_URL = process.env.VITE_SUPABASE_URL;
   const SB_KEY = process.env.VITE_SUPABASE_ANON_KEY;
-  let cardUrl = null, eventName = "", guestName = "";
+  let d = null;
   if (SB_URL && SB_KEY) {
     try {
       const r = await fetchJson(`${SB_URL}/rest/v1/rpc/public_event_page_data`, {
@@ -70,37 +70,79 @@ const serveGuestPreview = async (req, res, eid, gid) => {
         headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
         body: JSON.stringify({ p_event_public_id: eid.toUpperCase(), p_guest_public_id: gid.toUpperCase() }),
       });
-      if (r.ok && r.json) {
-        // Fallback chain: guest's card → event page hero → event cover template → og-image.jpg
-        cardUrl   = r.json.card_url
-                 || r.json.page_settings?.hero_image_url
-                 || r.json.cover_image_url
-                 || null;
-        eventName = r.json.page_settings?.web_event_name || r.json.event_name || "";
-        guestName = r.json.guest_name || "";
-      } else {
-        console.error(`[guest-preview] RPC failed ${r.ok ? "null response" : "status non-2xx"} for ${eid}/${gid}`);
-      }
+      if (r.ok && r.json) { d = r.json; }
+      else { console.error(`[guest-preview] RPC failed ${r.ok ? "null response" : "status non-2xx"} for ${eid}/${gid}`); }
     } catch (err) {
       console.error(`[guest-preview] RPC error for ${eid}/${gid}:`, err.message);
     }
   }
-  const spaUrl = `/#/g/${eid.toUpperCase()}/${gid.toUpperCase()}`;
-  const title  = [eventName, guestName].filter(Boolean).join(" — ") || "Your Invitation";
-  const image  = cardUrl || `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}/og-image.jpg`;
+
+  const ps        = d?.page_settings || {};
+  const eventName = ps.web_event_name || d?.event_name || "";
+  const guestName = d?.guest_name || "";
+  const eventType = d?.event_type || "";
+  const venueName = d?.venue_name || "";
+  const startDt   = d?.start_datetime || null;
+  const tagline   = ps.tagline || "";
+
+  // Fallback chain: guest's card → event page hero → event cover → generic OG image
+  const proto   = req.headers["x-forwarded-proto"] || "https";
+  const host    = req.headers.host || "www.nikadi.co.tz";
+  const baseUrl = `${proto}://${host}`;
+  const image   = d?.card_url || ps.hero_image_url || d?.cover_image_url || `${baseUrl}/og-image.jpg`;
+  const spaUrl  = `/#/g/${eid.toUpperCase()}/${gid.toUpperCase()}`;
+  const canonical = `${baseUrl}/g/${eid.toUpperCase()}/${gid.toUpperCase()}`;
+
+  const title = [eventName, guestName && `${guestName}'s Invitation`].filter(Boolean).join(" — ") || "Event Invitation";
+
+  // Description: tagline > type · venue · date
+  const datePart = startDt ? new Date(startDt).toLocaleDateString("en-TZ", { day: "numeric", month: "long", year: "numeric" }) : "";
+  const descParts = [tagline, eventType, venueName, datePart].filter(Boolean);
+  const desc = descParts.length ? descParts.join(" · ") : `Personalised event invitation — Nikadi Studio`;
+
+  // JSON-LD Event structured data (helps WhatsApp and Google understand the page)
+  const eventSchema = eventName ? JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Event",
+    "name": eventName,
+    "description": desc,
+    ...(startDt     ? { "startDate": startDt }                : {}),
+    ...(d?.end_datetime ? { "endDate": d.end_datetime }       : {}),
+    ...(venueName   ? { "location": {
+                          "@type": "Place", "name": venueName,
+                          ...(d?.venue_address ? { "address": d.venue_address } : {}),
+                        } } : {}),
+    "image": image,
+    "organizer": { "@type": "Organization", "name": "Nikadi Studio", "url": `${baseUrl}/` },
+    "eventStatus": "https://schema.org/EventScheduled",
+    "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode",
+  }) : null;
+
+  // Personal invitation pages should not appear in search results.
+  // The noindex here matches the PublicGuestPage component's own meta update.
   const html = `<!doctype html><html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escHtml(title)}</title>
+<meta name="description" content="${escHtml(desc)}">
+<meta name="robots" content="noindex, nofollow">
+<link rel="canonical" href="${escHtml(canonical)}">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="Nikadi Studio">
 <meta property="og:title" content="${escHtml(title)}">
+<meta property="og:description" content="${escHtml(desc)}">
+<meta property="og:url" content="${escHtml(canonical)}">
 <meta property="og:image" content="${escHtml(image)}">
 <meta property="og:image:width" content="800">
 <meta property="og:image:height" content="600">
-<meta property="twitter:card" content="summary_large_image">
-<meta property="twitter:title" content="${escHtml(title)}">
-<meta property="twitter:image" content="${escHtml(image)}">
-<script>window.location.replace(${JSON.stringify(spaUrl)});</script>
+<meta property="og:image:alt" content="${escHtml(title)}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${escHtml(title)}">
+<meta name="twitter:description" content="${escHtml(desc)}">
+<meta name="twitter:image" content="${escHtml(image)}">
+<meta name="twitter:image:alt" content="${escHtml(title)}">
+${eventSchema ? `<script type="application/ld+json">${eventSchema}<\/script>` : ""}
+<script>window.location.replace(${JSON.stringify(spaUrl)});<\/script>
 <noscript><meta http-equiv="refresh" content="0;url=${escHtml(spaUrl)}"></noscript>
 </head><body></body></html>`;
   res.writeHead(200, { ...SECURITY, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
