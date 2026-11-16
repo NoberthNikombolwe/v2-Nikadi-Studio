@@ -7185,8 +7185,10 @@ export default function App() {
   // WhatsApp template / SMS sender for the open event: its own choice, else the Settings default
   const activeWaTemplates = access.waTemplates.filter(t => t.active);
   useEffect(() => {
-    const t = resolveChoice(access.waTemplates, openEventRow?.wa_template, "name");
-    if (t) setWaTemplate(t.name);
+    const saved = openEventRow?.wa_template;
+    const t = resolveChoice(access.waTemplates, saved, "name");
+    // resolveChoice falls back to the default when `saved` isn't in the managed list (custom names). Use the raw saved value in that case.
+    setWaTemplate(saved && !access.waTemplates.find(x => x.name === saved) ? saved : (t?.name || "Mwaliko"));
   }, [savedEventId, access.waTemplates, openEventRow?.wa_template]);
   const waAccount = access.waTemplates.find(t => t.name === waTemplate)?.account || access.settings.wa_account || "Nikadi";
   const smsSender = resolveChoice(access.senderIds, openEventRow?.sms_sender_id, "sender_id")?.sender_id || smsSettings.senderId || "NIKADI";
@@ -10015,6 +10017,7 @@ export default function App() {
                       className="nk-input"
                       value={waTemplate}
                       onChange={e => setWaTemplate(e.target.value)}
+                      onBlur={e => { const v = e.target.value.trim(); if (v && v !== openEventRow?.wa_template) chooseWaTemplate(v); }}
                       placeholder="or type a custom template…"
                       style={{marginBottom:20,fontSize:12}}
                     />
