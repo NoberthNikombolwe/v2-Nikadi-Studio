@@ -32,6 +32,8 @@ export const fillTemplate = (template = "", rec = {}) => String(template).replac
   if (key === "name")     return rec.name     || "";
   if (key === "cardType") return rec.cardType || "";
   if (key === "phone")    return rec.phone ? `+${normalisePhone(rec.phone)}` : "";
+  // {passcode} = the guest's scan code (card_code), useful for door entry without QR
+  if (key === "passcode") return rec.passcode || rec.cardCode || rec.card_code || "";
   return rec[key] !== undefined && rec[key] !== null ? String(rec[key]) : `{${key}}`;
 });
 
@@ -39,7 +41,7 @@ export const fillTemplate = (template = "", rec = {}) => String(template).replac
 export const placeholdersIn = (text = "") => [...new Set([...String(text).matchAll(/\{(\w+)\}/g)].map(m => m[1]))];
 
 // Placeholders the server can fill on its own: only these are stored on event_cards
-export const CARD_PLACEHOLDERS = ["name", "cardType", "phone"];
+export const CARD_PLACEHOLDERS = ["name", "cardType", "phone", "passcode"];
 
 /* ── Provider status codes (NextSMS API docs → "Statuses") ── */
 
@@ -348,10 +350,10 @@ export const scheduleTargets = (cards = [], { channel = "sms", audience = "all",
     if (!String(c.phone ?? "").trim()) { skipped.noPhone++; continue; }
     if (!isValidPhone(c.phone))        { skipped.invalid++; continue; }
     const phone = normalisePhone(c.phone);
-    const base = { id: c.id ?? null, name: c.name || "", cardType: c.card_type || "", phone };
+    const base = { id: c.id ?? null, name: c.name || "", cardType: c.card_type || "", phone, passcode: c.card_code || "" };
     let key, target;
     if (channel === "sms") {
-      const text = fillTemplate(body, { name: base.name, cardType: base.cardType, phone });
+      const text = fillTemplate(body, { name: base.name, cardType: base.cardType, phone, passcode: base.passcode });
       key = `${phone}|${text}`;
       target = { ...base, text };
     } else {
