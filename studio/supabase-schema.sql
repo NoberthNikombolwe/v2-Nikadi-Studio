@@ -589,7 +589,7 @@ CREATE TABLE IF NOT EXISTS wa_templates (
   account          TEXT,                      -- provider account; NULL = app_settings.wa_account
   has_image_header       BOOLEAN NOT NULL DEFAULT TRUE,
   personalisation_fields JSONB NOT NULL DEFAULT '[]',  -- [{ key, source }] template body variables mapped to recipient fields
-  quick_reply_fields     JSONB NOT NULL DEFAULT '[]',  -- [{ button_index, source }] per-button payload per recipient (sent back as reply)
+  quick_reply_fields     JSONB NOT NULL DEFAULT '[]',  -- [{ button_index, source, button_text, call_outcome }] per-button payload + reply matching
   preview          TEXT,
   is_default       BOOLEAN NOT NULL DEFAULT FALSE,
   active           BOOLEAN NOT NULL DEFAULT TRUE,
@@ -633,7 +633,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_ids_default   ON sender_ids   ((is_d
 
 -- Per-recipient personalisation fields on WA templates: [{ key, source }]
 ALTER TABLE wa_templates ADD COLUMN IF NOT EXISTS personalisation_fields JSONB NOT NULL DEFAULT '[]';
--- Per-button quick-reply payload per recipient: [{ button_index, source }]
+-- Per-button quick-reply payload per recipient: [{ button_index, source, button_text, call_outcome }]
 ALTER TABLE wa_templates ADD COLUMN IF NOT EXISTS quick_reply_fields JSONB NOT NULL DEFAULT '[]';
 
 -- Per-event choices (NULL = use the default)

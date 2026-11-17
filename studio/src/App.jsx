@@ -2735,15 +2735,19 @@ function useAccess({ userId, email, showToast }) {
     setUsers(data);
   };
 
-  // Generic save for the settings tables: insert (no id) or update; refreshes the lists
+  // Generic save for the settings tables: insert (no id) or update; refreshes the lists.
+  // For updates we select back the id — if 0 rows come back the write was silently blocked
+  // (RLS or the row was deleted) and we surface a clear error rather than a phantom success.
   const save = async (table, row, what, idKey = "id") => {
     setBusy(true);
     const id = row[idKey];
     const body = { ...row }; if (idKey === "id") delete body.id;
-    const q = id && idKey === "id" ? supabase.from(table).update(body).eq("id", id) : supabase.from(table).upsert([body]);
-    const { error } = await q;
+    const isUpd = !!(id && idKey === "id");
+    const q = isUpd ? supabase.from(table).update(body).eq("id", id).select("id") : supabase.from(table).upsert([body]);
+    const { data, error } = await q;
     setBusy(false);
     if (error) return fail(`Could not save ${what}`, error);
+    if (isUpd && (!data || !data.length)) return fail(`Could not save ${what}`, { message: "Nothing was updated — the row may have been removed or the change was blocked by your permissions. Try refreshing." });
     showToast(`${what[0].toUpperCase()}${what.slice(1)} saved`, "success");
     await (table === "app_users" ? loadUsers() : loadAll());
     return true;
