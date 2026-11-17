@@ -22,6 +22,8 @@ const LANG = {
     willAttend:"I Will Attend", wontAttend:"I Won't Attend",
     rsvpPlaceholder:"Leave a message (optional)…",
     rsvpClosed:"RSVPs are closed for this event.", rsvpNoPhone:"No phone number on file.",
+    rsvpSaving:"Saving…", rsvpSent:"Response recorded!", rsvpAlready:"Your response has been saved.",
+    rsvpNotify:"Notify organiser on WhatsApp",
     eventStarted:"The event has started!", days:"Days", hours:"Hours", mins:"Mins", secs:"Secs",
     generatingQR:"Generating…", celebration:"A celebration to look forward to",
     defaultTagline:"Your invitation, venue map, ceremony and reception times are all here.",
@@ -46,6 +48,8 @@ const LANG = {
     willAttend:"Nitahudhuria", wontAttend:"Sitahudhuria",
     rsvpPlaceholder:"Acha ujumbe (si lazima)…",
     rsvpClosed:"RSVP zimefungwa kwa tukio hili.", rsvpNoPhone:"Nambari ya simu haijapatikana.",
+    rsvpSaving:"Inasalisha…", rsvpSent:"Jibu limesajiliwa!", rsvpAlready:"Jibu lako limehifadhiwa.",
+    rsvpNotify:"Arifa mpangaji kupitia WhatsApp",
     eventStarted:"Tukio limeanza!", days:"Siku", hours:"Masaa", mins:"Dak", secs:"Sek",
     generatingQR:"Inaunda…", celebration:"Tukio zuri linakungoja",
     defaultTagline:"Mwaliko wako, ramani ya ukumbi, wakati wa sherehe na mapokezi yako yote yako hapa.",
@@ -395,8 +399,11 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
   const [state,    setState]  = useState("loading");
   const [data,     setData]   = useState(null);
   const [error,    setError]  = useState(null);
-  const [dlBusy,   setDlBusy] = useState(false);
-  const [rsvpMsg,  setRsvpMsg] = useState("");
+  const [dlBusy,   setDlBusy]   = useState(false);
+  const [rsvpMsg,  setRsvpMsg]  = useState("");
+  const [rsvpBusy, setRsvpBusy] = useState(false);
+  const [rsvpDone, setRsvpDone] = useState(null); // "yes" | "no" | null
+  const [rsvpErr,  setRsvpErr]  = useState(null);
   const [openSched, setOpenSched] = useState(null);
   const [lang,      setLang]      = useState("en");
   const [lightbox,  setLightbox]  = useState(null); // { images:[], idx:0 }
@@ -492,12 +499,11 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
     setDlBusy(false);
   };
 
-  const openRsvpWhatsapp = (attending) => {
-    const phone = data?.guest_phone;
+  const openRsvpWhatsapp = (attending, ps) => {
+    const phone = ps?.rsvp_notify_phone;
     if (!phone) return;
-    const ps     = data.page_settings || {};
-    const name   = data.guest_name || "";
-    const evt    = ps.web_event_name || data.event_name || "";
+    const name   = data?.guest_name || "";
+    const evt    = ps.web_event_name || data?.event_name || "";
     const status = lang === "sw"
       ? (attending ? "Nitahudhuria" : "Sitahudhuria")
       : (attending ? "I will attend" : "I won't attend");
@@ -507,6 +513,27 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
       : `Hi, I'm ${name}. RSVP for ${evt}: ${status}.${extra}`;
     const normalized = String(phone).replace(/\D/g, "");
     window.open(`https://wa.me/${normalized}?text=${encodeURIComponent(msg)}`, "_blank", "noopener,noreferrer");
+  };
+
+  const handleRsvp = async (attending) => {
+    if (rsvpBusy || rsvpDone) return;
+    setRsvpBusy(true);
+    setRsvpErr(null);
+    try {
+      if (supabase) {
+        const { data: result, error } = await supabase.rpc("submit_rsvp", {
+          p_event_public_id: eventPublicId,
+          p_guest_public_id: guestPublicId,
+          p_attending:       attending,
+          p_message:         rsvpMsg.trim() || null,
+        });
+        if (error) { setRsvpErr(error.message); setRsvpBusy(false); return; }
+        if (result?.ok === false) { setRsvpErr(result.error || "Could not save"); setRsvpBusy(false); return; }
+      }
+      setRsvpDone(attending ? "yes" : "no");
+      openRsvpWhatsapp(attending, data?.page_settings || {});
+    } catch (e) { setRsvpErr(e.message); }
+    finally { setRsvpBusy(false); }
   };
 
   const addToCalendar = () => {
@@ -954,31 +981,50 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
                   style={{ width:"100%", minHeight:76, background:"#f8fafc", border:"1px solid #e2e8f0",
                     borderRadius:10, padding:"10px 14px", color:"#0f172a", fontFamily:"inherit",
                     fontSize:13, resize:"vertical", marginBottom:12, boxSizing:"border-box" }} />
-                {data?.guest_phone ? (
-                  <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
-                    {/* Will attend */}
-                    <button className="pg-btn" onClick={() => openRsvpWhatsapp(true)}
-                      style={{ flex:1, minWidth:120, background:"#25D366", color:"#fff",
-                        display:"flex", alignItems:"center", justifyContent:"center", gap:8,
-                        fontSize:14, fontWeight:700 }}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                      </svg>
-                      {t.willAttend}
-                    </button>
-                    {/* Won't attend */}
-                    <button className="pg-btn" onClick={() => openRsvpWhatsapp(false)}
-                      style={{ flex:1, minWidth:120, background:"transparent", color:"#374151",
-                        border:"2px solid #e2e8f0", display:"flex", alignItems:"center",
-                        justifyContent:"center", gap:8, fontSize:14, fontWeight:700 }}>
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="#25D366">
-                        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-                      </svg>
-                      {t.wontAttend}
-                    </button>
+                {rsvpDone ? (
+                  <div style={{ textAlign:"center", padding:"16px 0" }}>
+                    <div style={{ display:"inline-flex", alignItems:"center", gap:8, padding:"10px 20px",
+                      background: rsvpDone==="yes" ? "#dcfce7" : "#fef2f2",
+                      border: `1px solid ${rsvpDone==="yes" ? "#86efac" : "#fca5a5"}`,
+                      borderRadius:10, fontSize:14, fontWeight:700,
+                      color: rsvpDone==="yes" ? "#15803d" : "#b91c1c" }}>
+                      {rsvpDone==="yes" ? "✓" : "✕"} {t.rsvpSent}
+                    </div>
+                    <div style={{ marginTop:10, fontSize:12, color:"#64748b" }}>
+                      {rsvpDone==="yes" ? t.willAttend : t.wontAttend}
+                    </div>
+                    {ps.rsvp_notify_phone && (
+                      <button className="pg-btn" style={{ margin:"12px auto 0", background:"#25D366", color:"#fff", fontSize:13, padding:"10px 20px" }}
+                        onClick={() => openRsvpWhatsapp(rsvpDone==="yes", ps)}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink:0 }}>
+                          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                        </svg>
+                        {t.rsvpNotify}
+                      </button>
+                    )}
                   </div>
                 ) : (
-                  <div style={{ fontSize:13, color:"#94a3b8", textAlign:"center" }}>{t.rsvpNoPhone}</div>
+                  <div>
+                    <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                      {/* Will attend */}
+                      <button className="pg-btn" onClick={() => handleRsvp(true)} disabled={rsvpBusy}
+                        style={{ flex:1, minWidth:120, background:"#25D366", color:"#fff",
+                          display:"flex", alignItems:"center", justifyContent:"center", gap:8,
+                          fontSize:14, fontWeight:700 }}>
+                        {rsvpBusy ? "…" : t.willAttend}
+                      </button>
+                      {/* Won't attend */}
+                      <button className="pg-btn" onClick={() => handleRsvp(false)} disabled={rsvpBusy}
+                        style={{ flex:1, minWidth:120, background:"transparent", color:"#374151",
+                          border:"2px solid #e2e8f0", display:"flex", alignItems:"center",
+                          justifyContent:"center", gap:8, fontSize:14, fontWeight:700 }}>
+                        {rsvpBusy ? "…" : t.wontAttend}
+                      </button>
+                    </div>
+                    {rsvpErr && (
+                      <div style={{ marginTop:8, fontSize:12, color:"#ef4444", textAlign:"center" }}>{rsvpErr}</div>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
