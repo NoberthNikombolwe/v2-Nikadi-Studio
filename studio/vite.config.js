@@ -2,6 +2,7 @@ import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import process from 'node:process'
 import { runCleanChat, CLEAN_LIMITS } from './supabase/functions/_shared/dataClean.js'
+import { runEventPageChat, PAGE_LIMITS } from './supabase/functions/_shared/aiEventPage.js'
 
 // URL path the app is served from. "/" locally; the GitHub Pages workflow sets
 // VITE_BASE_PATH=/<repo-name>/ because Pages serves the site from a sub-folder.
@@ -54,9 +55,45 @@ const aiCleanDevPlugin = {
   },
 }
 
+// `npm run dev` only: answers /ai-page (the Studio's "AI Design assistant") the way the
+// ai-event-page Edge Function does in production.
+const aiPageDevPlugin = {
+  name: 'nikadi-ai-page-dev',
+  apply: 'serve',
+  configureServer(server) {
+    const env = { ...loadEnv(server.config.mode, server.config.envDir || server.config.root, ''), ...process.env }
+    const send = (res, status, body) => {
+      res.statusCode = status
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify(body))
+    }
+    server.middlewares.use('/ai-page', async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { error: 'Method not allowed' })
+      const apiKey = String(env.GEMINI_API_KEY || '').trim()
+      if (!apiKey) return send(res, 500, { error: 'No GEMINI_API_KEY — add it to .env.development.local (without VITE_) and restart npm run dev.' })
+      let raw = ''
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > PAGE_LIMITS.bodyBytes) return send(res, 413, { error: 'Request is too large.' })
+      }
+      let payload
+      try { payload = JSON.parse(raw) } catch { return send(res, 400, { error: 'The request could not be read.' }) }
+      const out = await runEventPageChat(payload?.messages, {
+        apiKey,
+        model: env.GEMINI_MODEL,
+        post: async (url, init) => {
+          const r = await fetch(url, { method: 'POST', ...init, signal: AbortSignal.timeout(60_000) })
+          return { status: r.status, text: await r.text() }
+        },
+      })
+      send(res, out.status, out.body)
+    })
+  },
+}
+
 export default defineConfig({
   base,
-  plugins: [react(), siteUrlPlugin, aiCleanDevPlugin],
+  plugins: [react(), siteUrlPlugin, aiCleanDevPlugin, aiPageDevPlugin],
   server: {
     proxy: {
       '/sms-proxy': {

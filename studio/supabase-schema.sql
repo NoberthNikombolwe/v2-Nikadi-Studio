@@ -587,7 +587,9 @@ CREATE TABLE IF NOT EXISTS wa_templates (
   name             TEXT NOT NULL UNIQUE,      -- the template name registered with the WhatsApp provider
   label            TEXT,
   account          TEXT,                      -- provider account; NULL = app_settings.wa_account
-  has_image_header BOOLEAN NOT NULL DEFAULT TRUE,
+  has_image_header       BOOLEAN NOT NULL DEFAULT TRUE,
+  personalisation_fields JSONB NOT NULL DEFAULT '[]',  -- [{ key, source }] template body variables mapped to recipient fields
+  quick_reply_fields     JSONB NOT NULL DEFAULT '[]',  -- [{ button_index, source }] per-button payload per recipient (sent back as reply)
   preview          TEXT,
   is_default       BOOLEAN NOT NULL DEFAULT FALSE,
   active           BOOLEAN NOT NULL DEFAULT TRUE,
@@ -628,6 +630,11 @@ ON CONFLICT DO NOTHING;
 -- One default at a time for templates and sender IDs
 CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_templates_default ON wa_templates ((is_default)) WHERE is_default;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_sender_ids_default   ON sender_ids   ((is_default)) WHERE is_default;
+
+-- Per-recipient personalisation fields on WA templates: [{ key, source }]
+ALTER TABLE wa_templates ADD COLUMN IF NOT EXISTS personalisation_fields JSONB NOT NULL DEFAULT '[]';
+-- Per-button quick-reply payload per recipient: [{ button_index, source }]
+ALTER TABLE wa_templates ADD COLUMN IF NOT EXISTS quick_reply_fields JSONB NOT NULL DEFAULT '[]';
 
 -- Per-event choices (NULL = use the default)
 ALTER TABLE events ADD COLUMN IF NOT EXISTS sms_sender_id TEXT;
@@ -2166,6 +2173,7 @@ BEGIN
       'gallery',             v_page.gallery,
       'rsvp_enabled',        v_page.rsvp_enabled,
       'rsvp_message',        v_page.rsvp_message,
+      'rsvp_notify_phone',   v_page.rsvp_notify_phone,
       'venue_lat',           v_page.venue_lat,
       'venue_lng',           v_page.venue_lng,
       'venue_description',   v_page.venue_description,
@@ -2211,6 +2219,16 @@ BEGIN
 
   INSERT INTO event_rsvps (event_id, card_id, attending, message)
   VALUES (v_event_id, v_card_id, p_attending, p_message);
+
+  -- Automatically update the guest's call status so it appears in Studio's Calls report
+  IF v_card_id IS NOT NULL THEN
+    UPDATE event_cards
+    SET call_status     = CASE WHEN p_attending THEN 'yes' ELSE 'no' END,
+        call_comment    = COALESCE(NULLIF(TRIM(COALESCE(p_message, '')), ''), call_comment),
+        call_updated_at = NOW(),
+        call_by         = 'rsvp'
+    WHERE id = v_card_id;
+  END IF;
 
   RETURN jsonb_build_object('ok', TRUE);
 END;

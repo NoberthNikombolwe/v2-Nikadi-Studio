@@ -636,18 +636,23 @@ const CSS = `
 
   .nk-table tbody tr:last-child td { border-bottom: none; }
 
-  /* Phones: tables keep only their important columns and actions. A table lists the columns
-     to drop as classes ("m-hide-3" drops the 3rd: hideColumnRules, src/lib/mobileTable.js),
-     one cell or button can carry "m-hide", and "m-act" pins the last (actions) column to the
-     right edge while the rest scrolls under it. */
+  /* m-act: pin the last (actions) column to the right at ALL screen sizes so it stays
+     visible when the table scrolls horizontally on wide or data-heavy tables. */
+  .nk-table.m-act tr > :last-child:not([colspan]) { position: sticky; right: 0; z-index: 1; background: ${N.navy800}; box-shadow: -12px 0 12px -12px var(--nk-shadow); }
+  .nk-table.m-act thead tr > :last-child { background: ${N.navy700}; z-index: 2; }
+  .nk-table.m-act tbody tr:nth-child(even) > :last-child:not([colspan]) { background: ${N.navy700}; }
+  .nk-table.m-act tbody tr:hover > :last-child:not([colspan]) { background: ${alpha(N.navy700,"88")}; }
+  .nk-table.m-act tbody tr.row-active > :last-child:not([colspan]) { background: ${alpha(N.sky,"10")}; }
+
+  /* Phones: tables keep only their important columns. A table lists the columns to drop as
+     classes ("m-hide-3" drops the 3rd: hideColumnRules, src/lib/mobileTable.js), one cell or
+     button can carry "m-hide". The m-act sticky rules apply at all sizes (see above). */
   @media (max-width: 640px) {
     .nk-table td, .nk-table thead th { padding: 8px 9px; }
     .nk-table thead th { font-size: 9px; letter-spacing: .8px; }
     .nk-table td { font-size: 12px; max-width: 60vw; }
     .nk-table .m-hide,
     ${hideColumnRules(".nk-table")} { display: none !important; }
-    .nk-table.m-act tr > :last-child:not([colspan]) { position: sticky; right: 0; z-index: 1; background: ${N.navy800}; box-shadow: -12px 0 12px -12px var(--nk-shadow); }
-    .nk-table.m-act thead tr > :last-child { background: ${N.navy700}; z-index: 2; }
     .nk-row-actions { gap: 4px; }
     .nk-table .nk-btn-sm { height: 34px; }
     .nk-table .nk-btn-sm.has-icon, .nk-table .nk-btn-sm.icon-only { width: 34px; }
@@ -1239,7 +1244,10 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
           </span>
         )}
       </td>
-      <td><WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} /></td>
+      <td>
+        <WaBadge status={rec.waStatus||WA.idle} reason={rec.waReason} />
+        {rec.waReply && <span className="nk-badge badge-sent" style={{marginLeft:4,fontSize:10}} title={`Replied: ${rec.waReply}`}><Icon n="undo" /> {rec.waReply.length > 16 ? rec.waReply.slice(0, 16) + "…" : rec.waReply}</span>}
+      </td>
       <td>
         <SmsBadge status={rec.smsStatus} reason={rec.smsReason} />
       </td>
@@ -3131,7 +3139,7 @@ function TemplatesSettings({ access, askDialog }) {
   return (
     <ListEditor title="WhatsApp templates" canEdit={canEdit} busy={access.busy} rows={access.waTemplates} rowLabel={t => t.name}
       hint="Templates registered with the WhatsApp provider. The default is preselected; each event can choose its own in the WhatsApp tab."
-      blank={{ name: "", label: "", account: "", has_image_header: true, preview: "", active: true, sort: access.waTemplates.length + 1 }}
+      blank={{ name: "", label: "", account: "", has_image_header: true, personalisation_fields: [], quick_reply_fields: [], preview: "", active: true, sort: access.waTemplates.length + 1 }}
       columns={[
         { h: "Template", cell: t => <><div style={{fontWeight:700,color:N.text,fontFamily:"JetBrains Mono, monospace"}}>{t.name}</div><div style={{fontSize:11,color:N.textDim}}>{t.label || "—"}</div></> },
         { h: "Account",  opt: true, cell: t => t.account || <span style={{color:N.textDim}}>{access.settings.wa_account} (default)</span> },
@@ -3140,22 +3148,113 @@ function TemplatesSettings({ access, askDialog }) {
       ]}
       validate={f => validateTemplate(f, access.waTemplates)}
       onSave={f => access.save("wa_templates", { id: f.id, name: f.name.trim(), label: f.label?.trim() || null, account: f.account?.trim() || null,
-        has_image_header: !!f.has_image_header, preview: f.preview?.trim() || null, active: !!f.active, sort: Number(f.sort) || 0 }, "template")}
+        has_image_header: !!f.has_image_header,
+        personalisation_fields: (f.personalisation_fields || []).filter(p => p.key?.trim()),
+        quick_reply_fields: (f.quick_reply_fields || []).filter(p => p.source?.trim() || p.button_text?.trim() || p.call_outcome),
+        preview: f.preview?.trim() || null, active: !!f.active, sort: Number(f.sort) || 0 }, "template")}
       onDelete={async t => (await confirmDelete(askDialog, `template ${t.name}`)) && access.remove("wa_templates", t.id, "template")}
       onDefault={t => access.makeDefault("wa_templates", t.id)}
-      renderForm={(f, set, e) => (
-        <>
-          <div className="nk-form-grid">
-            <Field label="Template name *" error={e.name}><input className="nk-input" autoFocus value={f.name} onChange={x => set(v => ({ ...v, name: x.target.value }))} placeholder="Exactly as registered, e.g. Mwaliko" /></Field>
-            <Field label="Label"><input className="nk-input" value={f.label || ""} onChange={x => set(v => ({ ...v, label: x.target.value }))} placeholder="Shown to staff" /></Field>
-            <Field label="Provider account"><input className="nk-input" value={f.account || ""} onChange={x => set(v => ({ ...v, account: x.target.value }))} placeholder={`Default: ${access.settings.wa_account}`} /></Field>
-            <Field label="Order"><input className="nk-input" type="number" value={f.sort ?? 0} onChange={x => set(v => ({ ...v, sort: x.target.value }))} /></Field>
-            <Field label="Preview text" span><textarea className="nk-input nk-textarea" rows={2} value={f.preview || ""} onChange={x => set(v => ({ ...v, preview: x.target.value }))} placeholder="What the guest reads (for reference)" /></Field>
-          </div>
-          <Toggle checked={f.has_image_header} onChange={c => set(v => ({ ...v, has_image_header: c }))} label="Sends the guest's card image" />{" "}
-          <Toggle checked={f.active} onChange={c => set(v => ({ ...v, active: c }))} label="Active" />
-        </>
-      )} />
+      renderForm={(f, set, e) => {
+        const pFields = f.personalisation_fields || [];
+        const setPFields = fn => set(v => ({ ...v, personalisation_fields: fn(v.personalisation_fields || []) }));
+        const qrFields = f.quick_reply_fields || [];
+        const setQrFields = fn => set(v => ({ ...v, quick_reply_fields: fn(v.quick_reply_fields || []) }));
+        const SOURCE_HINTS = ["name", "phone", "cardType"];
+        return (
+          <>
+            <div className="nk-form-grid">
+              <Field label="Template name *" error={e.name}><input className="nk-input" autoFocus value={f.name} onChange={x => set(v => ({ ...v, name: x.target.value }))} placeholder="Exactly as registered, e.g. Mwaliko" /></Field>
+              <Field label="Label"><input className="nk-input" value={f.label || ""} onChange={x => set(v => ({ ...v, label: x.target.value }))} placeholder="Shown to staff" /></Field>
+              <Field label="Provider account"><input className="nk-input" value={f.account || ""} onChange={x => set(v => ({ ...v, account: x.target.value }))} placeholder={`Default: ${access.settings.wa_account}`} /></Field>
+              <Field label="Order"><input className="nk-input" type="number" value={f.sort ?? 0} onChange={x => set(v => ({ ...v, sort: x.target.value }))} /></Field>
+              <Field label="Preview text" span><textarea className="nk-input nk-textarea" rows={2} value={f.preview || ""} onChange={x => set(v => ({ ...v, preview: x.target.value }))} placeholder="What the guest reads (for reference)" /></Field>
+            </div>
+            <Toggle checked={f.has_image_header} onChange={c => set(v => ({ ...v, has_image_header: c }))} label="Sends the guest's card image" />{" "}
+            <Toggle checked={f.active} onChange={c => set(v => ({ ...v, active: c }))} label="Active" />
+            <div style={{marginTop:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <div>
+                  <span style={{fontWeight:700,fontSize:12,color:N.text}}>Body personalisation</span>
+                  <span style={{fontSize:11,color:N.textDim,marginLeft:8}}>Variables filled per recipient (e.g. name, phone)</span>
+                </div>
+                <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"2px 8px"}}
+                  onClick={() => setPFields(ps => [...ps, { key: "", source: "name" }])}>
+                  <Icon n="plus" /> Add variable
+                </button>
+              </div>
+              {pFields.length > 0 && (
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:6,fontSize:11,color:N.textDim,paddingBottom:2}}>
+                    <span>Template variable (key)</span><span>Guest field (source)</span><span />
+                  </div>
+                  {pFields.map((p, pi) => (
+                    <div key={pi} style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:6,alignItems:"center"}}>
+                      <input className="nk-input" style={{fontSize:12}} value={p.key || ""} placeholder='e.g. name'
+                        onChange={x => setPFields(ps => ps.map((r,i) => i===pi ? {...r, key: x.target.value} : r))} />
+                      <input className="nk-input" style={{fontSize:12}} value={p.source || ""} placeholder={SOURCE_HINTS.join(" / ")}
+                        list={`wa-pf-src-${pi}`}
+                        onChange={x => setPFields(ps => ps.map((r,i) => i===pi ? {...r, source: x.target.value} : r))} />
+                      <datalist id={`wa-pf-src-${pi}`}>{SOURCE_HINTS.map(s => <option key={s} value={s} />)}</datalist>
+                      <button className="nk-btn nk-btn-ghost" style={{padding:"2px 6px"}} aria-label="Remove variable"
+                        onClick={() => setPFields(ps => ps.filter((_,i) => i !== pi))}>
+                        <Icon n="x" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {pFields.length === 0 && (
+                <div style={{fontSize:11,color:N.textDim,padding:"6px 0"}}>No variables — the template body has no personalisation.</div>
+              )}
+            </div>
+            <div style={{marginTop:14}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <div>
+                  <span style={{fontWeight:700,fontSize:12,color:N.text}}>Quick reply buttons</span>
+                  <span style={{fontSize:11,color:N.textDim,marginLeft:8}}>Payload sent back when each button is clicked — used to track replies per guest</span>
+                </div>
+                <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"2px 8px"}}
+                  onClick={() => setQrFields(qs => [...qs, { button_index: qs.length, source: "phone" }])}>
+                  <Icon n="plus" /> Add button
+                </button>
+              </div>
+              {qrFields.length > 0 && (
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  <div style={{display:"grid",gridTemplateColumns:"60px 1fr 1fr 110px auto",gap:6,fontSize:11,color:N.textDim,paddingBottom:2}}>
+                    <span>Button #</span><span>Payload source</span><span>Button text (reply match)</span><span>Attending outcome</span><span />
+                  </div>
+                  {qrFields.map((q, qi) => (
+                    <div key={qi} style={{display:"grid",gridTemplateColumns:"60px 1fr 1fr 110px auto",gap:6,alignItems:"center"}}>
+                      <input className="nk-input" style={{fontSize:12}} type="number" min={0} max={9} value={q.button_index ?? qi} placeholder="0"
+                        onChange={x => setQrFields(qs => qs.map((r,i) => i===qi ? {...r, button_index: Number(x.target.value)} : r))} />
+                      <input className="nk-input" style={{fontSize:12}} value={q.source || ""} placeholder={SOURCE_HINTS.join(" / ")}
+                        list={`wa-qr-src-${qi}`}
+                        onChange={x => setQrFields(qs => qs.map((r,i) => i===qi ? {...r, source: x.target.value} : r))} />
+                      <datalist id={`wa-qr-src-${qi}`}>{SOURCE_HINTS.map(s => <option key={s} value={s} />)}</datalist>
+                      <input className="nk-input" style={{fontSize:12}} value={q.button_text || ""} placeholder="e.g. Nitakuwepo"
+                        title="Exact text registered for this button — matched against the guest's reply"
+                        onChange={x => setQrFields(qs => qs.map((r,i) => i===qi ? {...r, button_text: x.target.value} : r))} />
+                      <select className="nk-input" style={{fontSize:12,padding:"4px 6px"}} value={q.call_outcome || ""}
+                        onChange={x => setQrFields(qs => qs.map((r,i) => i===qi ? {...r, call_outcome: x.target.value} : r))}>
+                        <option value="">None</option>
+                        <option value="yes">Coming</option>
+                        <option value="no">Not coming</option>
+                      </select>
+                      <button className="nk-btn nk-btn-ghost" style={{padding:"2px 6px"}} aria-label="Remove button"
+                        onClick={() => setQrFields(qs => qs.filter((_,i) => i !== qi))}>
+                        <Icon n="x" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {qrFields.length === 0 && (
+                <div style={{fontSize:11,color:N.textDim,padding:"6px 0"}}>No quick reply buttons — replies won't have a unique payload.</div>
+              )}
+            </div>
+          </>
+        );
+      }} />
   );
 }
 
@@ -3288,6 +3387,11 @@ function GeneralSettings({ access }) {
         </div>
       ))}
       <p style={{fontSize:11,color:N.textDim}}>Changes save when you leave a field.</p>
+      <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${N.border}`}}>
+        <div style={{fontSize:13,fontWeight:700,color:N.text,marginBottom:8}}>Events</div>
+        <Toggle checked={access.settings.allow_event_delete !== false} disabled={!canEdit} onChange={c => access.saveSetting("allow_event_delete", c)} label="Allow event deletion" />
+        <div style={{fontSize:11,color:N.textDim,marginTop:4}}>When on, Super Admins can delete events and all associated data including card images. Turn off to prevent accidental deletion.</div>
+      </div>
       <CardFontsSettings access={access} canEdit={canEdit} />
     </div>
   );
@@ -5630,6 +5734,10 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   const [busy,    setBusy]    = useState(false);
   const [section, setSection] = useState("appearance");
   const [uploading, setUploading] = useState(null);
+  const [aiMessages, setAiMessages] = useState([]);
+  const [aiInput,    setAiInput]    = useState("");
+  const [aiLoading,  setAiLoading]  = useState(false);
+  const [aiError,    setAiError]    = useState(null);
 
   useEffect(() => {
     if (!sb) return;
@@ -5699,7 +5807,60 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     { id:"sponsors",   label:"Sponsors & Vendors", icon:"zap"   },
     { id:"rsvp",       label:"RSVP",             icon:"check"   },
     { id:"location",   label:"Location",         icon:"map"     },
+    { id:"ai",         label:"AI Assistant",     icon:"zap"     },
   ];
+
+  // Parse the JSON suggestions block from an AI message text
+  const parseAiSuggestions = (text) => {
+    const m = text?.match(/```json\s*([\s\S]*?)```/);
+    if (!m) return null;
+    try { return JSON.parse(m[1])?.suggestions || null; } catch { return null; }
+  };
+
+  const aiContextMessage = () => {
+    const ev = eventRow;
+    const lines = [
+      `Event: ${form.web_event_name || ev.username || "Unnamed event"}`,
+      ev.event_type ? `Type: ${ev.event_type}` : null,
+      ev.start_datetime ? `Date: ${new Date(ev.start_datetime).toLocaleDateString("en-TZ", { dateStyle: "long" })}` : null,
+      ev.venue_name ? `Venue: ${ev.venue_name}` : null,
+      form.tagline ? `Current tagline: "${form.tagline}"` : null,
+    ].filter(Boolean).join("\n");
+    return `Please give me design recommendations for this event:\n\n${lines}`;
+  };
+
+  const AI_PAGE_URL = import.meta.env.DEV ? "/ai-page" : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-event-page`;
+  const sendAiMessage = async (text) => {
+    if (!text?.trim() || aiLoading) return;
+    const userMsg = { role: "user", text: text.trim() };
+    const history = [...aiMessages, userMsg];
+    setAiMessages(history);
+    setAiInput("");
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const headers = { "Content-Type": "application/json" };
+      if (sb) { const { data: s } = await sb.auth.getSession(); if (s?.session?.access_token) headers.Authorization = `Bearer ${s.session.access_token}`; }
+      const res = await fetch(AI_PAGE_URL, { method: "POST", headers, body: JSON.stringify({ messages: history }) });
+      const data = await res.json();
+      if (!res.ok || data.error) { setAiError(data.error || `Error ${res.status}`); }
+      else { setAiMessages(h => [...h, { role: "assistant", text: data.text }]); }
+    } catch (e) { setAiError(e.message); }
+    finally { setAiLoading(false); }
+  };
+
+  const applyAiSuggestions = (s) => {
+    setForm(f => ({
+      ...f,
+      ...(s.primary_color ? { primary_color: s.primary_color } : {}),
+      ...(s.accent_color  ? { accent_color:  s.accent_color  } : {}),
+      ...(s.bg_color      ? { bg_color:      s.bg_color      } : {}),
+      ...(s.text_color    ? { text_color:    s.text_color    } : {}),
+      ...(s.tagline       ? { tagline:       s.tagline       } : {}),
+      ...(s.dress_code_text ? { dress_code_text: s.dress_code_text } : {}),
+      ...(Array.isArray(s.schedule) && s.schedule.length ? { schedule: s.schedule.map(x => ({ time:x.time||"", title:x.title||"", description:x.description||"", location:"" })) } : {}),
+    }));
+  };
 
   const imgUploadRow = (label, slot, busy) => (
     <div style={{marginBottom:12}}>
@@ -5961,6 +6122,59 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                 </div>
               )}
 
+              {section==="ai" && (
+                <div style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontWeight:700,fontSize:13,color:N.text,marginBottom:4}}>AI Design assistant</div>
+                    <div style={{fontSize:12,color:N.textDim}}>Describe your event and get colour palette, tagline and schedule recommendations. Suggestions can be applied directly to your page settings.</div>
+                  </div>
+                  {aiMessages.length === 0 && (
+                    <button className="nk-btn nk-btn-ghost" style={{alignSelf:"flex-start",marginBottom:12}}
+                      onClick={() => sendAiMessage(aiContextMessage())}>
+                      <Icon n="zap" /> Get recommendations for this event
+                    </button>
+                  )}
+                  <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:10,marginBottom:12,minHeight:0}}>
+                    {aiMessages.map((m, i) => {
+                      const suggestions = m.role === "assistant" ? parseAiSuggestions(m.text) : null;
+                      const displayText = m.text.replace(/```json[\s\S]*?```/g, "").trim();
+                      return (
+                        <div key={i} style={{display:"flex",flexDirection:"column",alignItems:m.role==="user"?"flex-end":"flex-start",gap:4}}>
+                          <div style={{
+                            maxWidth:"85%", padding:"10px 13px", borderRadius:10, fontSize:13, lineHeight:1.6,
+                            background: m.role==="user" ? alpha(N.accent,"22") : alpha(N.navy700,"cc"),
+                            border: `1px solid ${m.role==="user" ? alpha(N.accent,"44") : N.border}`,
+                            color: N.text, whiteSpace:"pre-wrap",
+                          }}>{displayText}</div>
+                          {suggestions && (
+                            <div style={{display:"flex",flexWrap:"wrap",gap:6,maxWidth:"85%"}}>
+                              {suggestions.primary_color && <span style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:N.textDim}}><span style={{width:14,height:14,borderRadius:3,background:suggestions.primary_color,display:"inline-block",border:`1px solid ${N.border}`}} />{suggestions.primary_color}</span>}
+                              {suggestions.accent_color  && <span style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:N.textDim}}><span style={{width:14,height:14,borderRadius:3,background:suggestions.accent_color,display:"inline-block",border:`1px solid ${N.border}`}} />{suggestions.accent_color}</span>}
+                              {suggestions.bg_color      && <span style={{display:"flex",alignItems:"center",gap:4,fontSize:11,color:N.textDim}}><span style={{width:14,height:14,borderRadius:3,background:suggestions.bg_color,display:"inline-block",border:`1px solid ${N.border}`}} />{suggestions.bg_color}</span>}
+                              <button className="nk-btn nk-btn-ghost" style={{fontSize:11,padding:"2px 10px"}} onClick={() => { applyAiSuggestions(suggestions); setSection("appearance"); }}>
+                                <Icon n="check" /> Apply to page
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {aiLoading && <div style={{fontSize:12,color:N.textDim,display:"flex",alignItems:"center",gap:6}}><Icon n="loader" /> Thinking…</div>}
+                    {aiError   && <div style={{fontSize:12,color:N.red}}><Icon n="alert" /> {aiError}</div>}
+                  </div>
+                  <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                    <textarea className="nk-input" style={{flex:1,resize:"none",minHeight:60,marginBottom:0}}
+                      placeholder="Ask for a colour palette, tagline, schedule, dress code…"
+                      value={aiInput} onChange={e => setAiInput(e.target.value)}
+                      onKeyDown={e => { if (e.key==="Enter" && !e.shiftKey) { e.preventDefault(); sendAiMessage(aiInput); } }}
+                      disabled={aiLoading} />
+                    <button className="nk-btn nk-btn-primary" style={{padding:"10px 14px"}} onClick={() => sendAiMessage(aiInput)} disabled={aiLoading || !aiInput.trim()}>
+                      {aiLoading ? <Icon n="loader" /> : <Icon n="arrowUp" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+
             </div>
           </div>
         )}
@@ -6014,7 +6228,8 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
     const ws = XLSX.utils.json_to_sheet((cards || []).map(c => ({
       Name: c.name, "Card type": c.card_type, People: peopleOf(c), Phone: c.phone ? `+${normalisePhone(c.phone)}` : "",
       Status: c.call_status ? CALL_STATUSES[c.call_status].label : "Not called", Comment: c.call_comment || "",
-      Updated: c.call_updated_at ? fmtWhen(c.call_updated_at) : "", By: c.call_by || "",
+      Updated: c.call_updated_at ? fmtWhen(c.call_updated_at) : "",
+      By: c.call_by === "rsvp" ? "RSVP (web page)" : c.call_by === "wa_reply" ? "WhatsApp reply" : (c.call_by || ""),
     })));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Calls");
     XLSX.writeFile(wb, `${(eventRow?.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_")}_Calls_${localDate()}.xlsx`);
@@ -6094,7 +6309,18 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                     {canDelete && onDeleteCard && <Sb bg="transparent" col={N.red} border={N.border} label={`Delete ${c.name}'s card`} onClick={() => removeCard(c)}><Icon n="trash" /></Sb>}
                   </div>
                 </td>
-                <td style={{fontSize:11,color:N.textDim}}>{c.call_updated_at ? <>{fmtWhen(c.call_updated_at)}<br />{c.call_by}</> : "—"}</td>
+                <td style={{fontSize:11,color:N.textDim}}>
+                  {c.call_updated_at ? (
+                    <>
+                      {fmtWhen(c.call_updated_at)}<br />
+                      {c.call_by === "rsvp"
+                        ? <span style={{fontWeight:700,color:N.green,fontSize:10,letterSpacing:0.5}}>RSVP (web)</span>
+                        : c.call_by === "wa_reply"
+                          ? <span style={{fontWeight:700,color:N.sky,fontSize:10,letterSpacing:0.5}}><Icon n="undo" /> WhatsApp</span>
+                          : c.call_by}
+                    </>
+                  ) : "—"}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -7093,11 +7319,30 @@ export default function App() {
     if (!isMain && !isCard) return;
     const latest = deliveryIndexRef.current?.byCard.get(`${d.channel}|${d.message_key}|${d.event_card_id}`);
     if (latest && latest.id !== d.id && String(latest.sent_at) > String(d.sent_at)) return;   // an older send's late report
+    // Check if this WA reply maps to a call outcome via the template's quick_reply_fields
+    let waCallOutcome = null;
+    if (d.reply_text && isCard && supabase) {
+      const tplRow = resolveChoice(access.waTemplates, openEventRow?.wa_template, "name");
+      const qrFields = tplRow?.quick_reply_fields || [];
+      const matched = qrFields.find(f => f.call_outcome && f.button_text &&
+        d.reply_text.trim().toLowerCase() === String(f.button_text).trim().toLowerCase());
+      if (matched) {
+        waCallOutcome = matched.call_outcome;
+        // Persist to DB asynchronously (best-effort; realtime on event_cards updates CallsTab)
+        supabase.from("event_cards").update({
+          call_status: matched.call_outcome, call_by: "wa_reply",
+          call_updated_at: new Date().toISOString(),
+        }).eq("id", d.event_card_id);
+      }
+    }
     setRecords(rs => rs.map(r => {
       if (r.dbId !== d.event_card_id) return r;
       if (!sentAfterReset(d, r.resetAt)) return r;   // sent before a new spreadsheet reset the guest
       if (isMain) return { ...r, smsStatus: d.status === "read" ? SMS.delivered : d.status };
-      return r.waStatus === WA.sending ? r : { ...r, waStatus: waCardStatus(d.status, d.status_id) };
+      const next = r.waStatus === WA.sending ? r : { ...r, waStatus: waCardStatus(d.status, d.status_id) };
+      if (!d.reply_text) return next;
+      const callPatch = waCallOutcome ? { callStatus: waCallOutcome, callBy: "wa_reply" } : {};
+      return { ...next, waReply: d.reply_text, ...callPatch };
     }));
   };
   const deliveries = useDeliveries(savedEventId, applyDelivery);
@@ -7859,12 +8104,23 @@ export default function App() {
   };
 
   /* ── Delete event ── */
-  // Deletes an event row from Supabase (cascades to its cards at the DB level);
-  // if it was the currently-loaded event, also clears designer state back to blank
+  // Deletes an event row from Supabase (cascades to cards, deliveries, page settings etc.
+  // at the DB level). Also removes Storage files from wa-cards and event-pages buckets.
   const deleteEvent = async (ev) => {
     if (!supabase) return;
+    // Collect card_url values BEFORE the cascade wipes the rows
+    const { data: cardRows } = await supabase.from("event_cards").select("card_url").eq("event_id", ev.id).not("card_url", "is", null);
+    const waCardPaths = (cardRows || []).map(c => {
+      try { const u = new URL(c.card_url); const i = u.pathname.indexOf("/wa-cards/"); return i >= 0 ? u.pathname.slice(i + "/wa-cards/".length) : null; }
+      catch { return null; }
+    }).filter(Boolean);
     const { error } = await supabase.from("events").delete().eq("id", ev.id);
     if (error) { showToast("Delete failed: " + error.message, "warn"); return; }
+    // Clean up Storage files best-effort (don't block UX on failures)
+    if (waCardPaths.length) supabase.storage.from("wa-cards").remove(waCardPaths);
+    supabase.storage.from("event-pages").list(String(ev.id)).then(({ data: pageFiles }) => {
+      if (pageFiles?.length) supabase.storage.from("event-pages").remove(pageFiles.map(f => `${ev.id}/${f.name}`));
+    });
     setSavedEvents(es => es.filter(e => e.id !== ev.id));
     if (savedEventId === ev.id) {
       setSavedEventId(null); setEventData(BLANK_EVENT);
@@ -8432,12 +8688,26 @@ export default function App() {
       reason: ["sent", "delivered", "read"].includes(r.status) ? null : (r.detail || null), card_status: card,
     }]);
     try {
+      const tplRow = access.waTemplates.find(t => t.name === waTemplate);
+      const pFields = tplRow?.personalisation_fields || [];
+      // Build a personalisation object for this recipient: { [key]: rec[source] }
+      const pObj = pFields.reduce((acc, { key, source }) => {
+        if (key) acc[key] = String(rec[source] ?? "");
+        return acc;
+      }, {});
+      const qrFields = tplRow?.quick_reply_fields || [];
       const reqBody = {
         to:       [Number(normalisePhone(rec.phone))],
         account:  waAccount,
         template: waTemplate,
-        header:   { image: { file: rec.cardUrl, name: rec.name || "Event Card" } },
+        ...(Object.keys(pObj).length ? { personalisation: [pObj] } : {}),
+        ...(tplRow?.has_image_header !== false ? { header: { image: { file: rec.cardUrl, name: rec.name || "Event Card" } } } : {}),
       };
+      if (qrFields.length) {
+        const qrParams = {};
+        qrFields.forEach(({ button_index, source }) => { qrParams[String(button_index)] = [String(rec[source] ?? "")]; });
+        reqBody.button = { personalisation: { quick_reply: { parameters: qrParams } } };
+      }
       const res = await fetch(`${WA_BASE}/api/whatsapp/v2/text/single`, {
         method: "POST",
         headers: {
@@ -8925,7 +9195,7 @@ export default function App() {
             <div className="nk-confirm">
               <div className="nk-confirm-title">Delete Event?</div>
               <div className="nk-confirm-body">
-                This will permanently delete <strong style={{color:N.text}}>"{deleteTarget.username}"</strong> and all its cards and history from the database. This cannot be undone.
+                This will permanently delete <strong style={{color:N.text}}>"{deleteTarget.username}"</strong> and all its cards, images, messages and history. This cannot be undone.
               </div>
               <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
                 <button className="nk-btn nk-btn-ghost" onClick={()=>setDeleteTarget(null)}>Cancel</button>
@@ -9507,9 +9777,9 @@ export default function App() {
                                   title="Edit event details">
                                   <Icon n="edit" /> Edit
                                 </Sb>
-                                {canDeleteData && (<Sb bg={N.redBg} col={N.red} border={alpha(N.red,"44")}
+                                {canDeleteData && access.settings.allow_event_delete !== false && (<Sb bg={N.redBg} col={N.red} border={alpha(N.red,"44")}
                                   onClick={(e)=>{ e.stopPropagation(); setDeleteTarget(ev); }}
-                                  title="Delete this event">
+                                  title="Delete this event and all its data">
                                   <Icon n="trash" /> Delete
                                 </Sb>)}
                                 {ev.cover_image_url && (
