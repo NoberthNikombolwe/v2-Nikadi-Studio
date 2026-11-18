@@ -47,7 +47,7 @@ function CodeBoxes({ value, onChange, disabled, autoFocus }) {
     requestAnimationFrame(() => focus(Math.min(pasted.length, CODE_LEN - 1)));
   };
   return (
-    <div style={{display:"flex",gap:6,justifyContent:"center",margin:"4px 0 20px"}}>
+    <div style={{display:"flex",gap:4,justifyContent:"center",margin:"4px 0 20px",width:"100%"}}>
       {Array.from({length: CODE_LEN}, (_, i) => (
         <input key={i} ref={el => { boxRefs.current[i] = el; }}
           value={chars[i]} maxLength={1} inputMode="text" autoCapitalize="characters"
@@ -59,8 +59,8 @@ function CodeBoxes({ value, onChange, disabled, autoFocus }) {
           disabled={disabled}
           aria-label={`Code character ${i + 1}`}
           style={{
-            width:46,height:58,textAlign:"center",
-            fontSize:26,fontWeight:800,fontFamily:"JetBrains Mono, monospace",textTransform:"uppercase",
+            flex:"1 1 0",minWidth:0,maxWidth:52,height:56,textAlign:"center",
+            fontSize:22,fontWeight:800,fontFamily:"JetBrains Mono, monospace",textTransform:"uppercase",
             border:`2.5px solid ${chars[i] ? N.sky : N.border}`,
             borderRadius:10,
             background:chars[i] ? alpha(N.sky,"14") : N.navy900,
@@ -119,6 +119,11 @@ export default function PublicScanPage({ eventId }) {
     const t = setInterval(() => refresh(), 15000);
     return () => clearInterval(t);
   }, [state, refresh]);
+  // Auto-start the camera on phones when the page unlocks — ScanPanel only starts when
+  // startSignal changes, so bump it once after the locked → open transition.
+  useEffect(() => {
+    if (state === "open" && phone) setCamSignal(n => n + 1);
+  }, [state, phone]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doUnlock = useCallback(async (c) => {
     if (!c || c.length < CODE_LEN) return;
@@ -164,7 +169,7 @@ export default function PublicScanPage({ eventId }) {
   if (state !== "open") return (
     <div style={page}><div style={{...box, maxWidth:420}}>
       {brand}
-      <form onSubmit={unlock} style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16,padding:28}}>
+      <form onSubmit={unlock} style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16,padding:"24px 16px"}}>
         <div style={{display:"flex",justifyContent:"center",marginBottom:18}}>
           <div style={{
             width:64,height:64,borderRadius:"50%",display:"grid",placeItems:"center",
