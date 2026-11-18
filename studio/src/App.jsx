@@ -6921,10 +6921,10 @@ export default function App() {
   const [bgSize,    setBgSize]    = useState(null);
   const [elements,  setElements]  = useState(defaultElements());
   const [selected,  setSelected]  = useState(null);
-  // How card_code (Passcode) is generated when saving cards to the DB:
-  //   "random"      — DB trigger generates a 4-char code (default)
-  //   "spreadsheet" — read from "Passcode" column in the uploaded sheet
-  //   "sequence"    — 1, 2, 3 … in the order guests appear on the list
+  // Fallback passcode generation when no "Passcode" column in the spreadsheet (or value is empty):
+  //   "random"   — DB trigger auto-generates a 4-char code (default)
+  //   "sequence" — 1, 2, 3 … in the order guests appear on the list
+  // A non-empty "Passcode" column value ALWAYS wins over this setting.
   const [passcodeMode, setPasscodeMode] = useState(() => {
     try { return localStorage.getItem("nikadi_passcode_mode") || "random"; } catch { return "random"; }
   });
@@ -7943,11 +7943,11 @@ export default function App() {
       ...(resetCol ? { status_reset_at: resetAt } : {}),
       ...((wa || WA.idle) === WA.idle && (sms || SMS.pending) === SMS.pending ? { sent_at: null } : {}),
     });
-    // Build a code for each record based on passcodeMode
+    // Spreadsheet passcode always takes priority; mode controls only the fallback for empty/absent values
     const seqMap  = passcodeMode === "sequence" ? new Map(entries.map(({ r }, n) => [r, String(n + 1)])) : null;
     const codeFor = r => {
-      if (passcodeMode === "spreadsheet" && r.passcode) return { card_code: String(r.passcode) };
-      if (passcodeMode === "sequence" && seqMap)        return { card_code: seqMap.get(r) || "" };
+      if (r.passcode) return { card_code: String(r.passcode) };
+      if (passcodeMode === "sequence" && seqMap) return { card_code: seqMap.get(r) || "" };
       return {};
     };
     const toRow = r => ({
@@ -9683,10 +9683,13 @@ export default function App() {
                     <Icon n="save" /> Save Cards to DB ({records.length})
                   </button>
                 )}
-                {/* Passcode generation mode */}
+                {/* Passcode generation mode — controls fallback when no Passcode column in sheet */}
                 <div style={{marginTop:8}}>
-                  <div style={{fontSize:10,color:N.textDim,marginBottom:4,fontWeight:600,letterSpacing:.4}}>PASSCODE MODE</div>
-                  {[["random","Random"],["spreadsheet","Spreadsheet"],["sequence","1, 2, 3…"]].map(([k,l]) => (
+                  <div style={{fontSize:10,color:N.textDim,marginBottom:2,fontWeight:600,letterSpacing:.4}}>PASSCODE FALLBACK</div>
+                  <p style={{fontSize:10,color:N.textDim,marginBottom:4,lineHeight:1.5}}>
+                    <Icon n="info" /> A <span style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>Passcode</span> column in your sheet is always used. This sets what to generate when it's absent or empty.
+                  </p>
+                  {[["random","Random (auto)"],["sequence","1, 2, 3… (sequence)"]].map(([k,l]) => (
                     <button key={k}
                       className="nk-btn nk-btn-ghost nk-btn-full"
                       style={{fontSize:10,marginBottom:2,textAlign:"left",background:passcodeMode===k?alpha(N.sky,"18"):"transparent",
@@ -9695,9 +9698,6 @@ export default function App() {
                       {passcodeMode===k?<><Icon n="check" /> {l}</>:<>{l}</>}
                     </button>
                   ))}
-                  {passcodeMode === "spreadsheet" && (
-                    <p style={{fontSize:10,color:N.textDim,marginTop:4,lineHeight:1.5}}>Add a <span style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>Passcode</span> column to your spreadsheet.</p>
-                  )}
                 </div>
               </div>
 
