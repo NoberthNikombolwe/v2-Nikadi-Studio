@@ -20,10 +20,14 @@ const codeKey = (id) => `nikadi_scan_code_${id}`;
 const CODE_LEN = 6;
 
 export default function PublicScanPage({ eventId }) {
+  // eventId may be the full UUID (36 chars) or the first 8 hex chars of it (short URL).
+  // eid is the resolved full UUID used in all RPC calls.
+  const isShort = eventId.length === 8;
+  const [eid, setEid] = useState(isShort ? null : eventId);
   const [code, setCode]   = useState(() => { try { return sessionStorage.getItem(codeKey(eventId)) || ""; } catch { return ""; } });
   const [input, setInput] = useState("");
   const [event, setEvent] = useState(null);       // { name, event_type, start_datetime, cards, people, entered }
-  const [state, setState] = useState(code ? "checking" : "locked");   // locked | checking | open | error
+  const [state, setState] = useState("checking"); // locked | checking | open | error — always starts checking
   const [error, setError] = useState(null);
   const [recent, setRecent] = useState([]);
   const [door, setDoor]   = useState(() => { try { return localStorage.getItem("nikadi_door_name") || ""; } catch { return ""; } });
@@ -34,9 +38,10 @@ export default function PublicScanPage({ eventId }) {
   const [camSignal, setCamSignal] = useState(0);  // bumped when the Scan tab is tapped: opens the camera
 
   // Checks the code by asking for the event summary (empty result = wrong / changed code)
-  const refresh = useCallback(async (c = code) => {
+  const refresh = useCallback(async (c = code, id = eid) => {
+    if (!id) return false;
     if (!supabase) { setState("error"); setError("This site is not connected to the database."); return false; }
-    const { data, error: e } = await supabase.rpc("public_scan_event", { p_event: eventId, p_code: c });
+    const { data, error: e } = await supabase.rpc("public_scan_event", { p_event: id, p_code: c });
     if (e) { setState("error"); setError(e.message); return false; }
     if (!data?.length) {
       try { sessionStorage.removeItem(codeKey(eventId)); } catch { /* ignore */ }
@@ -44,10 +49,10 @@ export default function PublicScanPage({ eventId }) {
       return false;
     }
     setEvent(data[0]); setState("open");
-    const r = await supabase.rpc("public_recent_scans", { p_event: eventId, p_code: c });
+    const r = await supabase.rpc("public_recent_scans", { p_event: id, p_code: c });
     if (!r.error) setRecent(r.data || []);
     if (!statsMissing.current) {
-      const st = await supabase.rpc("public_scan_stats", { p_event: eventId, p_code: c });
+      const st = await supabase.rpc("public_scan_stats", { p_event: id, p_code: c });
       if (st.error) { if (st.error.code === "PGRST202" || st.status === 404) statsMissing.current = true; }
       else {
         const x = st.data?.[0];
@@ -56,9 +61,18 @@ export default function PublicScanPage({ eventId }) {
       }
     }
     return true;
-  }, [code, eventId]);
+  }, [code, eid]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { if (code) refresh(code); }, []); // eslint-disable-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- loads data from the database
+  // On mount: for short IDs resolve to the full UUID first, then proceed as normal
+  useEffect(() => {
+    if (!isShort) { if (code) refresh(code, eventId); else setState("locked"); return; }
+    if (!supabase) { setState("error"); setError("This site is not connected to the database."); return; }
+    supabase.rpc("public_resolve_scan_id", { p_short: eventId }).then(({ data, error: e }) => {
+      if (e || !data) { setState("error"); setError("Event not found. Check the link."); return; }
+      setEid(data);
+      if (code) refresh(code, data); else setState("locked");
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the totals fresh while the page is open (other doors are scanning too)
   useEffect(() => {
     if (state !== "open") return;
@@ -82,14 +96,14 @@ export default function PublicScanPage({ eventId }) {
   const unlock = (e) => { e.preventDefault(); doUnlock(input); };
 
   const findCard = async ({ id, name }) => {
-    const { data, error: e } = await supabase.rpc("public_find_cards", id ? { p_event: eventId, p_code: code, p_card: id }
-                                                                          : { p_event: eventId, p_code: code, p_query: name });
+    const { data, error: e } = await supabase.rpc("public_find_cards", id ? { p_event: eid, p_code: code, p_card: id }
+                                                                          : { p_event: eid, p_code: code, p_query: name });
     if (e) throw e;
     const list = data || [];
     return id ? list : list.filter(c => c.name.trim().toLowerCase() === String(name).trim().toLowerCase());
   };
   const search = async (q) => {
-    const { data, error: e } = await supabase.rpc("public_find_cards", { p_event: eventId, p_code: code, p_query: q });
+    const { data, error: e } = await supabase.rpc("public_find_cards", { p_event: eid, p_code: code, p_query: q });
     if (e) throw e;
     return data || [];
   };

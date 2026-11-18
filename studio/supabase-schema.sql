@@ -987,6 +987,13 @@ $$;
 REVOKE ALL ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT), public.public_scan_stats(UUID, TEXT) FROM public;
 GRANT EXECUTE ON FUNCTION public.public_scan_event(UUID, TEXT), public.public_find_cards(UUID, TEXT, TEXT, UUID), public.public_recent_scans(UUID, TEXT), public.public_scan_stats(UUID, TEXT) TO anon, authenticated;
 
+CREATE OR REPLACE FUNCTION public.public_resolve_scan_id(p_short TEXT)
+RETURNS uuid
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT id FROM events WHERE id::text LIKE lower(p_short) || '%' LIMIT 1
+$$;
+GRANT EXECUTE ON FUNCTION public.public_resolve_scan_id(TEXT) TO anon, authenticated;
+
 -- ─────────────────────────────────────────────────────────────────────
 -- 7. VIEW-ONLY SHARE LINK — #/view/<eventId> + events.view_code. Read-only guest
 --    list (card sent, call answer + comment, check-in) and the card history.

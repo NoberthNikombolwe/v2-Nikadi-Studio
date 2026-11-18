@@ -10,8 +10,8 @@ import { applyTheme, getThemePref } from './lib/theme.js'
 // Apply the saved theme before the first render so the page never flashes the wrong colours
 applyTheme(getThemePref())
 
-// #/scan/<eventId> is the public, code-protected door-scanning page (no login)
-const scanMatch = window.location.hash.match(/^#\/scan\/([0-9a-f-]{36})/i)
+// #/scan/<eventId> — full UUID (36 chars) or short ID (first 8 hex chars of the UUID)
+const scanMatch = window.location.hash.match(/^#\/scan\/([0-9a-f]{8}(?:-[0-9a-f-]{27})?)/i)
 // #/view/<eventId> is the public, code-protected view-only report (guests, calls, card history)
 const viewMatch = window.location.hash.match(/^#\/view\/([0-9a-f-]{36})/i)
 // /g/<eventPublicId>/<guestPublicId> — path-based (new, for OG preview) or hash-based (legacy)

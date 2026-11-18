@@ -5614,7 +5614,7 @@ function ShareViewModal({ eventRow, showToast, onClose, reloadEvents }) {
 function ShareScanModal({ eventRow, showToast, onClose, reloadEvents }) {
   const [code, setCode] = useState(eventRow?.scan_code || null);
   const [busy, setBusy] = useState(false);
-  const link = `${window.location.origin}${import.meta.env.BASE_URL}#/scan/${eventRow?.id}`;
+  const link = `${window.location.origin}${import.meta.env.BASE_URL}#/scan/${eventRow?.id?.slice(0, 8)}`;
   const setScanCode = async (value) => {
     setBusy(true);
     const { error } = await supabase.from("events").update({ scan_code: value }).eq("id", eventRow.id);
