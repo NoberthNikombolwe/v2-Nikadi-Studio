@@ -35,7 +35,10 @@ function CodeBoxes({ value, onChange, disabled, autoFocus }) {
   };
   const handleChange = (i, e) => {
     const raw = e.target.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-    const ch = raw.slice(0, 1);
+    // On iOS the keyboard appends to the existing char instead of replacing it,
+    // so e.target.value is "AB" when the user typed "B" into a filled box.
+    // Taking the last char always gives the new input regardless of platform.
+    const ch = raw.slice(-1);
     const n = chars.map((c, j) => j === i ? ch : c);
     onChange(n.join("").trimEnd());
     if (ch && i < CODE_LEN - 1) requestAnimationFrame(() => focus(i + 1));
@@ -51,6 +54,7 @@ function CodeBoxes({ value, onChange, disabled, autoFocus }) {
       {Array.from({length: CODE_LEN}, (_, i) => (
         <input key={i} ref={el => { boxRefs.current[i] = el; }}
           value={chars[i]} maxLength={1} inputMode="text" autoCapitalize="characters"
+          autoCorrect="off" spellCheck={false} autoComplete="off"
           autoFocus={autoFocus && i === 0}
           onFocus={e => e.target.select()}
           onChange={e => handleChange(i, e)}
