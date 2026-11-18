@@ -119,11 +119,11 @@ export default function PublicScanPage({ eventId }) {
     const t = setInterval(() => refresh(), 15000);
     return () => clearInterval(t);
   }, [state, refresh]);
-  // Auto-start the camera on phones when the page unlocks — ScanPanel only starts when
+  // Auto-start the camera when the page unlocks — ScanPanel only starts when
   // startSignal changes, so bump it once after the locked → open transition.
   useEffect(() => {
-    if (state === "open" && phone) setCamSignal(n => n + 1);
-  }, [state, phone]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (state === "open") setCamSignal(n => n + 1);
+  }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doUnlock = useCallback(async (c) => {
     if (!c || c.length < CODE_LEN) return;
