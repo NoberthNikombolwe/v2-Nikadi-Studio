@@ -19,64 +19,6 @@ const codeKey = (id) => `nikadi_scan_code_${id}`;
 
 const CODE_LEN = 6;
 
-// 6-box OTP-style code entry — each character gets its own box, auto-advances on input
-function CodeBoxes({ value, onChange, disabled, autoFocus }) {
-  const boxRefs = useRef([]);
-  const chars = value.toUpperCase().padEnd(CODE_LEN, "").slice(0, CODE_LEN).split("");
-  const focus = (i) => { const el = boxRefs.current[Math.max(0, Math.min(CODE_LEN - 1, i))]; el?.focus(); el?.select(); };
-
-  const handleKeyDown = (i, e) => {
-    if (e.key === "Backspace") {
-      e.preventDefault();
-      if (chars[i]) { const n = chars.map((c, j) => j === i ? "" : c); onChange(n.join("").trimEnd()); }
-      else if (i > 0) { const n = chars.map((c, j) => j === i - 1 ? "" : c); onChange(n.join("").trimEnd()); focus(i - 1); }
-    } else if (e.key === "ArrowLeft")  { e.preventDefault(); focus(i - 1); }
-      else if (e.key === "ArrowRight") { e.preventDefault(); focus(i + 1); }
-  };
-  const handleChange = (i, e) => {
-    const raw = e.target.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-    // On iOS the keyboard appends to the existing char instead of replacing it,
-    // so e.target.value is "AB" when the user typed "B" into a filled box.
-    // Taking the last char always gives the new input regardless of platform.
-    const ch = raw.slice(-1);
-    const n = chars.map((c, j) => j === i ? ch : c);
-    onChange(n.join("").trimEnd());
-    if (ch && i < CODE_LEN - 1) requestAnimationFrame(() => focus(i + 1));
-  };
-  const handlePaste = (e) => {
-    e.preventDefault();
-    const pasted = e.clipboardData.getData("text").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, CODE_LEN);
-    onChange(pasted);
-    requestAnimationFrame(() => focus(Math.min(pasted.length, CODE_LEN - 1)));
-  };
-  return (
-    <div style={{display:"flex",gap:4,justifyContent:"center",margin:"4px 0 20px",width:"100%"}}>
-      {Array.from({length: CODE_LEN}, (_, i) => (
-        <input key={i} ref={el => { boxRefs.current[i] = el; }}
-          value={chars[i]} maxLength={1} inputMode="text" autoCapitalize="characters"
-          autoCorrect="off" spellCheck={false} autoComplete="off"
-          autoFocus={autoFocus && i === 0}
-          onFocus={e => e.target.select()}
-          onChange={e => handleChange(i, e)}
-          onKeyDown={e => handleKeyDown(i, e)}
-          onPaste={handlePaste}
-          disabled={disabled}
-          aria-label={`Code character ${i + 1}`}
-          style={{
-            flex:"1 1 0",minWidth:0,maxWidth:52,height:56,textAlign:"center",
-            fontSize:22,fontWeight:800,fontFamily:"JetBrains Mono, monospace",textTransform:"uppercase",
-            border:`2.5px solid ${chars[i] ? N.sky : N.border}`,
-            borderRadius:10,
-            background:chars[i] ? alpha(N.sky,"14") : N.navy900,
-            color:N.text,outline:"none",caretColor:"transparent",
-            cursor:disabled ? "not-allowed" : "text",
-            transition:"border-color .15s, background .15s",
-          }} />
-      ))}
-    </div>
-  );
-}
-
 export default function PublicScanPage({ eventId }) {
   const [code, setCode]   = useState(() => { try { return sessionStorage.getItem(codeKey(eventId)) || ""; } catch { return ""; } });
   const [input, setInput] = useState("");
@@ -184,14 +126,37 @@ export default function PublicScanPage({ eventId }) {
         </div>
         <h1 style={{fontSize:20,fontWeight:800,marginBottom:4,textAlign:"center"}}>Enter the scan code</h1>
         <p style={{fontSize:13,color:N.textDim,marginBottom:18,textAlign:"center"}}>The event organiser gives each door a 6-character code.</p>
-        <div style={{fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:1,textAlign:"center",marginBottom:8}}>Scan Code</div>
-        <CodeBoxes
+        <label style={{display:"block",fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:1,marginBottom:6}} htmlFor="scan-code">Scan Code</label>
+        <input
+          id="scan-code"
           value={input}
           autoFocus
           disabled={state === "checking"}
-          onChange={v => { setInput(v); if (v.length === CODE_LEN) doUnlock(v); }}
+          maxLength={CODE_LEN}
+          inputMode="text"
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
+          autoComplete="off"
+          placeholder="Enter 6-character code"
+          onChange={e => {
+            const v = e.target.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, CODE_LEN);
+            setInput(v);
+            if (v.length === CODE_LEN) doUnlock(v);
+          }}
+          style={{
+            width:"100%", minHeight:52, padding:"12px 14px", borderRadius:10,
+            border:`2px solid ${input.length === CODE_LEN ? N.sky : input.length > 0 ? alpha(N.sky,"66") : N.border}`,
+            background: input.length > 0 ? alpha(N.sky,"0d") : N.navy900,
+            color:N.text, fontSize:22, fontWeight:800,
+            fontFamily:"JetBrains Mono, monospace", textTransform:"uppercase",
+            letterSpacing:6, textAlign:"center",
+            boxSizing:"border-box", outline:"none",
+            transition:"border-color .15s, background .15s",
+            cursor: state === "checking" ? "not-allowed" : "text",
+          }}
         />
-        <div style={{borderTop:`1px solid ${N.border}`,margin:"4px 0 16px"}} />
+        <div style={{marginTop:16}} />
         <label style={{display:"block",fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6}} htmlFor="door">
           Your name or door <span style={{fontWeight:400,textTransform:"none"}}>(shown in the scan log)</span>
         </label>
