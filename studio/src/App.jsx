@@ -6921,6 +6921,13 @@ export default function App() {
   const [bgSize,    setBgSize]    = useState(null);
   const [elements,  setElements]  = useState(defaultElements());
   const [selected,  setSelected]  = useState(null);
+  // How card_code (Passcode) is generated when saving cards to the DB:
+  //   "random"      — DB trigger generates a 4-char code (default)
+  //   "spreadsheet" — read from "Passcode" column in the uploaded sheet
+  //   "sequence"    — 1, 2, 3 … in the order guests appear on the list
+  const [passcodeMode, setPasscodeMode] = useState(() => {
+    try { return localStorage.getItem("nikadi_passcode_mode") || "random"; } catch { return "random"; }
+  });
   const [templateKey, setTemplateKey] = useState(null);
   const [layoutRestored, setLayoutRestored] = useState(false);
   const layoutSaveTimer   = useRef(null);
@@ -7936,6 +7943,13 @@ export default function App() {
       ...(resetCol ? { status_reset_at: resetAt } : {}),
       ...((wa || WA.idle) === WA.idle && (sms || SMS.pending) === SMS.pending ? { sent_at: null } : {}),
     });
+    // Build a code for each record based on passcodeMode
+    const seqMap  = passcodeMode === "sequence" ? new Map(entries.map(({ r }, n) => [r, String(n + 1)])) : null;
+    const codeFor = r => {
+      if (passcodeMode === "spreadsheet" && r.passcode) return { card_code: String(r.passcode) };
+      if (passcodeMode === "sequence" && seqMap)        return { card_code: seqMap.get(r) || "" };
+      return {};
+    };
     const toRow = r => ({
       event_id:   eventId,
       name:       r.name||"",
@@ -7943,6 +7957,7 @@ export default function App() {
       phone:      r.phone||"",
       wa_status:  r.waStatus||WA.idle,
       sms_status: r.smsStatus||SMS.pending,
+      ...codeFor(r),
     });
     // Calls and check-ins are a ledger: re-uploading a spreadsheet must never reset or
     // delete them. planCardSave matches each row to its existing card (dbId, else phone +
@@ -8828,6 +8843,23 @@ export default function App() {
     XLSX.writeFile(wb, `${evName}_Send_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
+  // Exports one Excel sheet with passcode (card_code) per guest record
+  const downloadPasscodeReport = async () => {
+    const rows = records.filter(r => !r.sample).map(r => ({
+      "Name":      r.name     || "",
+      "Card Type": r.cardType || "",
+      "Phone":     r.phone ? `+${normalisePhone(r.phone)}` : "",
+      "Passcode":  r.cardCode || "",
+    }));
+    const XLSX = await loadXlsx();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{ wch:28 }, { wch:14 }, { wch:18 }, { wch:12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Passcode Report");
+    const evName = (eventData.username || "Event").replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "_");
+    XLSX.writeFile(wb, `${evName}_Passcode_Report_${new Date().toISOString().slice(0,10)}.xlsx`);
+  };
+
   // Downloads one record's rendered card as a single PNG file
   // Making cards on a computer without a chosen font (and no uploaded file): say so once per font
   const warnedFonts = useRef(new Set());
@@ -9620,6 +9652,14 @@ export default function App() {
                   <span style={{fontWeight:600,fontSize:13}}>Card footer</span>
                   <span className="nk-el-type">{cardFooter.hidden ? "hidden" : "footer"}</span>
                 </div>
+                {/* Optional: add or remove the passcode element */}
+                {!elements.find(e => e.id === "passcode") && access.can("design", "edit") && (
+                  <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
+                    onClick={() => setElements(els => [...els, { id:"passcode", label:"Passcode", type:"text", field:"cardCode",
+                      x:Math.round(cw/2), y:Math.round(ch*0.82), fontSize:12, color:"#4b5563", bold:false, align:"center", fontFamily:"Plus Jakarta Sans" }])}>
+                    <Icon n="plus" /> Add Passcode element
+                  </button>
+                )}
                 {savedEventId && (
                   <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
                     onClick={saveLayout}>
@@ -9643,6 +9683,22 @@ export default function App() {
                     <Icon n="save" /> Save Cards to DB ({records.length})
                   </button>
                 )}
+                {/* Passcode generation mode */}
+                <div style={{marginTop:8}}>
+                  <div style={{fontSize:10,color:N.textDim,marginBottom:4,fontWeight:600,letterSpacing:.4}}>PASSCODE MODE</div>
+                  {[["random","Random"],["spreadsheet","Spreadsheet"],["sequence","1, 2, 3…"]].map(([k,l]) => (
+                    <button key={k}
+                      className="nk-btn nk-btn-ghost nk-btn-full"
+                      style={{fontSize:10,marginBottom:2,textAlign:"left",background:passcodeMode===k?alpha(N.sky,"18"):"transparent",
+                        color:passcodeMode===k?N.sky:N.textDim,border:`1px solid ${passcodeMode===k?alpha(N.sky,"55"):N.border}`}}
+                      onClick={() => { setPasscodeMode(k); try { localStorage.setItem("nikadi_passcode_mode", k); } catch {} }}>
+                      {passcodeMode===k?<><Icon n="check" /> {l}</>:<>{l}</>}
+                    </button>
+                  ))}
+                  {passcodeMode === "spreadsheet" && (
+                    <p style={{fontSize:10,color:N.textDim,marginTop:4,lineHeight:1.5}}>Add a <span style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>Passcode</span> column to your spreadsheet.</p>
+                  )}
+                </div>
               </div>
 
               {/* WhatsApp info */}
@@ -10576,6 +10632,13 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                {records.filter(r => !r.sample).length > 0 && (
+                  <div style={{display:"flex",justifyContent:"flex-end",padding:"4px 16px 8px"}}>
+                    <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={downloadPasscodeReport}>
+                      <Icon n="download" /> Download Passcode Report
+                    </button>
+                  </div>
+                )}
                 <div className="nk-table-wrap">
                   <table className="nk-table m-hide-1 m-hide-3 m-hide-4 m-act">
                     <thead><tr>{["#","Name","Card Type","Phone","WA Status","SMS","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
@@ -10738,6 +10801,13 @@ export default function App() {
                     <div><label className="nk-label">X (px)</label><input type="number" value={Math.round(selectedEl.x)} onChange={e=>updateEl("x",Number(e.target.value))} className="nk-input" /></div>
                     <div><label className="nk-label">Y (px)</label><input type="number" value={Math.round(selectedEl.y)} onChange={e=>updateEl("y",Number(e.target.value))} className="nk-input" /></div>
                   </div>
+                  {selectedEl?.id === "passcode" && access.can("design", "edit") && (
+                    <button className="nk-btn nk-btn-ghost nk-btn-full"
+                      style={{fontSize:12,marginTop:10,color:N.red,borderColor:alpha(N.red,"44")}}
+                      onClick={() => { setElements(els => els.filter(e => e.id !== "passcode")); setSelected(null); }}>
+                      <Icon n="trash" /> Remove Passcode from card
+                    </button>
+                  )}
                 </>
               )}
 

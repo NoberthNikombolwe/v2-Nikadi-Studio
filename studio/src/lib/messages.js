@@ -31,6 +31,7 @@ export const normaliseSheetRows = (data = []) => {
       if      (kl === "name")                                         { n.name     = String(row[k]); found.add("name"); }
       else if (kl === "cardtype" || kl === "card")                    { n.cardType = String(row[k]); found.add("cardType"); }
       else if (kl === "phone" || kl === "phonenumber" || kl === "mobile") { n.phone = String(row[k]); found.add("phone"); }
+      else if (kl === "passcode" || kl === "cardcode" || kl === "card_code") { n.passcode = String(row[k]); found.add("passcode"); }
       else { n[k] = String(row[k]); if (!extraCols.includes(k)) extraCols.push(k); }
     });
     return n;
