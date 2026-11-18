@@ -674,6 +674,17 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
 $$;
 GRANT EXECUTE ON FUNCTION public.public_resolve_scan_id(TEXT) TO anon, authenticated;
 
+-- Full guest list for the public scan page (name, card type, counts — no phone numbers).
+CREATE OR REPLACE FUNCTION public.public_list_cards(p_event UUID, p_code TEXT)
+RETURNS TABLE (id UUID, name TEXT, card_type TEXT, max_scans INT, scan_count INT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT c.id, c.name, c.card_type, c.max_scans, c.scan_count
+    FROM event_cards c
+   WHERE c.event_id = p_event AND public.scan_code_ok(p_event, p_code)
+   ORDER BY c.name
+$$;
+GRANT EXECUTE ON FUNCTION public.public_list_cards(UUID, TEXT) TO anon, authenticated;
+
 -- ─────────────────────────────────────────────────────────────────────
 -- 7. VIEW-ONLY SHARE LINK — #/view/<eventId> + events.view_code. Read-only guest
 --    list (card sent, call answer + comment, check-in) and the card history.

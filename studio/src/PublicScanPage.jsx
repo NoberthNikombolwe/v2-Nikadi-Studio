@@ -32,9 +32,12 @@ export default function PublicScanPage({ eventId }) {
   const [recent, setRecent] = useState([]);
   const [door, setDoor]   = useState(() => { try { return localStorage.getItem("nikadi_door_name") || ""; } catch { return ""; } });
   const [stats, setStats] = useState(null);       // public_scan_stats, in scanBreakdown()'s shape
+  const [guests, setGuests] = useState([]);        // full guest list from public_list_cards
+  const [guestQ, setGuestQ] = useState("");        // local filter text for the guest list
+  const [guestAsk, setGuestAsk] = useState(null);  // { guest, left } — count prompt for multi-person cards
   const statsMissing = useRef(false);             // the database doesn't have public_scan_stats yet
   const phone = useMediaQuery(SCANNER_PHONE);
-  const [view, setView]   = useState("scan");     // phones: stats | scan | recent
+  const [view, setView]   = useState("scan");     // phones: stats | scan | guests | recent
   const [camSignal, setCamSignal] = useState(0);  // bumped when the Scan tab is tapped: opens the camera
 
   // Checks the code by asking for the event summary (empty result = wrong / changed code)
@@ -60,6 +63,8 @@ export default function PublicScanPage({ eventId }) {
           entered: x.entered, scanned: x.scanned_cards, notScanned: x.cards - x.scanned_cards, complete: x.complete_cards } : null);
       }
     }
+    const gl = await supabase.rpc("public_list_cards", { p_event: id, p_code: c });
+    if (!gl.error) setGuests(gl.data || []);
     return true;
   }, [code, eid]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -114,6 +119,13 @@ export default function PublicScanPage({ eventId }) {
     if (r.reason === "bad_code") { setState("locked"); setCode(""); }
     refresh();
     return r;
+  };
+  // Check in a guest directly from the guest list (bypasses ScanPanel)
+  const doGuestCheckIn = async (g, count) => {
+    setGuestAsk(null);
+    // Optimistic update so the row reflects the change immediately
+    setGuests(gs => gs.map(x => x.id === g.id ? { ...x, scan_count: Math.min(x.scan_count + count, x.max_scans) } : x));
+    try { await checkIn(g, count, "manual"); } catch { /* refresh() inside checkIn will re-sync */ }
   };
 
   const page = { minHeight: "100vh", background: N.navy900, color: N.text, fontFamily: "'Plus Jakarta Sans', sans-serif",
@@ -211,6 +223,62 @@ export default function PublicScanPage({ eventId }) {
   const dateLine = [event.event_type, event.start_datetime && new Date(event.start_datetime).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" })].filter(Boolean).join(" · ");
   const panel = (section, signal) => <ScanPanel findCard={findCard} search={search} checkIn={checkIn} scannerName={door || null} section={section} startSignal={signal} />;
 
+  // Guest list with filter + inline check-in
+  const filteredGuests = guests.filter(g => !guestQ || g.name.toLowerCase().includes(guestQ.toLowerCase()) || (g.card_type || "").toLowerCase().includes(guestQ.toLowerCase()));
+  const guestPanel = (
+    <div>
+      <input value={guestQ} onChange={e => setGuestQ(e.target.value)}
+        placeholder="Search guests…"
+        style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${N.border}`,background:N.navy800,color:N.text,fontSize:14,boxSizing:"border-box",marginBottom:8}} />
+      {!guests.length
+        ? <div style={{fontSize:13,color:N.textDim,padding:"8px 0"}}>No guests loaded yet — unlock with the scan code first.</div>
+        : filteredGuests.length === 0
+        ? <div style={{fontSize:13,color:N.textDim,padding:"8px 0"}}>No guests match "{guestQ}".</div>
+        : filteredGuests.map(g => {
+          const left = g.max_scans - g.scan_count;
+          const done = left <= 0;
+          const partial = g.scan_count > 0 && !done;
+          return (
+            <div key={g.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:`1px solid ${N.border}`}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:600,fontSize:14,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{g.name}</div>
+                <div style={{fontSize:11,marginTop:1}}>
+                  {g.card_type && <span style={{color:N.textDim}}>{g.card_type} · </span>}
+                  {done    ? <span style={{color:N.green}}>Entered</span>
+                  : partial ? <span style={{color:N.sky}}>{g.scan_count} / {g.max_scans} in</span>
+                  : <span style={{color:N.textDim}}>Not yet</span>}
+                </div>
+              </div>
+              {!done && (
+                <button style={{flexShrink:0,padding:"5px 10px",borderRadius:7,border:`1px solid ${alpha(N.green,"55")}`,background:alpha(N.green,"14"),color:N.green,fontSize:12,fontWeight:700,cursor:"pointer"}}
+                  onClick={() => { if (left === 1) doGuestCheckIn(g, 1); else setGuestAsk({ guest: g, left }); }}>
+                  <Icon n="check" /> {partial ? `+${left}` : "Check in"}
+                </button>
+              )}
+            </div>
+          );
+        })
+      }
+      {/* Count prompt for multi-person cards — closes only via Cancel button per convention */}
+      {guestAsk && (
+        <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,0.65)",display:"grid",placeItems:"center",padding:16}}>
+          <div style={{background:N.navy800,border:`1px solid ${N.border}`,borderRadius:16,padding:24,maxWidth:320,width:"100%"}} onClick={e => e.stopPropagation()}>
+            <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{guestAsk.guest.name}</div>
+            <div style={{fontSize:13,color:N.textDim,marginBottom:16}}>How many are entering? ({guestAsk.left} remaining)</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12}}>
+              {Array.from({length: guestAsk.left}, (_, i) => i + 1).map(n => (
+                <button key={n} style={{flex:1,minWidth:52,padding:"10px 0",borderRadius:10,border:`1px solid ${alpha(N.sky,"55")}`,background:alpha(N.sky,"14"),color:N.sky,fontWeight:800,fontSize:18,cursor:"pointer"}}
+                  onClick={() => doGuestCheckIn(guestAsk.guest, n)}>{n}</button>
+              ))}
+            </div>
+            <button style={{width:"100%",padding:"10px 0",borderRadius:10,border:`1px solid ${N.border}`,background:"transparent",color:N.textDim,fontSize:13,cursor:"pointer"}}
+              onClick={() => setGuestAsk(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   if (phone) {
     const goView = (v) => { if (v === view) return; if (v === "scan") setCamSignal(n => n + 1); setView(v); window.scrollTo?.(0, 0); };
     return (
@@ -219,11 +287,15 @@ export default function PublicScanPage({ eventId }) {
           <h1 style={{fontSize:18,fontWeight:800}}>{event.name}</h1>
           <div style={{fontSize:12,color:N.textDim}}>{dateLine}</div>
         </div>
-        {view === "stats" && <ScanStats stats={stats || { cards: event.cards, people: event.people, entered: event.entered }} />}
-        {view === "recent" && recentList}
+        {view === "stats"   && <ScanStats stats={stats || { cards: event.cards, people: event.people, entered: event.entered }} />}
+        {view === "guests"  && guestPanel}
+        {view === "recent"  && recentList}
         {panel(view === "scan" ? "scan" : "none", camSignal)}
         <ScanTabBar view={view} onChange={goView} tabs={[
-          { key: "stats", label: "Statistics", icon: "chart" }, { key: "scan", label: "Scan", icon: "scan" }, { key: "recent", label: "Recent", icon: "history" },
+          { key: "stats", label: "Statistics", icon: "chart" },
+          { key: "scan",  label: "Scan",       icon: "scan" },
+          { key: "guests",label: "Guests",     icon: "users" },
+          { key: "recent",label: "Recent",     icon: "history" },
         ]} />
       </div></div>
     );
@@ -245,7 +317,13 @@ export default function PublicScanPage({ eventId }) {
           ))}
         </div>
       </div>
-      {panel("all", 0)}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,alignItems:"start"}}>
+        <div>{panel("all", 0)}</div>
+        <div>
+          <div style={{fontSize:12,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:.5,marginBottom:8}}>Guest List ({guests.length})</div>
+          {guestPanel}
+        </div>
+      </div>
       {recent.length > 0 && recentList}
     </div></div>
   );
