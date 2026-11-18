@@ -906,6 +906,25 @@ const cardFromRow = (c) => ({ publicId: c.public_id || null, cardCode: c.card_co
 // card image made for it still shows the right thing
 const sameCardFace = (r, c) => String(r.name || "").trim() === String(c.name || "").trim()
   && String(r.cardType || "").trim() === String(c.card_type || "").trim();
+// JS mirror of the database gen_card_code(): 3 digits + 1 letter from the unambiguous set
+// at a random one of the four positions. Used for canvas passcode previews before save.
+const genCardCode = () => {
+  const D = "0123456789", L = "ABCDEFGHJKMNPQRSTUVWXYZ";
+  const d = () => D[Math.floor(Math.random()*10)];
+  const l = L[Math.floor(Math.random()*23)];
+  const pos = Math.floor(Math.random()*4);
+  const [d1,d2,d3] = [d(),d(),d()];
+  return [l+d1+d2+d3, d1+l+d2+d3, d1+d2+l+d3, d1+d2+d3+l][pos];
+};
+// Sets a preview cardCode on every record so the canvas shows the passcode immediately.
+// Priority: spreadsheet value (r.passcode) → sequence number → existing DB code → random preview.
+// A pure-numeric cardCode is treated as a sequence preview (replaced when switching to random).
+const applyPasscodePreviews = (recs, mode) => recs.map((r, i) => {
+  if (r.passcode)                                    return { ...r, cardCode: r.passcode };
+  if (mode === "sequence")                            return { ...r, cardCode: String(i + 1) };
+  if (!r.cardCode || /^\d+$/.test(r.cardCode))       return { ...r, cardCode: genCardCode() };
+  return r;
+});
 const BLANK_EVENT = { username:"", phone:"", event_type:"", status:"active", venue_name:"", venue_address:"", venue_location:"", start_datetime:"", end_datetime:"", guest_link_enabled:false };
 // Columns the event form may write (persistEvent sends only these). The CRM links are only
 // present once supabase-schema.sql has added them, so they are sent only when the form has them.
@@ -6928,6 +6947,12 @@ export default function App() {
   const [passcodeMode, setPasscodeMode] = useState(() => {
     try { return localStorage.getItem("nikadi_passcode_mode") || "random"; } catch { return "random"; }
   });
+  // Skip the initial mount so we don't re-roll preview codes when the page first loads
+  const passcodeModeInitRef = useRef(true);
+  useEffect(() => {
+    if (passcodeModeInitRef.current) { passcodeModeInitRef.current = false; return; }
+    setRecords(rs => applyPasscodePreviews(rs, passcodeMode));
+  }, [passcodeMode]); // eslint-disable-line react-hooks/exhaustive-deps
   const [templateKey, setTemplateKey] = useState(null);
   const [layoutRestored, setLayoutRestored] = useState(false);
   const layoutSaveTimer   = useRef(null);
@@ -7821,6 +7846,8 @@ export default function App() {
     statusResetRef.current = reset;
     // Ordered column list for the SMS variable chips: standard columns first, then any extras
     setCsvColumns(columns);
+    // Apply preview passcodes immediately so the canvas shows values before Save Cards is clicked
+    norm = applyPasscodePreviews(norm, passcodeMode);
     setRecords(norm); setActiveIdx(0);
     showToast(reset
       ? `Loaded ${norm.length} records — WhatsApp and SMS statuses reset, so everyone can be sent again. `
