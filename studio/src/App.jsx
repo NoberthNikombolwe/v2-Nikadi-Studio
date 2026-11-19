@@ -7360,7 +7360,7 @@ export default function App() {
         if (!res.ok || d.error) { setSmsAiError(d.error || `Error ${res.status}`); return; }
         draft = d.draft;
       } else {
-        const { data: d, error } = await sb.functions.invoke("ai-sms-draft", { body: payload });
+        const { data: d, error } = await supabase.functions.invoke("ai-sms-draft", { body: payload });
         if (error) { setSmsAiError(error.message || "AI error"); return; }
         if (!d || d.error) { setSmsAiError(d?.error || "AI error"); return; }
         draft = d.draft;
