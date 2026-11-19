@@ -1,5 +1,5 @@
 import Logo from "./Logo";
-import { planCardSave, splitImport, resetSendStatuses } from "./lib/guestMerge";
+import { planCardSave, splitImport, resetSendStatuses, hasLedger } from "./lib/guestMerge";
 import { useAutoClearLog } from "./hooks/useAutoClearLog";
 import { useEventCards } from "./hooks/useEventCards";
 import { useDeliveries } from "./hooks/useDeliveries";
@@ -7950,7 +7950,7 @@ export default function App() {
   // still hold the pre-send statuses.
   const saveCards = async (eventId, recs = records) => {
     if (!supabase) return;
-    const entries = recs.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample);   // keep each row's position in `recs`
+    const entries = recs.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample && !r.offList);   // keep each row's position in `recs`
     const toSave  = entries.map(({ r }) => r);
     if (!toSave.length) { showToast("No contacts to save", "info"); return; }
     const { data: old, error: readErr } = await supabase.from("event_cards").select("*").eq("event_id", eventId);
@@ -8271,17 +8271,21 @@ export default function App() {
       const { data: cards, error: cardsErr } = await supabase.from("event_cards").select("*").eq("event_id", ev.id);
       if (stale()) return;
       if (cardsErr) showToast("Could not load contacts: " + cardsErr.message, "warn");
-      // Guests left off a newer spreadsheet (kept for their call / check-in history) aren't on the list
-      const listed = (cards || []).filter(c => c.in_list !== false);
-      setRecords(listed.length ? listed.map(c => ({
-        dbId:      c.id,
-        name:      c.name||"",
-        cardType:  c.card_type||"",
-        phone:     c.phone||"",
-        waStatus:     c.wa_status||WA.idle,
-        smsStatus:    c.sms_status||SMS.pending,
-        ...cardFromRow(c),
-      })) : sampleRecords());
+      // Guests left off a newer spreadsheet: those with call / check-in history are shown
+      // in Calls and Scanner (offList: true) but excluded from saves and bulk sends.
+      // Those without any ledger data are simply hidden.
+      const toRecord = (c, extra = {}) => ({
+        dbId: c.id, name: c.name||"", cardType: c.card_type||"",
+        phone: c.phone||"", waStatus: c.wa_status||WA.idle, smsStatus: c.sms_status||SMS.pending,
+        ...cardFromRow(c), ...extra,
+      });
+      const onList  = (cards || []).filter(c => c.in_list !== false);
+      const offList = (cards || []).filter(c => c.in_list === false && hasLedger(c));
+      const listed  = [
+        ...onList.map(c => toRecord(c)),
+        ...offList.map(c => toRecord(c, { offList: true })),
+      ];
+      setRecords(listed.length ? listed : sampleRecords());
       setActiveIdx(0);
     }
 
@@ -8332,9 +8336,12 @@ export default function App() {
   // Contacts already sent are never skipped silently: the dialog lists them and offers
   // "Send again to all", so a resend is always a deliberate choice.
   const pickBulkRecipients = async ({ title, emptyMsg, options, recs = records }) => {
-    const { targets: fresh, skipped, duplicateGroups } = selectRecipients(recs, { ...options, allowDuplicates: true });
+    // offList rows (retained guests not in the current sheet) are never sent messages
+    const prevEligible = options?.isEligible;
+    const opts = { ...options, isEligible: prevEligible ? r => !r.offList && prevEligible(r) : r => !r.offList };
+    const { targets: fresh, skipped, duplicateGroups } = selectRecipients(recs, { ...opts, allowDuplicates: true });
     // The same selection with nobody counted as done — the "send again" list
-    const { targets: everyone } = selectRecipients(recs, { ...options, isDone: () => false, allowDuplicates: true });
+    const { targets: everyone } = selectRecipients(recs, { ...opts, isDone: () => false, allowDuplicates: true });
     const freshIdx = new Set(fresh.map(t => t.index));
     const resent   = everyone.filter(t => !freshIdx.has(t.index));   // already received this message
     const note = describeSkipped({ ...skipped, alreadySent: 0 });
