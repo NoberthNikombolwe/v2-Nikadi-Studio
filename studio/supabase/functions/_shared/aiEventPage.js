@@ -50,7 +50,7 @@ export async function runEventPageChat(messages, { apiKey, model, post }) {
   if (totalChars > PAGE_LIMITS.totalChars)
     return { status: 413, body: { error: "Chat history is too long — start a new conversation." } };
 
-  const m = model || "gemini-3.8-flash";
+  const m = model || "gemini-flash-lite-latest";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
   let result;
   try {
