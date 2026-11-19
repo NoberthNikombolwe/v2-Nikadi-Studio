@@ -7306,11 +7306,12 @@ export default function App() {
   const loadSavedEvents = async () => {
     if (!supabase) return [];
     loadTeamsRef.current?.();
-    const { data, error } = await supabase.from("events").select("*").order("created_at", { ascending:false }).limit(50);
+    const { data, error } = await supabase.from("events").select("*").order("created_at", { ascending:false }).limit(200);
     setEventsLoaded(true);
     if (!error && data) { setSavedEvents(data); return data; }
     return [];
   };
+
   // On first mount: load templates + events, then reopen whichever event was last
   // active (persisted in localStorage under "nikadi_last_event")
   useEffect(() => {
@@ -7570,6 +7571,28 @@ export default function App() {
   };
   loadTeamsRef.current = loadTeams;
   const [eventsScope, setEventsScope] = useState("all");   // Events tab: "all" | "mine" (for roles that see every event)
+  const [evFilter, setEvFilter] = useState({ q: "", status: "all", type: "all" });
+  const [evPage,   setEvPage]   = useState(0);
+  const EV_PAGE_SIZE = 20;
+  // All unique event types from loaded events (for the type filter dropdown)
+  const evTypes = [...new Set(savedEvents.map(e => e.event_type).filter(Boolean))].sort();
+  // Scope → filter → paginate
+  const evScoped = eventsScope === "mine" && access.seesAllEvents
+    ? eventsAssignedTo(savedEvents, teamsByEvent, myEmail) : savedEvents;
+  const evFiltered = evScoped.filter(ev => {
+    if (evFilter.status !== "all" && ev.status !== evFilter.status) return false;
+    if (evFilter.type   !== "all" && ev.event_type !== evFilter.type)   return false;
+    if (evFilter.q) {
+      const q = evFilter.q.toLowerCase();
+      return !!(ev.username?.toLowerCase().includes(q) || ev.venue_name?.toLowerCase().includes(q)
+             || ev.phone?.includes(q) || ev.event_type?.toLowerCase().includes(q));
+    }
+    return true;
+  });
+  const evTotalPages = Math.max(1, Math.ceil(evFiltered.length / EV_PAGE_SIZE));
+  const evPageSafe   = Math.min(evPage, evTotalPages - 1);
+  const evPageRows   = evFiltered.slice(evPageSafe * EV_PAGE_SIZE, (evPageSafe + 1) * EV_PAGE_SIZE);
+  const setEvF = (patch) => { setEvFilter(f => ({ ...f, ...patch })); setEvPage(0); };
   const myEmail = (user?.email || "").toLowerCase();
 
   const crm = useCrm({ enabled: !!userId, showToast, askDialog, logHistory, reloadEvents: loadSavedEvents });
@@ -9864,7 +9887,12 @@ export default function App() {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
                   <div>
                     <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Events</h2>
-                    <p style={{fontSize:12,color:N.textDim,marginTop:2}}>{savedEvents.length} event{savedEvents.length!==1?"s":""} · Click "Create Cards" to design cards for an event</p>
+                    <p style={{fontSize:12,color:N.textDim,marginTop:2}}>
+                      {evFiltered.length !== savedEvents.length
+                        ? `${evFiltered.length} of ${savedEvents.length} event${savedEvents.length!==1?"s":""}`
+                        : `${savedEvents.length} event${savedEvents.length!==1?"s":""}`}
+                      {" · Click “Create Cards” to design cards for an event"}
+                    </p>
                   </div>
                   <div style={{display:"flex",gap:8}}>
                     <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={loadSavedEvents}><Icon n="undo" /> Refresh</button>
@@ -9887,15 +9915,33 @@ export default function App() {
                   </div>
                 )}
 
-                {supabase && savedEvents.length > 0 && !access.setupMissing && (
-                  <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
-                    {access.seesAllEvents && [["all","All events"],["mine","Assigned to me"]].map(([k,l]) => (
-                      <button key={k} style={segStyle(eventsScope === k)} onClick={() => setEventsScope(k)}>{l}</button>
-                    ))}
-                    <span style={{fontSize:11,color:N.textDim}}>
-                      {access.seesAllEvents ? "Your role sees every event." : "You see the events you're assigned to or created."}
-                    </span>
-                  </div>
+                {supabase && savedEvents.length > 0 && (
+                  <>
+                    {/* Search + scope + status + type filters */}
+                    <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12}}>
+                      <input className="nk-input" style={{flex:"1 1 200px",maxWidth:300,marginBottom:0}}
+                        placeholder="Search name, venue, phone…" value={evFilter.q}
+                        onChange={e => setEvF({ q: e.target.value })} />
+                      {!access.setupMissing && access.seesAllEvents && [["all","All"],["mine","Mine"]].map(([k,l]) => (
+                        <button key={k} style={segStyle(eventsScope === k)} onClick={() => setEventsScope(k)}>{l}</button>
+                      ))}
+                      {[["all","All status"],["active","Active"],["completed","Completed"],["cancelled","Cancelled"]].map(([k,l]) => (
+                        <button key={k} style={segStyle(evFilter.status === k)} onClick={() => setEvF({ status: k })}>{l}</button>
+                      ))}
+                      {evTypes.length > 0 && (
+                        <select className="nk-input" style={{width:"auto",marginBottom:0,fontSize:12}} value={evFilter.type}
+                          onChange={e => setEvF({ type: e.target.value })}>
+                          <option value="all">All types</option>
+                          {evTypes.map(t => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      )}
+                      {(evFilter.q || evFilter.status !== "all" || evFilter.type !== "all") && (
+                        <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setEvF({ q:"", status:"all", type:"all" })}>
+                          <Icon n="x" /> Clear
+                        </button>
+                      )}
+                    </div>
+                  </>
                 )}
                 {supabase && savedEvents.length > 0 && (
                   <div className="nk-table-wrap">
@@ -9906,12 +9952,12 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {(eventsScope === "mine" && access.seesAllEvents ? eventsAssignedTo(savedEvents, teamsByEvent, myEmail) : savedEvents).map((ev, i) => (
+                        {evPageRows.map((ev, i) => (
                           <tr key={ev.id} className={savedEventId===ev.id?"row-active":""}
                             onClick={()=>selectEvent(ev)}
                             style={{cursor:"pointer"}}
                             title="Click to load this event and open its design">
-                            <td style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{i+1}</td>
+                            <td style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{evPageSafe * EV_PAGE_SIZE + i + 1}</td>
                             <td>
                               <div style={{fontWeight:700,color:N.text}}>{ev.username}</div>
                               {ev.phone && <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>+{normalisePhone(ev.phone)}</div>}
@@ -9996,6 +10042,24 @@ export default function App() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+                {supabase && savedEvents.length > 0 && evFiltered.length === 0 && (
+                  <EmptyState icon="filter" title="No events match" text="Try a different search or clear the filters." />
+                )}
+                {supabase && evTotalPages > 1 && (
+                  <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:12,paddingTop:12}}>
+                    <button className="nk-btn nk-btn-ghost" disabled={evPageSafe === 0}
+                      onClick={() => setEvPage(p => Math.max(0, p - 1))}>
+                      <Icon n="chevron-left" /> Prev
+                    </button>
+                    <span style={{fontSize:12,color:N.textDim}}>
+                      Page {evPageSafe + 1} of {evTotalPages} &middot; {evFiltered.length} event{evFiltered.length !== 1 ? "s" : ""}
+                    </span>
+                    <button className="nk-btn nk-btn-ghost" disabled={evPageSafe >= evTotalPages - 1}
+                      onClick={() => setEvPage(p => Math.min(evTotalPages - 1, p + 1))}>
+                      Next <Icon n="chevron-right" />
+                    </button>
                   </div>
                 )}
               </div>
