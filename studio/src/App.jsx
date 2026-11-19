@@ -7353,21 +7353,23 @@ export default function App() {
       ...(smsAiImage ? { images: [smsAiImage] } : {}),
     };
     try {
-      let draft;
-      if (import.meta.env.DEV) {
-        const res = await fetch("/ai-sms-draft", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        const d = await res.json();
-        if (!res.ok || d.error) { setSmsAiError(d.error || `Error ${res.status}`); return; }
-        draft = d.draft;
-      } else {
-        const { data: d, error } = await supabase.functions.invoke("ai-sms-draft", { body: payload });
-        if (error) { setSmsAiError(error.message || "AI error"); return; }
-        if (!d || d.error) { setSmsAiError(d?.error || "AI error"); return; }
-        draft = d.draft;
+      const url = import.meta.env.DEV
+        ? "/ai-sms-draft"
+        : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-sms-draft`;
+      const headers = { "Content-Type": "application/json" };
+      if (!import.meta.env.DEV) {
+        const { data: sess } = await supabase.auth.getSession();
+        const token = sess?.session?.access_token;
+        if (!token) { setSmsAiError("Not signed in — sign in again."); return; }
+        headers.Authorization = `Bearer ${token}`;
       }
-      setSmsAiDraft(draft);
+      const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.error) { setSmsAiError(d.error || `Error ${res.status}`); return; }
+      if (!d.draft) { setSmsAiError("AI returned an empty draft — try again."); return; }
+      setSmsAiDraft(d.draft);
     } catch (e) {
-      setSmsAiError(e.message);
+      setSmsAiError(e.message || "Could not reach the AI — check your connection.");
     } finally {
       setSmsAiLoading(false);
     }
