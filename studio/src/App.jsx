@@ -1245,9 +1245,9 @@ function RecordRow({ rec, idx, onEdit, onUpload, onSendWa, onDownload, onSendSms
   // Commit the edited phone number back to the parent's records array and exit edit mode
   const save = () => { onEdit(idx,"phone",phone); setEditing(false); };
   return (
-    <tr className={isActive?"row-active":""}>
+    <tr className={isActive?"row-active":""} style={rec.offList ? {opacity:0.55} : undefined}>
       <td><span style={{color:N.accent,cursor:"pointer",fontWeight:700,fontFamily:"JetBrains Mono, monospace",fontSize:12}} onClick={onActivate}>#{idx+1}</span></td>
-      <td><span style={{fontWeight:600}}>{rec.name}</span></td>
+      <td><span style={{fontWeight:600}}>{rec.name}{rec.offList && <span style={{marginLeft:5,fontSize:10,color:N.textDim,fontWeight:400}}>(not in sheet)</span>}</span></td>
       <td><span style={{color:N.textMid,fontSize:12}}>{rec.cardType}</span></td>
       <td>
         {editing ? (
@@ -8182,10 +8182,15 @@ export default function App() {
         .in("id", (resetAt ? plan.retained : newlyOff).map(c => c.id));
       if (offErr) { showToast("Cards saved, but guests left off the sheet could not be updated: " + offErr.message, "warn"); return; }
     }
-    if (!listCol && plan.retained.length) {
+    // Always add retained guests back into records so Design tab (and Track/overview) can
+    // see them. When in_list column exists they come back as offList: true (excluded from
+    // saves/sends, greyed out in Design, but visible so the user knows their history is safe).
+    // Without the column (old path) they come back normally as before.
+    if (plan.retained.length) {
       setRecords(rs => [...rs, ...plan.retained.map(c => ({
         dbId: c.id, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
         waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, ...cardFromRow(c),
+        ...(listCol ? { offList: true } : {}),
         ...(resetAt ? { waStatus: WA.idle, smsStatus: SMS.pending, resetAt } : {}),
       }))]);
     }
@@ -8202,7 +8207,7 @@ export default function App() {
     }
     showToast(keptNote
       ? `${total} cards saved — ${keptNote} guest${keptNote === 1 ? "" : "s"} not in the new sheet ${listCol
-        ? "kept only for their call / check-in history (no cards or messages; still in Calls and Scanner)"
+        ? "kept for their call / check-in history (shown below the list; no cards or messages)"
         : "kept because they have call or check-in history"}`
       : `${total} cards saved — calls and check-ins kept`, keptNote ? "info" : "success");
   };
