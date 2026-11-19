@@ -3415,6 +3415,11 @@ function GeneralSettings({ access }) {
         <Toggle checked={access.settings.allow_event_delete !== false} disabled={!canEdit} onChange={c => access.saveSetting("allow_event_delete", c)} label="Allow event deletion" />
         <div style={{fontSize:11,color:N.textDim,marginTop:4}}>When on, Super Admins can delete events and all associated data including card images. Turn off to prevent accidental deletion.</div>
       </div>
+      <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${N.border}`}}>
+        <div style={{fontSize:13,fontWeight:700,color:N.text,marginBottom:8}}>Calls</div>
+        <Toggle checked={access.settings.calls_track_enabled !== false} disabled={!canEdit} onChange={c => access.saveSetting("calls_track_enabled", c)} label="Show Track button on call rows" />
+        <div style={{fontSize:11,color:N.textDim,marginTop:4}}>When on, each row in the Calls tab has a Track button that opens a popup showing card upload, WhatsApp delivery and SMS status for that guest. Turn off to hide it from the Telesales team.</div>
+      </div>
       <CardFontsSettings access={access} canEdit={canEdit} />
     </div>
   );
@@ -6222,7 +6227,8 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
   const [tracking,  setTracking]  = useState(null);
   const [sharing, setSharing] = useState(false);
   const canShare = access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit");
-  const canEdit = access.can("calls", "edit");
+  const canEdit  = access.can("calls", "edit");
+  const canTrack = access.settings.calls_track_enabled !== false;
   if (!eventId) return <div className="nk-page"><NoEventOpen what="Calls" onGo={onGo} /></div>;
   if (error) return (
     <div className="nk-page" style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
@@ -6319,7 +6325,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                 <td>
                   <div className="nk-row-actions">
                     <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
-                    <Sb bg="transparent" col={N.sky} border={N.border} label={`View track for ${c.name}`} onClick={() => setTracking(c)}><Icon n="timeline" /></Sb>
+                    {canTrack && <Sb bg="transparent" col={N.sky} border={N.border} label={`View track for ${c.name}`} onClick={() => setTracking(c)}><Icon n="timeline" /></Sb>}
                     {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
                     {c.public_id && eventRow?.public_id && eventRow?.guest_link_enabled && (
                       <Sb bg="transparent" col={N.sky} border={N.border}
@@ -6356,7 +6362,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
       </div>
       {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)}
         onSave={async (text) => { if (await update(commenting, { call_comment: text || null }, { status: commenting.call_status || "ok", detail: `Comment: ${text || "(removed)"}` })) setCommenting(null); }} />}
-      {tracking && <TrackModal card={tracking} onClose={() => setTracking(null)} />}
+      {tracking && canTrack && <TrackModal card={tracking} onClose={() => setTracking(null)} />}
       {sharing && <ShareViewModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
     </div>
   );
