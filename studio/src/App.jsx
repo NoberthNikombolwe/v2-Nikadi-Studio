@@ -3508,7 +3508,7 @@ function CardFontsSettings({ access, canEdit }) {
    totals, share the public scan page) and <CallsTab> (guest confirmation calls).
    Check-ins only ever go through the scan_card() database function.
 ══════════════════════════════════════════════════════════════════════════ */
-const CARD_COLS = "id,public_id,card_code,name,card_type,phone,wa_status,sms_status,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
+const CARD_COLS = "id,public_id,card_code,name,card_type,phone,wa_status,sms_status,card_url,max_scans,scan_count,last_scanned_at,call_status,call_comment,call_updated_at,call_by";
 
 // useEventCards is imported from ./hooks/useEventCards
 
@@ -6219,6 +6219,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
   const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
   const [filter, setFilter] = useState({ status: "all", q: "" });
   const [commenting, setCommenting] = useState(null);
+  const [tracking,  setTracking]  = useState(null);
   const [sharing, setSharing] = useState(false);
   const canShare = access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit");
   const canEdit = access.can("calls", "edit");
@@ -6318,6 +6319,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                 <td>
                   <div className="nk-row-actions">
                     <span style={{maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12,color:c.call_comment ? N.textMid : N.textDim}}>{c.call_comment || "—"}</span>
+                    <Sb bg="transparent" col={N.sky} border={N.border} label={`View track for ${c.name}`} onClick={() => setTracking(c)}><Icon n="timeline" /></Sb>
                     {canEdit && <Sb bg="transparent" col={N.sky} border={N.border} label={`${c.call_comment ? "Edit" : "Add"} comment for ${c.name}`} onClick={() => setCommenting(c)}><Icon n="note" /></Sb>}
                     {c.public_id && eventRow?.public_id && eventRow?.guest_link_enabled && (
                       <Sb bg="transparent" col={N.sky} border={N.border}
@@ -6354,6 +6356,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
       </div>
       {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)}
         onSave={async (text) => { if (await update(commenting, { call_comment: text || null }, { status: commenting.call_status || "ok", detail: `Comment: ${text || "(removed)"}` })) setCommenting(null); }} />}
+      {tracking && <TrackModal card={tracking} onClose={() => setTracking(null)} />}
       {sharing && <ShareViewModal eventRow={eventRow} showToast={showToast} onClose={() => setSharing(false)} reloadEvents={reloadEvents} />}
     </div>
   );
@@ -6374,6 +6377,104 @@ function CommentModal({ card: c, onSave, onClose }) {
         <div className="nk-modal-foot">
           <button className="nk-btn nk-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="nk-btn nk-btn-primary" onClick={() => onSave(text.trim())}><Icon n="save" /> Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Communication timeline for one guest: card upload, WhatsApp delivery + reply, SMS delivery.
+// Fetches message_deliveries live so the Telesales team can see exactly what the guest received
+// before making the call.
+function TrackModal({ card: c, onClose }) {
+  const [delivs, setDelivs] = useState(null);   // null = loading
+  useEffect(() => {
+    if (!supabase) { setDelivs([]); return; }
+    supabase
+      .from("message_deliveries")
+      .select("channel,message_key,message_title,sent_at,status,reply_text,replied_at")
+      .eq("event_card_id", c.id)
+      .order("sent_at", { ascending: false })
+      .then(({ data }) => setDelivs(data || []));
+  }, [c.id]);
+
+  const latestWa  = delivs?.find(d => d.channel === "whatsapp" && d.message_key === "card");
+  const latestSms = delivs?.find(d => d.channel === "sms");
+
+  const waInfo = (status) => {
+    if (status === "read")      return { color: N.green, label: "Read by guest" };
+    if (status === "delivered") return { color: N.sky,   label: "Delivered" };
+    if (status === "sent")      return { color: N.sky,   label: "Sent" };
+    if (status === "notSent")   return { color: N.red,   label: "Not sent (failed)" };
+    if (status === "invalid")   return { color: N.red,   label: "Invalid number" };
+    return { color: N.textDim, label: status || "Not sent" };
+  };
+  const smsInfo = (status) => {
+    if (status === "delivered") return { color: N.green, label: "Delivered" };
+    if (status === "sent")      return { color: N.sky,   label: "Sent" };
+    if (status === "failed")    return { color: N.red,   label: "Failed" };
+    return { color: N.textDim, label: "Not sent" };
+  };
+
+  const tRow = (color, label, time, indent) => (
+    <div style={{display:"flex",alignItems:"flex-start",gap:10,padding:"5px 0",paddingLeft:indent?18:0}}>
+      <div style={{width:9,height:9,borderRadius:"50%",background:color,flexShrink:0,marginTop:3}} />
+      <div>
+        <div style={{fontSize:13,color:N.text,fontWeight:600}}>{label}</div>
+        {time && <div style={{fontSize:11,color:N.textDim,marginTop:1}}>{fmtWhen(time)}</div>}
+      </div>
+    </div>
+  );
+  const tSection = (icon, title, children) => (
+    <div style={{marginBottom:16}}>
+      <div style={{fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:0.5,marginBottom:6,display:"flex",alignItems:"center",gap:6}}>
+        <Icon n={icon} style={{opacity:0.6}} /> {title}
+      </div>
+      <div style={{paddingLeft:8,borderLeft:`2px solid ${N.border}`}}>{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="nk-overlay">
+      <div className="nk-modal" style={{maxWidth:500}} role="dialog" aria-modal="true" aria-labelledby="nk-track-title">
+        <div className="nk-modal-head">
+          <div className="nk-modal-title" id="nk-track-title"><Icon n="timeline" /> Track — {c.name}</div>
+          <button className="nk-modal-close" onClick={onClose} aria-label="Close" title="Close"><Icon n="x" /></button>
+        </div>
+        <div className="nk-modal-body" style={{padding:"16px 20px",maxHeight:"70vh",overflowY:"auto"}}>
+          <div style={{fontSize:12,color:N.textDim,marginBottom:16}}>
+            {c.card_type || "Guest"}
+            {c.phone && <> · <span style={{fontFamily:"JetBrains Mono, monospace"}}>+{normalisePhone(c.phone)}</span></>}
+            {c.card_code && <> · <span style={{fontFamily:"JetBrains Mono, monospace",letterSpacing:1}}>{c.card_code}</span></>}
+          </div>
+
+          {tSection("image", "Card",
+            c.card_url
+              ? tRow(N.green,   "Card generated and uploaded", null)
+              : tRow(N.textDim, "Card not yet generated", null)
+          )}
+
+          {tSection("send", "WhatsApp",
+            delivs === null
+              ? <div style={{color:N.textDim,fontSize:12,padding:"5px 0"}}><Icon n="loader" /> Loading…</div>
+              : !latestWa
+                ? tRow(N.textDim, "Not sent", null)
+                : <>
+                    {tRow(waInfo(latestWa.status).color, waInfo(latestWa.status).label, latestWa.sent_at)}
+                    {latestWa.reply_text && tRow(N.sky, `Replied: "${latestWa.reply_text}"`, latestWa.replied_at, true)}
+                  </>
+          )}
+
+          {tSection("message", "SMS",
+            delivs === null
+              ? <div style={{color:N.textDim,fontSize:12,padding:"5px 0"}}><Icon n="loader" /> Loading…</div>
+              : !latestSms
+                ? tRow(N.textDim, "Not sent", null)
+                : tRow(smsInfo(latestSms.status).color, smsInfo(latestSms.status).label, latestSms.sent_at)
+          )}
+        </div>
+        <div className="nk-modal-foot">
+          <button className="nk-btn nk-btn-ghost" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>
