@@ -86,7 +86,7 @@ export async function runSmsDraft(payload, { apiKey, model, post }) {
   if (images.length)                                  lines.push("(Refer to the attached image for event details.)");
   parts.push({ text: lines.join("\n") });
 
-  const m   = model || "gemini-2.0-flash";
+  const m   = model || "gemini-2.5-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
 
   let result;
