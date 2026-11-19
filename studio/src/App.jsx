@@ -7159,6 +7159,13 @@ export default function App() {
   const smsDraftTimerRef  = useRef(null);
   const smsDraftBase      = useRef(null);   // last message loaded from / autosaved to events.sms_draft
   const [smsDraftSaved,   setSmsDraftSaved]   = useState(false);
+  // AI Draft SMS modal state
+  const [smsAiOpen,         setSmsAiOpen]         = useState(false);
+  const [smsAiDraft,        setSmsAiDraft]        = useState("");
+  const [smsAiLoading,      setSmsAiLoading]      = useState(false);
+  const [smsAiError,        setSmsAiError]        = useState(null);
+  const [smsAiImage,        setSmsAiImage]        = useState(null);    // { mime, data } base64
+  const [smsAiImagePreview, setSmsAiImagePreview] = useState(null);   // blob: URL for preview
   const smsSettings = {
     bearerToken: import.meta.env.VITE_SMS_BEARER_TOKEN || "",
     senderId:    import.meta.env.VITE_SMS_SENDER_ID || "NIKADI",
@@ -7308,6 +7315,62 @@ export default function App() {
     smsPersistedMsg.current = smsMessage;
     setSavedEvents(es => es.map(e => e.id === savedEventId ? { ...e, sms_message: smsMessage } : e));
     showToast("SMS message saved", "success");
+  };
+
+  /* ── AI Draft SMS ── */
+  // Processes an image file pick for the AI Draft SMS modal
+  const onSmsAiImagePick = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (smsAiImagePreview) URL.revokeObjectURL(smsAiImagePreview);
+    const preview = URL.createObjectURL(file);
+    setSmsAiImagePreview(preview);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const dataUrl = String(ev.target.result || "");
+      const comma = dataUrl.indexOf(",");
+      if (comma < 0) { setSmsAiError("Could not read the image."); return; }
+      const mime = dataUrl.slice(5, comma).replace(/;base64$/, "") || "image/jpeg";
+      setSmsAiImage({ mime, data: dataUrl.slice(comma + 1) });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Calls the AI to draft an SMS for the current event (with optional image)
+  const draftSmsWithAi = async () => {
+    setSmsAiLoading(true);
+    setSmsAiError(null);
+    setSmsAiDraft("");
+    const venue = [eventData.venue_name, eventData.venue_address, eventData.venue_location].filter(Boolean).join(", ");
+    const payload = {
+      event: {
+        name:  eventData.username  || "",
+        type:  eventData.event_type || "",
+        date:  eventData.start_datetime || "",
+        venue: venue,
+        phones: [],
+      },
+      ...(smsAiImage ? { images: [smsAiImage] } : {}),
+    };
+    try {
+      let draft;
+      if (import.meta.env.DEV) {
+        const res = await fetch("/ai-sms-draft", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const d = await res.json();
+        if (!res.ok || d.error) { setSmsAiError(d.error || `Error ${res.status}`); return; }
+        draft = d.draft;
+      } else {
+        const { data: d, error } = await sb.functions.invoke("ai-sms-draft", { body: payload });
+        if (error) { setSmsAiError(error.message || "AI error"); return; }
+        if (!d || d.error) { setSmsAiError(d?.error || "AI error"); return; }
+        draft = d.draft;
+      }
+      setSmsAiDraft(draft);
+    } catch (e) {
+      setSmsAiError(e.message);
+    } finally {
+      setSmsAiLoading(false);
+    }
   };
 
   /* ── Load saved events ── */
@@ -10220,6 +10283,25 @@ export default function App() {
             {/* ─── SMS ─── */}
             {tab === "sms" && (
               <div className="nk-page" style={{padding:"0 0 40px"}}>
+                {/* Floating AI Draft SMS button — above the Clean Data button */}
+                {savedEventId && (
+                  <button
+                    onClick={() => { setSmsAiError(null); setSmsAiDraft(""); setSmsAiOpen(true); }}
+                    style={{
+                      position:"fixed", right:24, bottom:86, zIndex:410,
+                      display:"inline-flex", alignItems:"center", gap:8,
+                      padding:"10px 18px", borderRadius:999,
+                      background:`linear-gradient(135deg,${N.teal},${N.sky})`,
+                      color:"#fff", fontWeight:700, fontSize:13,
+                      border:"none", cursor:"pointer",
+                      boxShadow:"0 4px 20px rgba(0,0,0,0.4)",
+                    }}
+                    aria-label="Draft SMS with AI"
+                    title="Ask AI to draft an SMS message based on this event"
+                  >
+                    <Icon n="sparkles" /> AI Draft SMS
+                  </button>
+                )}
                 <div style={{display:"flex",gap:24,alignItems:"flex-start"}}>
                   <div style={{flex:"0 0 340px"}}>
                     {/* Message picker — the main message plus any extra ones (reminder, thank-you…) */}
@@ -10546,6 +10628,75 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+                {/* AI Draft SMS modal */}
+                {smsAiOpen && (
+                  <div className="nk-overlay" onClick={e=>e.stopPropagation()}>
+                    <div className="nk-modal" style={{maxWidth:520}}>
+                      <div className="nk-modal-head">
+                        <div className="nk-modal-title"><Icon n="sparkles" /> AI Draft SMS</div>
+                        <button className="nk-modal-close" aria-label="Close" title="Close"
+                          onClick={() => { setSmsAiOpen(false); if (smsAiImagePreview) { URL.revokeObjectURL(smsAiImagePreview); setSmsAiImagePreview(null); setSmsAiImage(null); } }}>
+                          <Icon n="x" />
+                        </button>
+                      </div>
+                      <div className="nk-modal-body">
+                        <p style={{fontSize:13,color:N.textDim,marginBottom:16,lineHeight:1.6}}>
+                          Optionally upload a sample invitation card and AI will draft an SMS
+                          {savedEventId ? <> for <strong>{eventData.username || "this event"}</strong></> : ""}.
+                        </p>
+                        {/* Image upload */}
+                        <label className="nk-label">Sample invitation image <span style={{color:N.textDim,fontWeight:400}}>(optional)</span></label>
+                        <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",padding:"10px 14px",border:`1px dashed ${alpha(N.sky,"66")}`,borderRadius:8,background:N.cardBg,marginBottom:16}}>
+                          <input type="file" accept="image/jpeg,image/png,image/webp" style={{display:"none"}} onChange={onSmsAiImagePick} />
+                          {smsAiImagePreview ? (
+                            <>
+                              <img src={smsAiImagePreview} alt="Sample" style={{width:56,height:56,objectFit:"cover",borderRadius:6,flexShrink:0}} />
+                              <span style={{fontSize:12,color:N.teal,flex:1}}>Image attached — tap to replace</span>
+                              <button type="button" style={{color:N.red,background:"none",border:"none",cursor:"pointer",padding:4,display:"flex"}}
+                                onClick={e=>{e.preventDefault();e.stopPropagation();URL.revokeObjectURL(smsAiImagePreview);setSmsAiImagePreview(null);setSmsAiImage(null);}}>
+                                <Icon n="x" />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <Icon n="upload" />
+                              <span style={{fontSize:12,color:N.textMid}}>Tap to attach invitation card</span>
+                            </>
+                          )}
+                        </label>
+                        <button className="nk-btn nk-btn-teal nk-btn-full" onClick={draftSmsWithAi} disabled={smsAiLoading}>
+                          {smsAiLoading ? <><Icon n="loader" /> Drafting…</> : <><Icon n="sparkles" /> Draft SMS</>}
+                        </button>
+                        {smsAiError && (
+                          <div style={{marginTop:12,padding:"10px 14px",borderRadius:8,background:alpha(N.red,"22"),color:N.red,fontSize:12,display:"flex",alignItems:"flex-start",gap:8}}>
+                            <Icon n="alert" /><span>{smsAiError}</span>
+                          </div>
+                        )}
+                        {smsAiDraft && (
+                          <div style={{marginTop:16}}>
+                            <div className="nk-sec nk-sec-teal" style={{marginBottom:8}}>Draft</div>
+                            <textarea
+                              className="nk-input nk-textarea"
+                              value={smsAiDraft}
+                              onChange={e=>setSmsAiDraft(e.target.value)}
+                              rows={10}
+                              style={{fontSize:13,lineHeight:1.6}}
+                            />
+                            <button className="nk-btn nk-btn-primary nk-btn-full" style={{marginTop:8}}
+                              onClick={()=>{
+                                setSmsMessage(smsAiDraft);
+                                setActiveMsgId(MAIN_MSG);
+                                setSmsAiOpen(false);
+                                showToast("AI draft applied to main SMS message","success");
+                              }}>
+                              <Icon n="check" /> Use this draft
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

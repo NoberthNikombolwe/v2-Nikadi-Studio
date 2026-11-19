@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import process from 'node:process'
 import { runCleanChat, CLEAN_LIMITS } from './supabase/functions/_shared/dataClean.js'
 import { runEventPageChat, PAGE_LIMITS } from './supabase/functions/_shared/aiEventPage.js'
+import { runSmsDraft, SMS_DRAFT_LIMITS } from './supabase/functions/_shared/aiSmsDraft.js'
 
 // URL path the app is served from. "/" locally; the GitHub Pages workflow sets
 // VITE_BASE_PATH=/<repo-name>/ because Pages serves the site from a sub-folder.
@@ -91,9 +92,45 @@ const aiPageDevPlugin = {
   },
 }
 
+// `npm run dev` only: answers /ai-sms-draft (the SMS tab's "AI Draft SMS") the way the
+// ai-sms-draft Edge Function does in production.
+const aiSmsDraftDevPlugin = {
+  name: 'nikadi-ai-sms-draft-dev',
+  apply: 'serve',
+  configureServer(server) {
+    const env = { ...loadEnv(server.config.mode, server.config.envDir || server.config.root, ''), ...process.env }
+    const send = (res, status, body) => {
+      res.statusCode = status
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify(body))
+    }
+    server.middlewares.use('/ai-sms-draft', async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { error: 'Method not allowed' })
+      const apiKey = String(env.GEMINI_API_KEY || '').trim()
+      if (!apiKey) return send(res, 500, { error: 'No GEMINI_API_KEY — add it to .env.development.local (without VITE_) and restart npm run dev.' })
+      let raw = ''
+      for await (const chunk of req) {
+        raw += chunk
+        if (raw.length > SMS_DRAFT_LIMITS.bodyBytes) return send(res, 413, { error: 'Request is too large.' })
+      }
+      let payload
+      try { payload = JSON.parse(raw) } catch { return send(res, 400, { error: 'The request could not be read.' }) }
+      const out = await runSmsDraft(payload, {
+        apiKey,
+        model: env.GEMINI_MODEL,
+        post: async (url, init) => {
+          const r = await fetch(url, { method: 'POST', ...init, signal: AbortSignal.timeout(60_000) })
+          return { status: r.status, text: await r.text() }
+        },
+      })
+      send(res, out.status, out.body)
+    })
+  },
+}
+
 export default defineConfig({
   base,
-  plugins: [react(), siteUrlPlugin, aiCleanDevPlugin, aiPageDevPlugin],
+  plugins: [react(), siteUrlPlugin, aiCleanDevPlugin, aiPageDevPlugin, aiSmsDraftDevPlugin],
   server: {
     proxy: {
       '/sms-proxy': {
