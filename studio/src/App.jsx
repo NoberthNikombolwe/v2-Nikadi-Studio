@@ -5857,7 +5857,6 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     return `Please give me design recommendations for this event:\n\n${lines}`;
   };
 
-  const AI_PAGE_URL = import.meta.env.DEV ? "/ai-page" : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-event-page`;
   const sendAiMessage = async (text) => {
     if (!text?.trim() || aiLoading) return;
     const userMsg = { role: "user", text: text.trim() };
@@ -5867,12 +5866,22 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     setAiLoading(true);
     setAiError(null);
     try {
-      const headers = { "Content-Type": "application/json" };
-      if (sb) { const { data: s } = await sb.auth.getSession(); if (s?.session?.access_token) headers.Authorization = `Bearer ${s.session.access_token}`; }
-      const res = await fetch(AI_PAGE_URL, { method: "POST", headers, body: JSON.stringify({ messages: history }) });
-      const data = await res.json();
-      if (!res.ok || data.error) { setAiError(data.error || `Error ${res.status}`); }
-      else { setAiMessages(h => [...h, { role: "assistant", text: data.text }]); }
+      let responseText;
+      if (import.meta.env.DEV) {
+        // Dev: Vite proxy at /ai-page runs the function locally (needs GEMINI_API_KEY in .env.development.local)
+        const res = await fetch("/ai-page", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messages: history }) });
+        const d = await res.json();
+        if (!res.ok || d.error) { setAiError(d.error || `Error ${res.status}`); return; }
+        responseText = d.text;
+      } else {
+        // Prod: use the Supabase functions client — handles CORS and auth correctly even
+        // when the function is deployed with the default JWT verification mode
+        const { data: d, error } = await sb.functions.invoke("ai-event-page", { body: { messages: history } });
+        if (error) { setAiError(error.message || "AI error"); return; }
+        if (!d || d.error) { setAiError(d?.error || "AI error"); return; }
+        responseText = d.text;
+      }
+      setAiMessages(h => [...h, { role: "assistant", text: responseText }]);
     } catch (e) { setAiError(e.message); }
     finally { setAiLoading(false); }
   };
