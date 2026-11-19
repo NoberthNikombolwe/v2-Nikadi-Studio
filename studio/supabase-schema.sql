@@ -1839,12 +1839,14 @@ BEGIN
   RETURN jsonb_build_object('updated', n_upd, 'delivered', n_del, 'read', n_read, 'failed', n_fail, 'unknown', n_unknown);
 END $$;
 
--- A WhatsApp button reply (e.g. "Yes, I'll come") from the webhook: kept on the message and
--- written to the event History
+-- A WhatsApp button reply (e.g. "Nitakuwepo"): saved on the delivery row, written to History,
+-- and mapped to a call outcome (yes/no) via the event's template quick_reply_fields so the
+-- Calls tab reflects the reply even when no browser session was open at the time.
 CREATE OR REPLACE FUNCTION public.record_delivery_reply(p_message_id TEXT, p_text TEXT) RETURNS BOOLEAN
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  d message_deliveries%ROWTYPE;
+  d          message_deliveries%ROWTYPE;
+  v_outcome  TEXT;
 BEGIN
   UPDATE message_deliveries m SET reply_text = left(p_text, 500), replied_at = NOW(), updated_at = NOW()
    WHERE m.message_id = p_message_id
@@ -1852,6 +1854,37 @@ BEGIN
   IF NOT FOUND THEN RETURN FALSE; END IF;
   INSERT INTO event_logs (event_id, channel, action, status, recipient_name, recipient_phone, message_title, detail, user_email)
   VALUES (d.event_id, d.channel, 'reply', 'ok', d.recipient_name, d.phone, d.message_title, left('Replied: ' || COALESCE(p_text, ''), 500), 'guest reply');
+
+  -- Map the reply text to a call outcome via the event's WA template quick_reply_fields
+  IF d.event_card_id IS NOT NULL THEN
+    SELECT qr->>'call_outcome' INTO v_outcome
+      FROM events e
+      JOIN wa_templates t ON (
+        (e.wa_template IS NOT NULL AND t.name = e.wa_template) OR
+        (e.wa_template IS NULL     AND t.is_default = TRUE)
+      )
+      CROSS JOIN LATERAL jsonb_array_elements(t.quick_reply_fields) AS qr
+     WHERE e.id = d.event_id
+       AND (qr->>'call_outcome') IS NOT NULL
+       AND LOWER(TRIM(qr->>'button_text')) = LOWER(TRIM(p_text))
+     LIMIT 1;
+  END IF;
+
+  IF v_outcome IS NOT NULL THEN
+    -- Only set when not yet called manually; a WhatsApp re-reply can update a previous wa_reply
+    UPDATE event_cards
+       SET call_status = v_outcome, call_by = 'wa_reply', call_updated_at = NOW()
+     WHERE id = d.event_card_id
+       AND (call_status IS NULL OR call_by = 'wa_reply');
+    IF FOUND THEN
+      INSERT INTO event_logs (event_id, channel, action, status, recipient_name, recipient_phone, detail, user_email)
+      VALUES (d.event_id, 'calls', 'call', 'ok', d.recipient_name, d.phone,
+              CASE WHEN v_outcome = 'yes' THEN 'WhatsApp reply: Nitakuwepo (Coming)'
+                   ELSE 'WhatsApp reply: Sitakuwepo (Not coming)' END,
+              'wa_reply');
+    END IF;
+  END IF;
+
   RETURN TRUE;
 END $$;
 
