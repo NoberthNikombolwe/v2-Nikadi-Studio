@@ -5212,8 +5212,11 @@ function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
   const doImport = async () => {
     if (!plan?.add.length) return;
     setBusy(true);
+    // Imported guests are off the Design list (in_list false) so a later spreadsheet upload
+    // in the Design tab never deletes them — they live in Calls / Scanner until removed.
+    const listCol = cards.some(c => "in_list" in c);
     const rows = plan.add.map(r => ({ event_id: eventId, name: String(r.name || "").trim(), card_type: String(r.cardType || "").trim(),
-      phone: String(r.phone || "").trim(), wa_status: WA.idle, sms_status: SMS.pending }));
+      phone: String(r.phone || "").trim(), wa_status: WA.idle, sms_status: SMS.pending, ...(listCol ? { in_list: false } : {}) }));
     const { data, error } = await supabase.from("event_cards").insert(rows).select("id,name,card_type,phone,wa_status,sms_status");
     setBusy(false);
     if (error) { showToast(`Import failed: ${error.message}`, "warn"); return; }
@@ -8264,6 +8267,16 @@ export default function App() {
         const scanned = new Set(loggedIds.map(l => l.card_id));
         gone = gone.filter(id => !scanned.has(id));
         plan.retained.push(...(old || []).filter(o => scanned.has(o.id)));
+      }
+    }
+    // Guests already off the Design list (in_list=false) were imported through Calls/Scanner
+    // and may have no call/scan data yet; never delete them here — only the trash icon can.
+    if (listCol && gone.length) {
+      const goneSet = new Set(gone);
+      const offIds = new Set((old || []).filter(o => o.in_list === false && goneSet.has(o.id)).map(o => o.id));
+      if (offIds.size) {
+        gone = gone.filter(id => !offIds.has(id));
+        plan.retained.push(...(old || []).filter(o => offIds.has(o.id)));
       }
     }
     if (gone.length) {
