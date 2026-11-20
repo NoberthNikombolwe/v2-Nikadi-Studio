@@ -8241,7 +8241,17 @@ export default function App() {
     // Guests missing from the new list: delete only those with no call/check-in history.
     // Guests with history are kept in the database: off the list (in_list false) once the
     // delivery SQL has that column, else put back on the list as before.
-    const gone = plan.remove;
+    // Extra safety: scan_count may be 0 for guests scanned before the column was added
+    // (column backfills as 0); rescue any candidate-for-deletion that has a scan_logs entry.
+    let gone = plan.remove;
+    if (gone.length) {
+      const { data: loggedIds } = await supabase.from("scan_logs").select("card_id").in("card_id", gone);
+      if (loggedIds?.length) {
+        const scanned = new Set(loggedIds.map(l => l.card_id));
+        gone = gone.filter(id => !scanned.has(id));
+        plan.retained.push(...(old || []).filter(o => scanned.has(o.id)));
+      }
+    }
     if (gone.length) {
       const { error: delErr } = await supabase.from("event_cards").delete().in("id", gone);
       if (delErr) { showToast("Cards saved, but removed rows could not be deleted: " + delErr.message, "warn"); return; }
