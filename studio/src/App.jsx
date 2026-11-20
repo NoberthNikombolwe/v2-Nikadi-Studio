@@ -7153,6 +7153,7 @@ export default function App() {
   const loadTeamsRef = useRef(null);   // set once the teams loader exists (it's defined further down)   // first events fetch finished (drives the loading state)
   const [coverUrl,          setCoverUrl]          = useState(null);
   const [isSaving,          setIsSaving]          = useState(false);
+  const [callsBusy,         setCallsBusy]         = useState(false);
   const [loadingTemplate,   setLoadingTemplate]   = useState(false);
   const [dbStatus,          setDbStatus]          = useState(supabase ? "unknown" : "unconfigured");
 
@@ -8321,6 +8322,42 @@ export default function App() {
         ? "kept for their call / check-in history (shown below the list; no cards or messages)"
         : "kept because they have call or check-in history"}`
       : `${total} cards saved — calls and check-ins kept`, keptNote ? "info" : "success");
+  };
+
+  // Imports the current spreadsheet records into Calls & Check-in as off-list guests.
+  // Uses splitImport to skip anyone already in event_cards, inserts the rest with
+  // in_list=false so a future Design-tab upload never deletes them.
+  const saveForCalls = async () => {
+    if (!savedEventId) return;
+    const toImport = records.filter(r => !r.sample);
+    if (!toImport.length) { showToast("No guests to import", "warn"); return; }
+    setCallsBusy(true);
+    try {
+      const { data: existing, error: readErr } = await supabase
+        .from("event_cards").select("id,name,phone,card_type,in_list").eq("event_id", savedEventId);
+      if (readErr) { showToast("Could not read saved guests: " + readErr.message, "warn"); return; }
+      const listCol = (existing || []).some(c => "in_list" in c);
+      const { add, skip } = splitImport(
+        toImport.map(r => ({ name: r.name || "", cardType: r.cardType || "", phone: r.phone || "" })),
+        existing || []
+      );
+      if (!add.length) { showToast(`All ${skip.length} guests are already saved`, "info"); return; }
+      const { error: insErr } = await supabase.from("event_cards").insert(
+        add.map(r => ({
+          event_id: savedEventId,
+          name: String(r.name || "").trim(),
+          card_type: String(r.cardType || "").trim(),
+          phone: String(r.phone || "").trim(),
+          wa_status: WA.idle,
+          sms_status: SMS.pending,
+          ...(listCol ? { in_list: false } : {}),
+        }))
+      );
+      if (insErr) { showToast("Import failed: " + insErr.message, "warn"); return; }
+      logHistory({ channel: "event", action: "contacts",
+        detail: `Added ${add.length} guest${add.length === 1 ? "" : "s"} to Calls & Check-in from spreadsheet${skip.length ? ` (${skip.length} already saved)` : ""}` }, savedEventId);
+      showToast(`${add.length} guest${add.length === 1 ? "" : "s"} added to Calls & Check-in${skip.length ? ` — ${skip.length} skipped (already saved)` : ""}`, "success");
+    } finally { setCallsBusy(false); }
   };
 
   // Guests imported in the Calls / Scanner tabs are already saved; add them to the open
@@ -9961,6 +9998,15 @@ export default function App() {
                   <button className="nk-btn nk-btn-ghost nk-btn-full" style={{fontSize:11,marginTop:4}}
                     onClick={()=>saveCards(savedEventId)}>
                     <Icon n="save" /> Save Cards to DB ({records.length})
+                  </button>
+                )}
+                {savedEventId && records.filter(r => !r.sample).length > 0 && (
+                  <button className="nk-btn nk-btn-ghost nk-btn-full"
+                    style={{fontSize:11,marginTop:4,color:N.teal,borderColor:alpha(N.teal,"44")}}
+                    onClick={saveForCalls} disabled={callsBusy} title="Import these guests into Calls & Check-in. They are saved off the Design list so a future spreadsheet upload never deletes them.">
+                    {callsBusy
+                      ? <><Icon n="loader" /> Adding…</>
+                      : <><Icon n="phone" /> Add to Calls &amp; Check-in ({records.filter(r=>!r.sample).length})</>}
                   </button>
                 )}
                 {/* Passcode generation mode — controls fallback when no Passcode column in sheet */}
