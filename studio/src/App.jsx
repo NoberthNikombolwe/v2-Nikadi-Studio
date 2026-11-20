@@ -76,7 +76,21 @@ import { buildLogRow, filterHistory, summariseHistory, historyExportRows, mergeH
 // Spreadsheet and zip libraries are only needed when importing/exporting, so they are
 // loaded on demand to keep them out of the initial bundle (both are bundled by Vite
 // from node_modules — nothing is fetched from a third-party CDN at runtime)
-const loadXlsx  = () => import("xlsx");
+
+// Wraps a dynamic import: if the chunk 404s after a new deploy (stale cache), reload the
+// page once so the browser picks up the new bundle. The sessionStorage flag stops a loop.
+const lazyLoad = (factory, key) => factory().catch(err => {
+  if (/dynamically imported|Failed to fetch/i.test(String(err?.message || ""))) {
+    if (!sessionStorage.getItem(`nk_chunk_${key}`)) {
+      sessionStorage.setItem(`nk_chunk_${key}`, "1");
+      window.location.reload();
+      return new Promise(() => {});   // hang until reload completes
+    }
+  }
+  throw err;
+});
+
+const loadXlsx  = () => lazyLoad(() => import("xlsx"), "xlsx");
 
 // Compresses an image (dataUrl string or File/Blob) to a JPEG Blob.
 // Uses canvas.toBlob() for accurate size; binary-searches for the highest JPEG quality
@@ -161,7 +175,7 @@ const smsPost = async (path, body) => {
   });
   return { status: res.status, text: await res.text().catch(() => "") };
 };
-const loadJsZip = () => import("jszip").then(m => m.default);
+const loadJsZip = () => lazyLoad(() => import("jszip"), "jszip").then(m => m.default);
 
 /* ══════════════════════════════════════════════════════════════════════════
    BRAND
