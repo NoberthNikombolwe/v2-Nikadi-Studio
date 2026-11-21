@@ -9312,10 +9312,10 @@ export default function App() {
   // Guarded against double-clicks (in-flight set) and accidental re-sends (confirm).
   // `msgId` picks the message (default: the main one, as the Batch & Send tab uses); `idx`
   // is the row in that message's recipient list.
-  const sendSmsToOne = async (idx, msgId = MAIN_MSG) => {
+  const sendSmsToOne = async (idx, msgId = MAIN_MSG, { recs: recsOverride } = {}) => {
     const msg = findMessage(msgId);
     if (msgId !== MAIN_MSG && !msg) return;
-    const recs = messageRecipients(msg);
+    const recs = recsOverride ?? messageRecipients(msg);
     const rec  = recs[idx];
     if (!rec) return;
     if (!rec.phone) { showToast("No phone for " + rec.name, "warn"); return; }
@@ -9395,8 +9395,10 @@ export default function App() {
     }
     // Send WA (uses cardUrlOverride so it works even before React re-renders with new state)
     await sendWaSingle(recIdx, { cardUrl });
-    // Send SMS (only for guests on the current Design list)
-    if (sendIdx >= 0) await sendSmsToOne(sendIdx, null);
+    // Send SMS — use sendRecords index when available, else fall back to records with override
+    const smsIdx  = sendIdx >= 0 ? sendIdx : recIdx;
+    const smsRecs = sendIdx >= 0 ? undefined : records;
+    await sendSmsToOne(smsIdx, null, { recs: smsRecs });
   };
 
   // Sends SMS to every record with a valid phone number in one bulk API call, then maps
