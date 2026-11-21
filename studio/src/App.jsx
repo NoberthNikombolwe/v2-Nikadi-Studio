@@ -7093,6 +7093,9 @@ export default function App() {
 
   /* ── Records ── */
   const [records,   setRecords]   = useState(sampleRecords);
+  // sendRecords = current-spreadsheet guests only; offList guests (retained for call/scan history)
+  // are intentionally excluded from WA/SMS tables, sends, downloads and counts.
+  const sendRecords = records.filter(r => !r.offList);
   const [activeIdx, setActiveIdx] = useState(0);
   // Always-current copy of `records` for async flows (bulk sends) whose closure would
   // otherwise see the list as it was when they started
@@ -7791,10 +7794,10 @@ export default function App() {
     hasCustomer: !!openEventRow?.customer_id,
     hasLead:     !!openEventRow?.lead_id || crm.leads.some(l => l.event_id && l.event_id === savedEventId),
     hasDesign:   !!(coverUrl || bgImage),
-    guests:      records.filter(r => !r.sample).length,
-    uploaded:    records.filter(r => r.uploadStatus === "uploaded").length,
-    waSent:      records.filter(r => waDone(r.waStatus)).length,
-    smsSent:     records.filter(r => r.smsStatus === SMS.sent || r.smsStatus === SMS.delivered).length,
+    guests:      sendRecords.filter(r => !r.sample).length,
+    uploaded:    sendRecords.filter(r => r.uploadStatus === "uploaded").length,
+    waSent:      sendRecords.filter(r => waDone(r.waStatus)).length,
+    smsSent:     sendRecords.filter(r => r.smsStatus === SMS.sent || r.smsStatus === SMS.delivered).length,
     txns:        savedEventId ? fin.txns.filter(t => t.event_id === savedEventId).length : 0,
   });
   useEffect(() => { if (tab === "guide" && !fin.loaded) fin.loadAll(); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -7963,7 +7966,7 @@ export default function App() {
   // "Change template" pop-up → swap the card design for the open event. Guests, SMS and
   // statuses stay; cards already uploaded/sent used the old design, so warn first.
   const changeTemplate = async (choice, { keepLayout }) => {
-    const made = records.filter(r => !r.sample && (r.uploadStatus === "uploaded" || waDone(r.waStatus))).length;
+    const made = sendRecords.filter(r => !r.sample && (r.uploadStatus === "uploaded" || waDone(r.waStatus))).length;
     if (made) {
       const ok = await askDialog({
         title: "Change the card template?",
@@ -8339,7 +8342,7 @@ export default function App() {
   // in_list=false so a future Design-tab upload never deletes them.
   const saveForCalls = async () => {
     if (!savedEventId) return;
-    const toImport = records.filter(r => !r.sample);
+    const toImport = sendRecords.filter(r => !r.sample);
     if (!toImport.length) { showToast("No guests to import", "warn"); return; }
     setCallsBusy(true);
     try {
@@ -8734,7 +8737,7 @@ export default function App() {
   // An extra message's recipients carry their delivery result on top of the status stored when
   // it was sent (the server never rewrites events.sms_messages, so the result comes from
   // message_deliveries — extraStatusOf)
-  const messageRecipients = (msg, recs = records) => !msg ? recs
+  const messageRecipients = (msg, recs = sendRecords) => !msg ? recs
     : msg.source === "upload" ? msg.recipients.map(r => ({ ...r, smsStatus: extraStatusOf(deliveryIndex, msg.id, r, r.smsStatus || SMS.pending) }))
     : recs.map(r => ({ ...r, smsStatus: extraStatusOf(deliveryIndex, msg.id, r, msg.statuses[recipientKey(r)] || SMS.pending) }));
   const activeRecipients = messageRecipients(activeExtra);
@@ -9133,7 +9136,7 @@ export default function App() {
       [WA.sending]: "Sending",
       [WA.idle]:    "Not Sent",
     };
-    const rows = records.map(r => ({
+    const rows = sendRecords.map(r => ({
       "Name":       r.name     || "",
       "Card Type":  r.cardType || "",
       "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
@@ -9152,7 +9155,7 @@ export default function App() {
   const downloadFullReport = async () => {
     const waLabel  = { [WA.sent]:"Sent (waiting)", [WA.delivered]:"Delivered", [WA.read]:"Read", [WA.invalid]:"Not on WhatsApp", [WA.notSent]:"Not Sent", [WA.sending]:"Sending", [WA.idle]:"Not Sent" };
     const smsLabel = { [SMS.delivered]:"Delivered", [SMS.sent]:"Sent (waiting)", [SMS.failed]:"Failed", [SMS.pending]:"Pending" };
-    const rows = records.filter(r => !r.sample).map(r => ({
+    const rows = sendRecords.filter(r => !r.sample).map(r => ({
       "Name":       r.name     || "",
       "Card Type":  r.cardType || "",
       "Phone":      r.phone ? `+${normalisePhone(r.phone)}` : "",
@@ -9172,7 +9175,7 @@ export default function App() {
 
   // Exports one Excel sheet with passcode (card_code) per guest record
   const downloadPasscodeReport = async () => {
-    const rows = records.filter(r => !r.sample).map(r => ({
+    const rows = sendRecords.filter(r => !r.sample).map(r => ({
       "Name":      r.name     || "",
       "Card Type": r.cardType || "",
       "Phone":     r.phone ? `+${normalisePhone(r.phone)}` : "",
@@ -9430,10 +9433,10 @@ export default function App() {
   };
 
   /* ── Counts ── */
-  const waSentCount    = records.filter(r=>waDone(r.waStatus)).length;
-  const waInvalidCount = records.filter(r=>r.waStatus===WA.invalid).length;
-  const smsSentCount   = records.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
-  const waReportReady  = records.some(r=>waDone(r.waStatus)||r.waStatus===WA.invalid||r.waStatus===WA.notSent);
+  const waSentCount    = sendRecords.filter(r=>waDone(r.waStatus)).length;
+  const waInvalidCount = sendRecords.filter(r=>r.waStatus===WA.invalid).length;
+  const smsSentCount   = sendRecords.filter(r=>r.smsStatus===SMS.sent||r.smsStatus===SMS.delivered).length;
+  const waReportReady  = sendRecords.some(r=>waDone(r.waStatus)||r.waStatus===WA.invalid||r.waStatus===WA.notSent);
   const smsReportReady = activeRecipients.some(r=>r.smsStatus && r.smsStatus!==SMS.pending);   // reads statuses, not the log, so it outlives the log
   const dbDot = dbStatus==="connected" ? "db-connected" : dbStatus==="unconfigured" ? "db-unconfigured" : "db-disconnected";
 
@@ -9591,12 +9594,12 @@ export default function App() {
               </span>
             )}
             <button className="nk-btn nk-btn-success" onClick={sendWaAll} disabled={bulkSending}
-              title="Send every card on WhatsApp" aria-label={`WhatsApp send all (${records.filter(r=>r.phone).length})`}>
+              title="Send every card on WhatsApp" aria-label={`WhatsApp send all (${sendRecords.filter(r=>r.phone).length})`}>
               {bulkSending ? <Icon n="loader" /> : <Icon n="whatsapp" />}
-              <span className="nk-btn-label">{bulkSending ? "Sending…" : `WA Send All (${records.filter(r=>r.phone).length})`}</span>
+              <span className="nk-btn-label">{bulkSending ? "Sending…" : `WA Send All (${sendRecords.filter(r=>r.phone).length})`}</span>
             </button>
-            <button className="nk-btn nk-btn-primary" onClick={downloadAll} title="Download every card" aria-label={`Download all ${records.length} cards`}>
-              <Icon n="download" /> <span className="nk-btn-label">Download All ({records.length})</span>
+            <button className="nk-btn nk-btn-primary" onClick={downloadAll} title="Download every card" aria-label={`Download all ${sendRecords.length} cards`}>
+              <Icon n="download" /> <span className="nk-btn-label">Download All ({sendRecords.length})</span>
             </button>
             {access.role && <span className="nk-hide-md" title={access.setupMissing ? "Roles not set up yet — everyone has full access" : access.role === "superuser" ? "Your role — only Super Admins can delete data" : "Your role"}><RoleBadge role={access.role} /></span>}
             <button className="nk-btn nk-btn-ghost" style={{padding:"6px 10px",fontSize:12}} onClick={() => goTab("guide")}
@@ -10010,13 +10013,13 @@ export default function App() {
                     <Icon n="save" /> Save Cards to DB ({records.length})
                   </button>
                 )}
-                {savedEventId && records.filter(r => !r.sample).length > 0 && (
+                {savedEventId && sendRecords.filter(r => !r.sample).length > 0 && (
                   <button className="nk-btn nk-btn-ghost nk-btn-full"
                     style={{fontSize:11,marginTop:4,color:N.teal,borderColor:alpha(N.teal,"44")}}
                     onClick={saveForCalls} disabled={callsBusy} title="Import these guests into Calls & Check-in. They are saved off the Design list so a future spreadsheet upload never deletes them.">
                     {callsBusy
                       ? <><Icon n="loader" /> Adding…</>
-                      : <><Icon n="phone" /> Add to Calls &amp; Check-in ({records.filter(r=>!r.sample).length})</>}
+                      : <><Icon n="phone" /> Add to Calls &amp; Check-in ({sendRecords.filter(r=>!r.sample).length})</>}
                   </button>
                 )}
                 {/* Passcode generation mode — controls fallback when no Passcode column in sheet */}
@@ -10815,9 +10818,9 @@ export default function App() {
                   <div style={{flex:"0 0 260px"}}>
                     {/* Step 1 */}
                     <div className="nk-sec" style={{color:N.sky}}>Step 1 — Upload Cards</div>
-                    {openEventRow?.guest_link_enabled && records.filter(r=>!r.sample).length > 0 && records.filter(r=>!r.sample).every(r=>r.uploadStatus==="uploaded") ? (
+                    {openEventRow?.guest_link_enabled && sendRecords.filter(r=>!r.sample).length > 0 && sendRecords.filter(r=>!r.sample).every(r=>r.uploadStatus==="uploaded") ? (
                       <div className="nk-chip" style={{marginBottom:20,fontSize:11,lineHeight:1.8,color:N.green}}>
-                        <Icon n="check" /> All {records.filter(r=>!r.sample).length} cards uploaded — linked to guest invitations.
+                        <Icon n="check" /> All {sendRecords.filter(r=>!r.sample).length} cards uploaded — linked to guest invitations.
                       </div>
                     ) : (
                       <>
@@ -10826,12 +10829,12 @@ export default function App() {
                           and uploads to Supabase Storage<br/>
                           to get a public image URL.<br/>
                           <span style={{color:N.green}}>
-                            {records.filter(r=>r.uploadStatus==="uploaded").length} / {records.length} uploaded
+                            {sendRecords.filter(r=>r.uploadStatus==="uploaded").length} / {sendRecords.length} uploaded
                           </span>
                         </div>
                         <button className="nk-btn nk-btn-primary nk-btn-full" style={{marginBottom:20}}
                           onClick={uploadAllCards} disabled={uploadingCards}>
-                          {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${records.length})`}</>}
+                          {uploadingCards ? <><Icon n="loader" /> Uploading…</> : <><Icon n="cloud" /> {`Upload All Cards (${sendRecords.length})`}</>}
                         </button>
                       </>
                     )}
@@ -10869,13 +10872,13 @@ export default function App() {
                       Account: <span style={{color:N.sky}}>Nikadi</span><br/>
                       Delay: <span style={{color:N.sky}}>1 s / number</span><br/>
                       <span style={{color:N.green}}>
-                        {records.filter(r=>r.phone&&r.cardUrl).length} ready to send
+                        {sendRecords.filter(r=>r.phone&&r.cardUrl).length} ready to send
                       </span>
                     </div>
                     <button className="nk-btn nk-btn-success nk-btn-full"
                       onClick={sendWaAll}
-                      disabled={bulkSending||!records.filter(r=>r.phone&&r.cardUrl).length}>
-                      {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`Send All (${records.filter(r=>r.phone&&r.cardUrl).length})`}</>}
+                      disabled={bulkSending||!sendRecords.filter(r=>r.phone&&r.cardUrl).length}>
+                      {bulkSending ? <><Icon n="loader" /> Sending…</> : <><Icon n="whatsapp" /> {`Send All (${sendRecords.filter(r=>r.phone&&r.cardUrl).length})`}</>}
                     </button>
                     <ScheduledSends channel="whatsapp" {...scheduleInputs} eventId={savedEventId}
                       canEdit={access.can("whatsapp", "edit")} askDialog={askDialog} showToast={showToast} logHistory={logHistory}
@@ -10897,7 +10900,7 @@ export default function App() {
                       <table className="nk-table m-hide-1 m-hide-3 m-act">
                         <thead><tr>{["#","Name","Phone","Upload","WA","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
-                          {records.map((rec,i)=>(
+                          {sendRecords.map((rec,i)=>(
                             <tr key={i}>
                               <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i+1}</td>
                               <td style={{fontWeight:600}}>{rec.name}</td>
@@ -10913,13 +10916,13 @@ export default function App() {
                               <td>
                                 <div className="nk-row-actions">
                                   <Sb bg={N.navy600} col={N.sky} border={alpha(N.sky,"44")}
-                                    onClick={()=>uploadCardSingle(i)}
+                                    onClick={()=>uploadCardSingle(records.indexOf(rec))}
                                     disabled={rec.uploadStatus==="uploading"} label="Upload card">
                                     {rec.uploadStatus==="uploading"?<><Icon n="loader" /></>:<><Icon n="cloud" /></>} Upload
                                   </Sb>
                                   {rec.phone && rec.cardUrl && (
                                     <Sb bg={N.greenBg} col={N.green}
-                                      onClick={()=>sendWaSingle(i)}
+                                      onClick={()=>sendWaSingle(records.indexOf(rec))}
                                       disabled={rec.waStatus===WA.sending} label="Send card on WhatsApp">
                                       {rec.waStatus===WA.sending?<><Icon n="loader" /></>:<><Icon n="whatsapp" /></>} Send
                                     </Sb>
@@ -11095,11 +11098,11 @@ export default function App() {
               <div className="nk-page" style={{padding:"0 0 40px"}}>
                 <div className="nk-stats">
                   {[
-                    ["Total",      records.length,  N.textMid],
+                    ["Total",      sendRecords.length,  N.textMid],
                     ["WA Sent",    waSentCount,    N.green],
                     ["WA Invalid", waInvalidCount, N.amber],
                     ["SMS Sent",   smsSentCount,    N.teal],
-                    ["Pending WA", records.filter(r=>r.phone&&r.waStatus===WA.idle).length, N.textDim],
+                    ["Pending WA", sendRecords.filter(r=>r.phone&&r.waStatus===WA.idle).length, N.textDim],
                   ].map(([l,v,c])=>(
                     <div key={l} className="nk-stat" style={{borderColor:alpha(c,"33")}}>
                       <div className="nk-stat-num" style={{color:c}}>{v}</div>
@@ -11107,7 +11110,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                {records.filter(r => !r.sample).length > 0 && (
+                {sendRecords.filter(r => !r.sample).length > 0 && (
                   <div style={{display:"flex",justifyContent:"flex-end",padding:"4px 16px 8px"}}>
                     <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={downloadPasscodeReport}>
                       <Icon n="download" /> Download Passcode Report
@@ -11118,8 +11121,8 @@ export default function App() {
                   <table className="nk-table m-hide-1 m-hide-3 m-hide-4 m-act">
                     <thead><tr>{["#","Name","Card Type","Phone","WA Status","SMS","Actions"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
-                      {records.map((rec,i)=>(
-                        <RecordRow key={i} rec={{ ...rec, smsReason: smsNote(rec), waReason: waNote(rec) }} idx={i}
+                      {sendRecords.map((rec,i)=>(
+                        <RecordRow key={i} rec={{ ...rec, smsReason: smsNote(rec), waReason: waNote(rec) }} idx={records.indexOf(rec)}
                           onEdit={editRecord} onUpload={uploadCardWithToast} onSendWa={sendWaSingle} onDownload={downloadCard}
                           onSendSms={sendSmsToOne}
                           isActive={activeIdx===i}
