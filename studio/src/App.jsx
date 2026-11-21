@@ -5018,7 +5018,7 @@ const SCAN_VIEWS = [
   { key: "list",  label: "Guests",     icon: "users" },
 ];
 const SCAN_VIEW_TITLE = { stats: "Check-in statistics", scan: "Scan a card", list: "Guest list" };
-function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded, onDeleteCard, onMenu }) {
+function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloadEvents, logHistory, onGuestsAdded, onDeleteCard, onDeleteAll, onMenu }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
   const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
@@ -5108,6 +5108,12 @@ function ScannerTab({ eventId, eventRow, access, myEmail, showToast, onGo, reloa
       )}
       {canImport && <GuestImport eventId={eventId} cards={cards || []} showToast={showToast} logHistory={logHistory} onAdded={(rows) => { load(); onGuestsAdded?.(rows); }} />}
       {canScan && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="link" /> Share scan page{eventRow?.scan_code ? " (on)" : ""}</button>}
+      {canDelete && onDeleteAll && cards?.length > 0 && (
+        <button className="nk-btn nk-btn-ghost" style={{fontSize:12,color:N.red,borderColor:alpha(N.red,"44")}}
+          onClick={async () => { if (await onDeleteAll(eventId, cards.length)) load(); }}>
+          <Icon n="trash" /> Delete all
+        </button>
+      )}
     </>
   );
   const placeholder = cards === null ? <EmptyState loading title="Loading guest list…" />
@@ -6253,7 +6259,7 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
 }
 
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
-function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard, onResend, onPhoneChanged }) {
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard, onDeleteAll, onResend, onPhoneChanged }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
   const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
@@ -6327,6 +6333,12 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
           {canEdit && <GuestImport eventId={eventId} cards={cards || []} showToast={showToast} logHistory={logHistory} onAdded={(rows) => { load(); onGuestsAdded?.(rows); }} />}
           <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={exportCalls} disabled={!cards?.length}><Icon n="download" /> Export Excel</button>
           {canShare && <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setSharing(true)}><Icon n="eye" /> Share view-only{eventRow?.view_code ? " (on)" : ""}</button>}
+          {canDelete && onDeleteAll && cards?.length > 0 && (
+            <button className="nk-btn nk-btn-ghost" style={{fontSize:12,color:N.red,borderColor:alpha(N.red,"44")}}
+              onClick={async () => { if (await onDeleteAll(eventId, cards.length)) load(); }}>
+              <Icon n="trash" /> Delete all
+            </button>
+          )}
         </div>
       </div>
       <div className="nk-stats">
@@ -8482,6 +8494,26 @@ export default function App() {
     return true;
   };
 
+  // Deletes every event_card for the open event (Super Admins only). Logs a single history
+  // entry and clears the records state so Design / WA / SMS tabs reflect the empty list.
+  const deleteAllCards = async (eventId, cardCount) => {
+    if (!supabase || !eventId) return false;
+    const ok = await askDialog({
+      title: `Delete all ${cardCount} guest${cardCount === 1 ? "" : "s"}?`,
+      body: (
+        <p>Every guest card for this event will be permanently removed — the list, Calls, Scanner and all send history. Printed QR codes will stop working at the door. This can't be undone.</p>
+      ),
+      actions: [{ value: "yes", label: `Delete all ${cardCount} guests`, kind: "danger" }],
+    });
+    if (ok !== "yes") return false;
+    const { error } = await supabase.from("event_cards").delete().eq("event_id", eventId);
+    if (error) { showToast(`Could not delete all cards: ${error.message}`, "warn"); return false; }
+    setRecords(rs => rs.filter(r => r.sample));
+    logHistory({ channel: "event", action: "contacts", detail: `All ${cardCount} guest cards deleted` }, eventId);
+    showToast(`Deleted all ${cardCount} guest${cardCount === 1 ? "" : "s"}`, "success");
+    return true;
+  };
+
   const addImportedGuests = (rows) => setRecords(rs => [...rs.filter(r => !r.sample), ...rows.map(c => ({
     dbId: c.id, publicId: c.public_id || null, name: c.name || "", cardType: c.card_type || "", phone: c.phone || "",
     waStatus: c.wa_status || WA.idle, smsStatus: c.sms_status || SMS.pending, cardUrl: null, uploadStatus: "idle",
@@ -10385,12 +10417,12 @@ export default function App() {
             {tab === "scanner" && (
               <ScannerTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} onGo={goTab} reloadEvents={loadSavedEvents} logHistory={logHistory} onGuestsAdded={addImportedGuests}
-                onDeleteCard={deleteGuestCard} onMenu={() => setMenuOpen(true)} />
+                onDeleteCard={deleteGuestCard} onDeleteAll={deleteAllCards} onMenu={() => setMenuOpen(true)} />
             )}
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} onGuestsAdded={addImportedGuests}
-                onDeleteCard={deleteGuestCard} onResend={resendForCard} onPhoneChanged={onCallsPhoneChanged} />
+                onDeleteCard={deleteGuestCard} onDeleteAll={deleteAllCards} onResend={resendForCard} onPhoneChanged={onCallsPhoneChanged} />
             )}
 
             {/* ─── GUIDE ─── */}
