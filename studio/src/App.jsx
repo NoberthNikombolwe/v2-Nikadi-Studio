@@ -6244,7 +6244,7 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
 }
 
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
-function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard, onResend }) {
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard, onResend, onPhoneChanged }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
   const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
@@ -6264,6 +6264,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
     const { error: e } = await supabase.from("event_cards").update({ phone: trimmed }).eq("id", c.id);
     if (e) { patch(c.id, { phone: c.phone }); showToast(`Could not save phone: ${e.message}`, "warn"); return; }
     logHistory({ channel: "calls", action: "call", name: c.name, phone: trimmed, detail: `Phone number ${trimmed ? "updated to " + trimmed : "removed"}` }, eventId);
+    onPhoneChanged?.(c.id, trimmed);
     showToast(`Phone updated for ${c.name}`, "success");
   };
   const canShare = access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit");
@@ -9370,6 +9371,12 @@ export default function App() {
     }
   };
 
+  // Syncs a phone-number edit made in the Calls tab back into the in-memory records
+  // so any subsequent WA / SMS send uses the updated number.
+  const onCallsPhoneChanged = (cardId, phone) => {
+    setRecords(rs => rs.map(r => r.dbId === cardId ? { ...r, phone } : r));
+  };
+
   // One-click resend from Calls tab: uploads the card if needed, then sends WA + SMS for that guest.
   const resendForCard = async (card) => {
     const recIdx  = records.findIndex(r => r.dbId === card.id);
@@ -10363,7 +10370,7 @@ export default function App() {
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} onGuestsAdded={addImportedGuests}
-                onDeleteCard={deleteGuestCard} onResend={resendForCard} />
+                onDeleteCard={deleteGuestCard} onResend={resendForCard} onPhoneChanged={onCallsPhoneChanged} />
             )}
 
             {/* ─── GUIDE ─── */}
