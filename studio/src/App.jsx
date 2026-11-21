@@ -8985,16 +8985,19 @@ export default function App() {
   // progress in uploadLog for the "Upload Cards" progress list
   const uploadAllCards = async () => {
     if (!supabase) { showToast("Supabase not configured", "warn"); return; }
+    // Only upload cards for guests on the current spreadsheet (not offList retained guests)
+    const toUpload = records.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample && !r.offList);
     setUploadingCards(true);
-    setUploadLog(records.map(r => ({ name:r.name, status:"uploading" })));
+    setUploadLog(toUpload.map(({ r }) => ({ name:r.name, status:"uploading" })));
     let ok = 0, fail = 0;
-    for (let i = 0; i < records.length; i++) {
+    for (let j = 0; j < toUpload.length; j++) {
+      const { i } = toUpload[j];
       try {
         await uploadCardSingle(i);
-        setUploadLog(l => l.map((x,j) => j===i ? {...x, status:"uploaded"} : x));
+        setUploadLog(l => l.map((x,k) => k===j ? {...x, status:"uploaded"} : x));
         ok++;
       } catch {
-        setUploadLog(l => l.map((x,j) => j===i ? {...x, status:"failed"} : x));
+        setUploadLog(l => l.map((x,k) => k===j ? {...x, status:"failed"} : x));
         fail++;
       }
     }
@@ -9464,7 +9467,7 @@ export default function App() {
     // When this event has guest invitation links, auto-upload any cards that are not yet uploaded
     // so the OG thumbnail in the SMS link shows the guest's own card image
     if (openEventRow?.guest_link_enabled) {
-      const needUpload = records.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample && r.uploadStatus !== "uploaded");
+      const needUpload = records.map((r, i) => ({ r, i })).filter(({ r }) => !r.sample && !r.offList && r.uploadStatus !== "uploaded");
       if (needUpload.length > 0) {
         setSmsAutoUploading(true);
         let failCount = 0;
