@@ -6254,6 +6254,18 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
   const [sharing, setSharing] = useState(false);
   const [resending, setResending] = useState(null);  // card.id currently being resent
   const handleResend = async (c) => { setResending(c.id); try { await onResend?.(c); } finally { setResending(null); } };
+  const [editingPhone, setEditingPhone] = useState(null);  // card.id whose phone is being edited
+  const [phoneInput,   setPhoneInput]   = useState("");
+  const savePhone = async (c) => {
+    const trimmed = phoneInput.trim();
+    setEditingPhone(null);
+    if (trimmed === (c.phone || "")) return;
+    patch(c.id, { phone: trimmed });
+    const { error: e } = await supabase.from("event_cards").update({ phone: trimmed }).eq("id", c.id);
+    if (e) { patch(c.id, { phone: c.phone }); showToast(`Could not save phone: ${e.message}`, "warn"); return; }
+    logHistory({ channel: "calls", action: "call", name: c.name, phone: trimmed, detail: `Phone number ${trimmed ? "updated to " + trimmed : "removed"}` }, eventId);
+    showToast(`Phone updated for ${c.name}`, "success");
+  };
   const canShare = access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit");
   const canEdit  = access.can("calls", "edit");
   const canTrack = access.settings.calls_track_enabled !== false;
@@ -6328,13 +6340,32 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
               <tr key={c.id}>
                 <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}{c.card_code ? <> · <span style={{fontFamily:"JetBrains Mono, monospace",letterSpacing:1}}>{c.card_code}</span></> : null}</div></td>
                 <td>
-                  {c.phone ? (
-                    <div className="nk-row-actions">
-                      <a className="nk-btn-sm icon-only" href={`tel:+${normalisePhone(c.phone)}`} aria-label={`Call ${c.name}`} title={`Call ${c.name}`}
-                        style={{background:N.greenBg,color:N.green,borderColor:alpha(N.green,"44"),width:30,height:30,padding:0,justifyContent:"center",textDecoration:"none"}}><Icon n="phone" /></a>
-                      <span className="m-hide" style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>+{normalisePhone(c.phone)}</span>
+                  {editingPhone === c.id ? (
+                    <div style={{display:"flex",gap:4,alignItems:"center",flexWrap:"nowrap"}}>
+                      <input className="nk-input" style={{width:150,marginBottom:0,fontSize:12,fontFamily:"JetBrains Mono, monospace",padding:"4px 8px"}}
+                        value={phoneInput} onChange={e => setPhoneInput(e.target.value)} autoFocus
+                        placeholder="e.g. 255712345678" onKeyDown={e => e.key === "Enter" && savePhone(c)} />
+                      <Sb bg={N.greenBg} col={N.green} border={alpha(N.green,"44")} onClick={() => savePhone(c)} label="Save phone"><Icon n="check" /></Sb>
+                      <Sb bg="transparent" col={N.textDim} border={N.border} onClick={() => setEditingPhone(null)} label="Cancel"><Icon n="x" /></Sb>
                     </div>
-                  ) : <span style={{color:N.textDim,fontSize:12}}>No phone</span>}
+                  ) : (
+                    <div className="nk-row-actions">
+                      {c.phone ? (
+                        <>
+                          <a className="nk-btn-sm icon-only" href={`tel:+${normalisePhone(c.phone)}`} aria-label={`Call ${c.name}`} title={`Call ${c.name}`}
+                            style={{background:N.greenBg,color:N.green,borderColor:alpha(N.green,"44"),width:30,height:30,padding:0,justifyContent:"center",textDecoration:"none"}}><Icon n="phone" /></a>
+                          <span className="m-hide" style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>+{normalisePhone(c.phone)}</span>
+                        </>
+                      ) : <span style={{color:N.textDim,fontSize:12}}>No phone</span>}
+                      {canEdit && (
+                        <Sb bg="transparent" col={N.sky} border={N.border}
+                          label={`${c.phone ? "Edit" : "Add"} phone for ${c.name}`}
+                          onClick={() => { setEditingPhone(c.id); setPhoneInput(c.phone || ""); }}>
+                          <Icon n="edit" />
+                        </Sb>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <div className="nk-row-actions">
