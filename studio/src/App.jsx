@@ -6244,7 +6244,7 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
 }
 
 // Guest confirmation calls: tap to call, record Picked / Busy → Coming / Not coming, add a comment
-function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard }) {
+function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, onGo, reloadEvents, onGuestsAdded, onDeleteCard, onResend }) {
   const { cards, error, load, patch } = useEventCards(eventId);
   const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
   const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
@@ -6252,6 +6252,8 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
   const [commenting, setCommenting] = useState(null);
   const [tracking,  setTracking]  = useState(null);
   const [sharing, setSharing] = useState(false);
+  const [resending, setResending] = useState(null);  // card.id currently being resent
+  const handleResend = async (c) => { setResending(c.id); try { await onResend?.(c); } finally { setResending(null); } };
   const canShare = access.setupMissing || access.can("events", "edit") || access.can("calls", "edit") || access.can("history", "edit");
   const canEdit  = access.can("calls", "edit");
   const canTrack = access.settings.calls_track_enabled !== false;
@@ -6320,7 +6322,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
       </div>
       <div className="nk-table-wrap">
         <table className="nk-table m-hide-5">
-          <thead><tr><th>Guest</th><th>Phone</th><th>Answer</th><th>Comment</th><th>Updated</th></tr></thead>
+          <thead><tr><th>Guest</th><th>Phone</th><th>Answer</th><th>Comment</th><th>Updated</th>{onResend && <th>Resend</th>}</tr></thead>
           <tbody>
             {rows.map(c => (
               <tr key={c.id}>
@@ -6378,6 +6380,28 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
                     </>
                   ) : "—"}
                 </td>
+                {onResend && (
+                  <td>
+                    {c.phone ? (
+                      <button
+                        disabled={resending === c.id}
+                        title={`Upload card, send WA and SMS to ${c.name}`}
+                        onClick={() => handleResend(c)}
+                        style={{
+                          display:"inline-flex",alignItems:"center",gap:6,
+                          padding:"5px 12px",borderRadius:6,fontSize:11,fontWeight:600,cursor:"pointer",
+                          background: resending===c.id ? N.navy700 : N.navy600,
+                          color: resending===c.id ? N.textDim : N.sky,
+                          border:`1px solid ${resending===c.id ? N.border : alpha(N.sky,"44")}`,
+                          whiteSpace:"nowrap",
+                        }}>
+                        {resending === c.id
+                          ? <><Icon n="loader" /> Sending…</>
+                          : <><Icon n="refresh" /> Resend</>}
+                      </button>
+                    ) : <span style={{fontSize:11,color:N.textDim}}>—</span>}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -9015,8 +9039,8 @@ export default function App() {
   // (webhook, server check, quick checks from here) then moves the guest to Delivered / Read
   // or Not on WhatsApp. `quiet` = part of Send All, which checks once at the end.
   // → the provider's messageId (or null)
-  const sendWaSingle = async (idx, { quiet = false } = {}) => {
-    const rec = records[idx];
+  const sendWaSingle = async (idx, { quiet = false, cardUrl: cardUrlOverride } = {}) => {
+    const rec = cardUrlOverride ? { ...records[idx], cardUrl: cardUrlOverride } : records[idx];
     if (rec.waStatus === WA.sending) return null;   // a request for this row is already in flight
     if (!rec.phone)   { showToast("No phone for " + rec.name, "warn"); return null; }
     if (!isValidPhone(rec.phone)) { showToast(`Invalid phone number for ${rec.name}`, "warn"); return null; }
@@ -9313,6 +9337,28 @@ export default function App() {
     } finally {
       smsInFlight.current.delete(flightKey);
     }
+  };
+
+  // One-click resend from Calls tab: uploads the card if needed, then sends WA + SMS for that guest.
+  const resendForCard = async (card) => {
+    const recIdx  = records.findIndex(r => r.dbId === card.id);
+    if (recIdx === -1) { showToast(`${card.name} is not in the current spreadsheet — reload the event`, "warn"); return; }
+    const rec     = records[recIdx];
+    const sendIdx = sendRecords.findIndex(r => r.dbId === card.id);
+    // Upload card if not already uploaded
+    let cardUrl = rec.cardUrl;
+    if (!cardUrl) {
+      try {
+        cardUrl = await uploadCardSingle(recIdx);
+      } catch (e) {
+        showToast(`Upload failed for ${rec.name}: ${e.message}`, "warn");
+        return;
+      }
+    }
+    // Send WA (uses cardUrlOverride so it works even before React re-renders with new state)
+    await sendWaSingle(recIdx, { cardUrl });
+    // Send SMS (only for guests on the current Design list)
+    if (sendIdx >= 0) await sendSmsToOne(sendIdx, null);
   };
 
   // Sends SMS to every record with a valid phone number in one bulk API call, then maps
@@ -10286,7 +10332,7 @@ export default function App() {
             {tab === "calls" && (
               <CallsTab key={savedEventId || "none"} eventId={savedEventId} eventRow={openEventRow} access={access} myEmail={user.email}
                 showToast={showToast} logHistory={logHistory} onGo={goTab} reloadEvents={loadSavedEvents} onGuestsAdded={addImportedGuests}
-                onDeleteCard={deleteGuestCard} />
+                onDeleteCard={deleteGuestCard} onResend={resendForCard} />
             )}
 
             {/* ─── GUIDE ─── */}
