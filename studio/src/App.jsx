@@ -6333,6 +6333,15 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
         <input className="nk-input" style={{flex:"1 1 220px",maxWidth:320,marginBottom:0}} placeholder="Search name or phone…" value={filter.q} onChange={e => setFilter(f => ({ ...f, q: e.target.value }))} />
         {filters.map(([k, l]) => <button key={k} style={segStyle(filter.status === k)} onClick={() => setFilter(f => ({ ...f, status: k }))}>{l}</button>)}
       </div>
+      {(filter.status !== "all" || filter.q) && cards?.length > 0 && (
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,padding:"6px 12px",borderRadius:8,background:alpha(N.sky,"18"),border:`1px solid ${alpha(N.sky,"33")}`,fontSize:12,color:N.sky}}>
+          <Icon n="filter" />
+          <span>Showing {rows.length} of {cards.length} guests{filter.status !== "all" ? ` — filter: ${filters.find(([k])=>k===filter.status)?.[1]||filter.status}` : ""}{filter.q ? ` — search: "${filter.q}"` : ""}</span>
+          <button onClick={() => setFilter({ status: "all", q: "" })} style={{marginLeft:"auto",background:"transparent",border:"none",cursor:"pointer",color:N.sky,fontSize:12,display:"flex",alignItems:"center",gap:4,padding:"2px 6px",borderRadius:4}}>
+            <Icon n="x" /> Clear filter
+          </button>
+        </div>
+      )}
       <div className="nk-table-wrap">
         <table className="nk-table m-hide-5">
           <thead><tr><th>Guest</th><th>Phone</th><th>Answer</th><th>Comment</th><th>Updated</th>{onResend && <th>Resend</th>}</tr></thead>
@@ -9398,7 +9407,7 @@ export default function App() {
     // Send SMS — use sendRecords index when available, else fall back to records with override
     const smsIdx  = sendIdx >= 0 ? sendIdx : recIdx;
     const smsRecs = sendIdx >= 0 ? undefined : records;
-    await sendSmsToOne(smsIdx, null, { recs: smsRecs });
+    await sendSmsToOne(smsIdx, MAIN_MSG, { recs: smsRecs });
   };
 
   // Sends SMS to every record with a valid phone number in one bulk API call, then maps
