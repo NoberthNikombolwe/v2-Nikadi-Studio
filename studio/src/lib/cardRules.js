@@ -69,15 +69,27 @@ export const SCAN_STATE_LABEL = { pending: "Not scanned", partial: "Partly in", 
 export const cardKind = (max = 1) => { const n = Number(max) || 1; return n <= 1 ? "single" : n === 2 ? "double" : "group"; };
 export const CARD_KIND_LABEL = { single: "Single", double: "Double", group: "Group" };
 
-// The scanner's Statistics screen: cards by size, cards scanned (anyone in) and not
-// scanned, and people expected / entered
-export const scanBreakdown = (cards = []) => cards.reduce((t, c) => {
-  const max = Math.max(1, Number(c.max_scans) || 1), n = Math.max(0, Number(c.scan_count) || 0);
-  t.cards++; t[cardKind(max)]++; t.people += max; t.entered += n;
-  if (n > 0) t.scanned++; else t.notScanned++;
-  if (n >= max) t.complete++;
-  return t;
-}, { cards: 0, single: 0, double: 0, group: 0, people: 0, entered: 0, scanned: 0, notScanned: 0, complete: 0 });
+// The scanner's Statistics screen: cards by actual card type, cards scanned and not
+// scanned, and people expected / entered. `byType` is sorted by card count descending.
+// The legacy single/double/group counts are kept for the public scan page (RPC shape).
+export const scanBreakdown = (cards = []) => {
+  const byTypeMap = {};
+  const totals = cards.reduce((t, c) => {
+    const max = Math.max(1, Number(c.max_scans) || 1), n = Math.max(0, Number(c.scan_count) || 0);
+    t.cards++; t[cardKind(max)]++; t.people += max; t.entered += n;
+    if (n > 0) t.scanned++; else t.notScanned++;
+    if (n >= max) t.complete++;
+    const type = String(c.card_type || "").trim() || "—";
+    if (!byTypeMap[type]) byTypeMap[type] = { type, cards: 0, people: 0, entered: 0, complete: 0 };
+    byTypeMap[type].cards++;
+    byTypeMap[type].people += max;
+    byTypeMap[type].entered += n;
+    if (n >= max) byTypeMap[type].complete++;
+    return t;
+  }, { cards: 0, single: 0, double: 0, group: 0, people: 0, entered: 0, scanned: 0, notScanned: 0, complete: 0 });
+  totals.byType = Object.values(byTypeMap).sort((a, b) => b.cards - a.cards);
+  return totals;
+};
 
 // Rows of the check-in report (Excel), by name. fmtWhen formats the last scan time.
 export const scanReportRows = (cards = [], fmtWhen = (d) => d) =>

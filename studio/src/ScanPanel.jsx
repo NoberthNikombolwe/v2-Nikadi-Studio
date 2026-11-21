@@ -181,9 +181,16 @@ export function ScanStats({ stats = {}, onDownload, downloading, children }) {
       <style>{STATS_CSS}</style>
       <div className="sp-stats">
         {tile("Total cards", stats.cards, N.sky, "big", has(stats.people) ? `for ${peopleLabel(stats.people)}` : null)}
-        {tile("Single", stats.single, N.text, "third")}
-        {tile("Double", stats.double, N.text, "third")}
-        {tile("Group", stats.group, N.text, "third")}
+        {stats.byType?.length > 0
+          ? stats.byType.map(t => (
+              <div key={t.type} className="sp-stat third">
+                <div className="sp-stat-v" style={{color:N.text}}>{t.cards}</div>
+                <div className="sp-stat-l">{t.type}</div>
+                <div className="sp-stat-s">{peopleLabel(t.people)}</div>
+              </div>
+            ))
+          : <>{tile("Single", stats.single, N.text, "third")}{tile("Double", stats.double, N.text, "third")}{tile("Group", stats.group, N.text, "third")}</>
+        }
         {tile("Scanned cards", stats.scanned, N.green, "half", has(stats.complete) ? `${stats.complete} fully in` : null)}
         {has(stats.entered) && (
           <div className="sp-stat half">

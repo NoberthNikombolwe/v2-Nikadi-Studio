@@ -1059,8 +1059,27 @@ test("scanBreakdown counts cards by size, scanned and not scanned", () => {
     { max_scans: 1, scan_count: 1 }, { max_scans: 1, scan_count: 0 }, { max_scans: 2, scan_count: 1 },
     { max_scans: 30, scan_count: 30 }, { max_scans: 5, scan_count: 0 }, {},
   ];
-  assert.deepEqual(scanBreakdown(cards), { cards: 6, single: 3, double: 1, group: 2, people: 40, entered: 32, scanned: 3, notScanned: 3, complete: 2 });
+  assert.deepEqual(scanBreakdown(cards), {
+    cards: 6, single: 3, double: 1, group: 2, people: 40, entered: 32, scanned: 3, notScanned: 3, complete: 2,
+    byType: [{ type: "—", cards: 6, people: 40, entered: 32, complete: 2 }],
+  });
   assert.equal(scanBreakdown().cards, 0);
+
+  // Corporate event: distinct types (VIP, VVIP, REGULAR)
+  const corp = [
+    { card_type: "VIP", max_scans: 2, scan_count: 2 },
+    { card_type: "VIP", max_scans: 2, scan_count: 0 },
+    { card_type: "VVIP", max_scans: 5, scan_count: 5 },
+    { card_type: "REGULAR", max_scans: 1, scan_count: 0 },
+    { card_type: "REGULAR", max_scans: 1, scan_count: 0 },
+    { card_type: "REGULAR", max_scans: 1, scan_count: 1 },
+  ];
+  const bd = scanBreakdown(corp);
+  assert.equal(bd.cards, 6);
+  assert.deepEqual(bd.byType.map(t => t.type), ["REGULAR", "VIP", "VVIP"]);
+  assert.deepEqual(bd.byType.find(t => t.type === "VIP"),     { type: "VIP",     cards: 2, people: 4,  entered: 2, complete: 1 });
+  assert.deepEqual(bd.byType.find(t => t.type === "VVIP"),    { type: "VVIP",    cards: 1, people: 5,  entered: 5, complete: 1 });
+  assert.deepEqual(bd.byType.find(t => t.type === "REGULAR"), { type: "REGULAR", cards: 3, people: 3,  entered: 1, complete: 1 });
 });
 
 test("scanReportRows lists every guest by name with their door state", () => {
