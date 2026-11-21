@@ -5215,8 +5215,13 @@ function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
     // Imported guests are off the Design list (in_list false) so a later spreadsheet upload
     // in the Design tab never deletes them — they live in Calls / Scanner until removed.
     const listCol = cards.some(c => "in_list" in c);
-    const rows = plan.add.map(r => ({ event_id: eventId, name: String(r.name || "").trim(), card_type: String(r.cardType || "").trim(),
-      phone: String(r.phone || "").trim(), wa_status: WA.idle, sms_status: SMS.pending, ...(listCol ? { in_list: false } : {}) }));
+    const rows = plan.add.map(r => {
+      const code = String(r.passcode || "").trim();
+      return { event_id: eventId, name: String(r.name || "").trim(), card_type: String(r.cardType || "").trim(),
+        phone: String(r.phone || "").trim(), wa_status: WA.idle, sms_status: SMS.pending,
+        ...(code ? { card_code: code } : {}),
+        ...(listCol ? { in_list: false } : {}) };
+    });
     const { data, error } = await supabase.from("event_cards").insert(rows).select("id,name,card_type,phone,wa_status,sms_status");
     setBusy(false);
     if (error) { showToast(`Import failed: ${error.message}`, "warn"); return; }
@@ -5255,14 +5260,18 @@ function GuestImport({ eventId, cards = [], showToast, logHistory, onAdded }) {
           {plan.add.length > 0 ? (
             <>
               <div style={{fontSize:13,fontWeight:700,color:N.green,marginBottom:6}}><Icon n="plus" /> New guests to add</div>
+              {(() => { const hasPc = plan.add.some(r => r.passcode); return (
               <div className="nk-table-wrap" style={{maxHeight:220,overflowY:"auto"}}>
                 <table className="nk-table">
-                  <thead><tr>{th("Name")}{th("Phone")}{th("Card type")}</tr></thead>
+                  <thead><tr>{th("Name")}{th("Phone")}{th("Card type")}{hasPc && th("Passcode")}</tr></thead>
                   <tbody>{plan.add.map((r, i) => (
-                    <tr key={i}><td style={{fontWeight:600}}>{r.name}</td><td>{r.phone || "—"}</td><td>{r.cardType || "—"}</td></tr>
+                    <tr key={i}><td style={{fontWeight:600}}>{r.name}</td><td>{r.phone || "—"}</td><td>{r.cardType || "—"}</td>
+                      {hasPc && <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12}}>{r.passcode || "—"}</td>}
+                    </tr>
                   ))}</tbody>
                 </table>
               </div>
+              ); })()}
             </>
           ) : <EmptyState compact icon="check" title="Nothing new to add" text="Every guest in this file is already on the list." />}
           <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:16}}>
