@@ -7663,8 +7663,9 @@ export default function App() {
   };
   loadTeamsRef.current = loadTeams;
   const [eventsScope, setEventsScope] = useState("all");   // Events tab: "all" | "mine" (for roles that see every event)
-  const [evFilter, setEvFilter] = useState({ q: "", status: "all", type: "all" });
+  const [evFilter, setEvFilter] = useState({ q: "", status: "active", type: "all" });
   const [evPage,   setEvPage]   = useState(0);
+  const [evSort,   setEvSort]   = useState({ col: "date", dir: "desc" });
   const EV_PAGE_SIZE = 20;
   // All unique event types from loaded events (for the type filter dropdown)
   const evTypes = [...new Set(savedEvents.map(e => e.event_type).filter(Boolean))].sort();
@@ -7681,9 +7682,18 @@ export default function App() {
     }
     return true;
   });
-  const evTotalPages = Math.max(1, Math.ceil(evFiltered.length / EV_PAGE_SIZE));
+  const evSorted = [...evFiltered].sort((a, b) => {
+    const d = evSort.dir === "asc" ? 1 : -1;
+    if (evSort.col === "name")   return d * (a.username||"").localeCompare(b.username||"");
+    if (evSort.col === "type")   return d * (a.event_type||"").localeCompare(b.event_type||"");
+    if (evSort.col === "venue")  return d * (a.venue_name||"").localeCompare(b.venue_name||"");
+    if (evSort.col === "date")   return d * ((a.start_datetime||"").localeCompare(b.start_datetime||""));
+    if (evSort.col === "status") return d * (a.status||"").localeCompare(b.status||"");
+    return 0;
+  });
+  const evTotalPages = Math.max(1, Math.ceil(evSorted.length / EV_PAGE_SIZE));
   const evPageSafe   = Math.min(evPage, evTotalPages - 1);
-  const evPageRows   = evFiltered.slice(evPageSafe * EV_PAGE_SIZE, (evPageSafe + 1) * EV_PAGE_SIZE);
+  const evPageRows   = evSorted.slice(evPageSafe * EV_PAGE_SIZE, (evPageSafe + 1) * EV_PAGE_SIZE);
   const setEvF = (patch) => { setEvFilter(f => ({ ...f, ...patch })); setEvPage(0); };
   const myEmail = (user?.email || "").toLowerCase();
 
@@ -10097,8 +10107,8 @@ export default function App() {
                           {evTypes.map(t => <option key={t} value={t}>{t}</option>)}
                         </select>
                       )}
-                      {(evFilter.q || evFilter.status !== "all" || evFilter.type !== "all") && (
-                        <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setEvF({ q:"", status:"all", type:"all" })}>
+                      {(evFilter.q || evFilter.status !== "active" || evFilter.type !== "all") && (
+                        <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setEvF({ q:"", status:"active", type:"all" })}>
                           <Icon n="x" /> Clear
                         </button>
                       )}
@@ -10110,7 +10120,17 @@ export default function App() {
                     <table className="nk-table m-hide-1 m-hide-3 m-hide-4 m-act">
                       <thead>
                         <tr>
-                          {["#","Username","Type","Venue","Date","Status",...(access.setupMissing ? [] : ["Team"]),"Actions"].map(h=><th key={h} className={h === "Team" ? "m-hide" : undefined}>{h}</th>)}
+                          <th>#</th>
+                          {[["name","Username"],["type","Type"],["venue","Venue"],["date","Date"],["status","Status"]].map(([col,label])=>(
+                            <th key={col} style={{cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}}
+                              onClick={()=>setEvSort(s=>({col,dir:s.col===col&&s.dir==="asc"?"desc":"asc"}))}>
+                              {label}{" "}
+                              <Icon n={evSort.col===col?(evSort.dir==="asc"?"arrowUp":"arrowDown"):"arrowDown"}
+                                style={{width:10,height:10,verticalAlign:"middle",opacity:evSort.col===col?1:0.25}} />
+                            </th>
+                          ))}
+                          {!access.setupMissing && <th className="m-hide">Team</th>}
+                          <th>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
