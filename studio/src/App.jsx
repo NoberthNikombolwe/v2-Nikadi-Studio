@@ -2054,6 +2054,39 @@ const segStyle = (on) => ({ padding:"6px 12px", borderRadius:7, fontSize:12, fon
   background: on ? N.navy600 : "transparent", color: on ? N.text : N.textMid, border:`1px solid ${on ? N.sky : N.border}` });
 
 /* ══════════════════════════════════════════════════════════════════════════
+   INVOICES — constants, useInvoices hook, InvoicePreviewModal, InvoiceFormModal.
+   Table: invoices (run studio/invoices.sql in the Supabase SQL editor).
+══════════════════════════════════════════════════════════════════════════ */
+const NIKADI_CO = { name:"NIKADI ENTERPRISES", tagline:"Professional Services", email:"info@nikadi.co.tz",
+  phones:["+255 750 301 111","+255 747 639 118"], address:"P.O. Box 106018, Dar es Salaam, Tanzania" };
+const newInvItem    = () => ({ id: Date.now() + Math.random(), service:"", qty:1, price:0 });
+const nextInvoiceNo = (list=[]) => `NKD-${String(list.length+1).padStart(4,"0")}`;
+const fmtTzs        = (n) => new Intl.NumberFormat("en-TZ",{style:"currency",currency:"TZS",minimumFractionDigits:2}).format(Number(n)||0);
+const calcInvoice   = ({items=[],vat_enabled=false,vat_type="exclusive",discount=0}={}) => {
+  const sub  = items.reduce((s,it) => s + Number(it.qty)*Number(it.price), 0);
+  const disc = Math.max(0, sub*(Number(discount)||0)/100);
+  const net  = Math.max(0, sub-disc);
+  const vat  = vat_enabled ? (vat_type==="exclusive" ? net*0.18 : net-net/1.18) : 0;
+  const grand = vat_enabled && vat_type==="exclusive" ? net+vat : net;
+  return { sub, disc, net, vat, grand };
+};
+const INV_ST = {
+  draft:{ label:"Draft", col:"#94a3b8", bg:"rgba(148,163,184,.2)" },
+  sent: { label:"Sent",  col:"#60a5fa", bg:"rgba(59,130,246,.2)"  },
+  paid: { label:"Paid",  col:"#4ade80", bg:"rgba(22,163,74,.2)"   },
+};
+const BLANK_INVOICE = (list=[]) => ({
+  invoice_no: nextInvoiceNo(list), event_id:"", status:"draft",
+  issue_date: localDate(), due_date: addDays(30),
+  client_name:"", client_email:"", client_phone:"", client_address:"",
+  items:[newInvItem()], vat_enabled:false, vat_type:"exclusive", discount:0, notes:"",
+});
+const INV_PRINT_CSS = `@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=DM+Sans:wght@300;400;500;600&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;color:#1e293b;background:#fff}
+@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`;
+
+/* ══════════════════════════════════════════════════════════════════════════
    FINANCE — useFinance() + <FinanceTab>, <TxnModal>, <AccountsModal>.
    Tables: finance_accounts, event_transactions (supabase-schema.sql).
    Pure logic (validation, profit / margin, filters) is in src/lib/finance.js.
@@ -2165,6 +2198,73 @@ function useFinance({ enabled, showToast, askDialog, logHistory }) {
   };
 
   return { accounts, txns, loading, busy, error, loaded, loadAll, addTxn, updateTxn, deleteTxn, saveAccount, toggleAccount };
+}
+
+// Invoice CRUD over the `invoices` Supabase table
+function useInvoices({ enabled, userId, showToast, askDialog }) {
+  const [invoices, setInvoices] = useState([]);
+  const [loading,  setLoading]  = useState(false);
+  const [busy,     setBusy]     = useState(false);
+  const [error,    setError]    = useState(null);
+  const [loaded,   setLoaded]   = useState(false);
+
+  const loadAll = async () => {
+    if (!supabase || !enabled) return;
+    setLoading(true); setError(null);
+    const { data, error: err } = await supabase.from("invoices").select("*").order("created_at", { ascending: false });
+    setLoading(false);
+    if (err) { setError(err.message); return; }
+    setInvoices(data || []); setLoaded(true);
+  };
+
+  const saveInvoice = async (form, id = null) => {
+    if (!supabase) return null;
+    setBusy(true);
+    const calc = calcInvoice(form);
+    const payload = { invoice_no: form.invoice_no, event_id: form.event_id || null, status: form.status,
+      issue_date: form.issue_date, due_date: form.due_date,
+      client_name: form.client_name, client_email: form.client_email,
+      client_phone: form.client_phone, client_address: form.client_address,
+      items: form.items || [], vat_enabled: form.vat_enabled, vat_type: form.vat_type,
+      discount: form.discount, notes: form.notes,
+      sub: calc.sub, vat_amount: calc.vat, grand: calc.grand,
+      updated_at: new Date().toISOString(), created_by: userId || null };
+    let err, row;
+    if (id) {
+      const res = await supabase.from("invoices").update(payload).eq("id", id).select().single();
+      err = res.error; row = res.data;
+    } else {
+      const res = await supabase.from("invoices").insert(payload).select().single();
+      err = res.error; row = res.data;
+    }
+    setBusy(false);
+    if (err) { showToast(err.message, "warn"); return null; }
+    if (id) { setInvoices(prev => prev.map(i => i.id === id ? row : i)); showToast("Invoice updated", "success"); }
+    else     { setInvoices(prev => [row, ...prev]);                       showToast("Invoice created", "success"); }
+    return row;
+  };
+
+  const deleteInvoice = async (inv) => {
+    if (!supabase) return;
+    const ok = await askDialog({ title:`Delete ${inv.invoice_no}?`, body:"This cannot be undone.", confirmLabel:"Delete", danger:true });
+    if (!ok) return;
+    setBusy(true);
+    const { error: err } = await supabase.from("invoices").delete().eq("id", inv.id);
+    setBusy(false);
+    if (err) { showToast(err.message, "warn"); return; }
+    setInvoices(prev => prev.filter(i => i.id !== inv.id));
+    showToast("Invoice deleted", "success");
+  };
+
+  const cloneInvoice = async (inv) => {
+    const payload = { ...inv };
+    delete payload.id; delete payload.invoice_no; delete payload.created_at;
+    delete payload.updated_at; delete payload.sub; delete payload.vat_amount; delete payload.grand;
+    return saveInvoice({ ...payload, invoice_no: nextInvoiceNo(invoices), status:"draft",
+      issue_date: localDate(), due_date: addDays(30) });
+  };
+
+  return { invoices, loading, busy, error, loaded, loadAll, saveInvoice, deleteInvoice, cloneInvoice };
 }
 
 // Big number tile used across the Finance tab
@@ -2354,8 +2454,278 @@ function AccountsModal({ fin, onClose }) {
   );
 }
 
+// Invoice preview modal: white-background navy/gold design + print to new window
+function InvoicePreviewModal({ inv, payments = [], onClose, onEdit }) {
+  const st = INV_ST[inv.status] || INV_ST.draft;
+  const { sub, disc, net: _n, vat, grand } = calcInvoice(inv);
+  const totalPaid = payments.reduce((s, t) => s + (Number(t.amount)||0), 0);
+  const balance   = Math.max(0, grand - totalPaid);
+  const TotRow = ({ label, val, bold }) => (
+    <div style={{display:"flex",justifyContent:"space-between",padding:bold?"9px 0 5px":"5px 0",fontSize:bold?14:12,
+      color:bold?"#0d2240":"#64748b",borderBottom:bold?"none":"1px solid #f1f5f9",
+      borderTop:bold?"2px solid #0d2240":"none",fontWeight:bold?800:undefined,
+      fontFamily:bold?"'Playfair Display',Georgia,serif":undefined}}>
+      <span>{label}</span><span>{val}</span>
+    </div>
+  );
+  const doPrint = () => {
+    const prt = document.getElementById("inv-print-area");
+    if (!prt) return;
+    const w = window.open("", "_blank", "width=850,height=1100");
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${inv.invoice_no}</title><style>${INV_PRINT_CSS}</style></head><body>${prt.innerHTML}</body></html>`);
+    w.document.close(); w.focus();
+    setTimeout(() => { try { w.print(); } catch(e) {} }, 700);
+  };
+  return (
+    <div className="nk-modal-wrap" style={{zIndex:600}}>
+      <div className="nk-modal" style={{maxWidth:800,maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column",padding:0}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 20px",borderBottom:`1px solid ${N.border}`,flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:16,fontWeight:700,color:N.text}}>{inv.invoice_no}</span>
+            <span style={{padding:"2px 8px",borderRadius:10,fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase",background:st.bg,color:st.col}}>{st.label}</span>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Sb bg={N.navy600} col={N.sky} border={N.border} label="Print invoice" onClick={doPrint}><Icon n="print" /> Print</Sb>
+            {onEdit && <Sb bg={N.navy700} col={N.textMid} border={N.border} label="Edit invoice" onClick={onEdit}><Icon n="edit" /> Edit</Sb>}
+            <Sb bg="transparent" col={N.textDim} border="transparent" label="Close preview" onClick={onClose}><Icon n="x" /></Sb>
+          </div>
+        </div>
+        <div style={{flex:1,overflowY:"auto",background:"#fff"}}>
+          <div id="inv-print-area" style={{padding:"32px 40px",fontFamily:"'DM Sans',system-ui,sans-serif",color:"#1e293b",maxWidth:800,margin:"0 auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,gap:16,flexWrap:"wrap"}}>
+              <div>
+                <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:24,color:"#0d2240",fontWeight:800}}>{NIKADI_CO.name}</div>
+                <div style={{fontSize:10,color:"#c9a84c",fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginTop:2}}>{NIKADI_CO.tagline}</div>
+                <div style={{marginTop:8,fontSize:11,color:"#64748b",lineHeight:1.8}}>{NIKADI_CO.email}<br />{NIKADI_CO.phones.join(" | ")}<br />{NIKADI_CO.address}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{background:"#0d2240",color:"#fff",display:"inline-block",padding:"4px 14px",borderRadius:4,fontSize:11,fontWeight:700,letterSpacing:2,textTransform:"uppercase",marginBottom:8}}>Invoice</div>
+                <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:20,fontWeight:800,color:"#0d2240"}}>{inv.invoice_no}</div>
+                <div style={{display:"inline-block",padding:"2px 8px",borderRadius:10,fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginTop:4,background:st.bg,color:st.col}}>{st.label}</div>
+                <div style={{marginTop:5,fontSize:11,color:"#64748b",lineHeight:1.8}}><strong>Issue:</strong> {inv.issue_date}<br /><strong>Due:</strong> {inv.due_date}</div>
+              </div>
+            </div>
+            <div style={{height:3,background:"linear-gradient(90deg,#0d2240,#1e4a8a,#c9a84c)",borderRadius:2,marginBottom:20}} />
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18,marginBottom:20}}>
+              <div>
+                <div style={{fontSize:9,fontWeight:700,letterSpacing:2,textTransform:"uppercase",color:"#c9a84c",marginBottom:5}}>From</div>
+                <div style={{fontSize:13,fontWeight:700,color:"#0d2240",marginBottom:3}}>{NIKADI_CO.name}</div>
+                <div style={{fontSize:11,color:"#64748b",lineHeight:1.8}}>{NIKADI_CO.email}<br />{NIKADI_CO.phones[0]}<br />{NIKADI_CO.address}</div>
+              </div>
+              <div>
+                <div style={{fontSize:9,fontWeight:700,letterSpacing:2,textTransform:"uppercase",color:"#c9a84c",marginBottom:5}}>Bill To</div>
+                <div style={{fontSize:13,fontWeight:700,color:"#0d2240",marginBottom:3}}>{inv.client_name||"—"}</div>
+                <div style={{fontSize:11,color:"#64748b",lineHeight:1.8}}>
+                  {inv.client_email && <>{inv.client_email}<br /></>}
+                  {inv.client_phone && <>{inv.client_phone}<br /></>}
+                  {inv.client_address}
+                </div>
+              </div>
+            </div>
+            <table style={{width:"100%",borderCollapse:"collapse",marginBottom:16}}>
+              <thead>
+                <tr style={{background:"#0d2240"}}>
+                  {["#","Service / Description","Qty","Unit Price","Total"].map((h,i) => (
+                    <th key={h} style={{padding:"8px 10px",color:"rgba(255,255,255,.8)",fontSize:10,fontWeight:700,letterSpacing:1.5,
+                      textTransform:"uppercase",textAlign:i>=2?"right":"left",width:i===0?34:i===2?60:i>=3?130:undefined}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(inv.items||[]).map((it,i) => (
+                  <tr key={it.id||i} style={{background:i%2?"#f8fafc":"#fff"}}>
+                    <td style={{padding:"9px 10px",fontSize:11,borderBottom:"1px solid #f1f5f9",color:"#94a3b8",fontWeight:700}}>{i+1}</td>
+                    <td style={{padding:"9px 10px",fontSize:12,borderBottom:"1px solid #f1f5f9"}}>{it.service||"—"}</td>
+                    <td style={{padding:"9px 10px",fontSize:12,borderBottom:"1px solid #f1f5f9",textAlign:"right"}}>{it.qty}</td>
+                    <td style={{padding:"9px 10px",fontSize:12,borderBottom:"1px solid #f1f5f9",textAlign:"right"}}>{fmtTzs(it.price)}</td>
+                    <td style={{padding:"9px 10px",fontSize:12,borderBottom:"1px solid #f1f5f9",textAlign:"right",fontWeight:600,color:"#0d2240"}}>{fmtTzs(Number(it.qty)*Number(it.price))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{display:"flex",justifyContent:"flex-end",marginBottom:16}}>
+              <div style={{width:260}}>
+                <TotRow label="Subtotal" val={fmtTzs(sub)} />
+                {disc>0 && <TotRow label={`Discount (${inv.discount}%)`} val={`-${fmtTzs(disc)}`} />}
+                {inv.vat_enabled && <TotRow label={`VAT 18% (${inv.vat_type})`} val={fmtTzs(vat)} />}
+                <TotRow label="Grand Total" val={fmtTzs(grand)} bold />
+              </div>
+            </div>
+            {payments.length > 0 && (
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:10,fontWeight:700,letterSpacing:2,textTransform:"uppercase",color:"#c9a84c",borderBottom:"1px solid #e2e8f0",paddingBottom:6,marginBottom:8}}>Payments Received</div>
+                {payments.map((p,i) => (
+                  <div key={p.id||i} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"4px 0",borderBottom:"1px solid #f1f5f9",color:"#64748b"}}>
+                    <span>{p.txn_date} — {p.party||"—"}</span>
+                    <span style={{fontWeight:600}}>{fmtTzs(p.amount)}</span>
+                  </div>
+                ))}
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:14,fontWeight:800,borderTop:"2px solid #0d2240",paddingTop:8,marginTop:4,fontFamily:"'Playfair Display',Georgia,serif"}}>
+                  <span style={{color:"#0d2240"}}>Balance Due</span>
+                  <span style={{color:balance>0?"#dc2626":"#16a34a"}}>{fmtTzs(balance)}</span>
+                </div>
+              </div>
+            )}
+            {inv.notes && <div style={{marginBottom:16,fontSize:11,color:"#64748b",borderLeft:"3px solid #c9a84c",paddingLeft:11,fontStyle:"italic",lineHeight:1.7}}>{inv.notes}</div>}
+            <div style={{background:"#0d2240",color:"rgba(255,255,255,.62)",padding:"12px 18px",borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,fontSize:10,lineHeight:1.7,marginBottom:4}}>
+              <div><strong style={{color:"rgba(255,255,255,.9)"}}>{NIKADI_CO.name}</strong><br />{NIKADI_CO.address}<br />{NIKADI_CO.email} | {NIKADI_CO.phones[0]}</div>
+              <div style={{fontStyle:"italic",color:"#e8c96e",fontSize:11,fontWeight:600}}>Thank you for your business!</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Invoice create/edit form modal with live totals, event linking and VAT
+function InvoiceFormModal({ initial, events = [], customers = [], invData, onClose }) {
+  const isEdit = !!initial?.id;
+  const [form, setForm] = useState(() => ({
+    ...initial,
+    items: (initial?.items || [newInvItem()]).map(it => ({ ...it })),
+  }));
+  const [saving, setSaving] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const setF = (k) => (v) => setForm(f => ({ ...f, [k]: v }));
+  const handleEventChange = (evId) => {
+    const ev = events.find(e => e.id === evId);
+    if (ev) {
+      const cust = customers.find(c => c.id === ev.customer_id);
+      setForm(f => ({ ...f, event_id: evId,
+        client_name:  f.client_name  || (cust?.name  || ev.username || ""),
+        client_email: f.client_email || (cust?.email || ""),
+        client_phone: f.client_phone || (cust?.phone || "") }));
+    } else { setF("event_id")(evId); }
+  };
+  const setItem = (idx, k, v) => setForm(f => ({ ...f, items: f.items.map((it,i) => i===idx ? { ...it, [k]:v } : it) }));
+  const addItem    = () => setForm(f => ({ ...f, items: [...f.items, newInvItem()] }));
+  const removeItem = (idx) => setForm(f => ({ ...f, items: f.items.filter((_,i) => i!==idx) }));
+  const { sub, disc, vat, grand } = calcInvoice(form);
+  const handleSave = async () => {
+    if (!form.invoice_no?.trim()) return;
+    setSaving(true);
+    const row = await invData.saveInvoice(form, isEdit ? initial.id : null);
+    setSaving(false);
+    if (row) onClose();
+  };
+  const iL = { fontSize:11, fontWeight:600, color:N.textMid, marginBottom:4, display:"block" };
+  const iS = { background:N.navy700, border:`1px solid ${N.border}`, borderRadius:6, color:N.text, padding:"7px 10px", fontSize:13, width:"100%", outline:"none" };
+  return (
+    <div className="nk-modal-wrap" style={{zIndex:600}}>
+      <div className="nk-modal" style={{maxWidth:760,maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column",padding:0}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 20px",borderBottom:`1px solid ${N.border}`,flexShrink:0}}>
+          <span style={{fontSize:16,fontWeight:700,color:N.text}}>{isEdit ? `Edit ${form.invoice_no}` : "New Invoice"}</span>
+          <div style={{display:"flex",gap:8}}>
+            <Sb bg={N.navy600} col={N.sky} border={N.border} label="Preview invoice" onClick={() => setPreviewOpen(true)}><Icon n="eye" /> Preview</Sb>
+            <Sb bg="transparent" col={N.textDim} border="transparent" label="Close" onClick={onClose}><Icon n="x" /></Sb>
+          </div>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"20px 24px",display:"flex",flexDirection:"column",gap:18}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:12}}>
+            <div><label style={iL}>Invoice No</label><input style={iS} value={form.invoice_no||""} onChange={e => setF("invoice_no")(e.target.value)} /></div>
+            <div><label style={iL}>Status</label>
+              <select style={{...iS,cursor:"pointer"}} value={form.status||"draft"} onChange={e => setF("status")(e.target.value)}>
+                {Object.entries(INV_ST).map(([k,v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+            </div>
+            <div><label style={iL}>Issue Date</label><input style={iS} type="date" value={form.issue_date||""} onChange={e => setF("issue_date")(e.target.value)} /></div>
+            <div><label style={iL}>Due Date</label><input style={iS} type="date" value={form.due_date||""} onChange={e => setF("due_date")(e.target.value)} /></div>
+          </div>
+          <div>
+            <label style={iL}>Link to Event <span style={{fontWeight:400,color:N.textDim}}>(optional — auto-fills client, links payments)</span></label>
+            <select style={{...iS,cursor:"pointer"}} value={form.event_id||""} onChange={e => handleEventChange(e.target.value)}>
+              <option value="">— None —</option>
+              {events.map(ev => <option key={ev.id} value={ev.id}>{ev.username || ev.id}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:N.textDim,marginBottom:10}}>Client Details</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              <div><label style={iL}>Name</label><input style={iS} value={form.client_name||""} onChange={e => setF("client_name")(e.target.value)} placeholder="Client or company name" /></div>
+              <div><label style={iL}>Email</label><input style={iS} type="email" value={form.client_email||""} onChange={e => setF("client_email")(e.target.value)} placeholder="client@example.com" /></div>
+              <div><label style={iL}>Phone</label><input style={iS} value={form.client_phone||""} onChange={e => setF("client_phone")(e.target.value)} placeholder="+255 7XX XXX XXX" /></div>
+              <div><label style={iL}>Address</label><input style={iS} value={form.client_address||""} onChange={e => setF("client_address")(e.target.value)} placeholder="City, Country" /></div>
+            </div>
+          </div>
+          <div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+              <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:N.textDim}}>Line Items</div>
+              <Sb bg={N.navy600} col={N.sky} border={N.border} label="Add line item" onClick={addItem}><Icon n="plus" /> Add Item</Sb>
+            </div>
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <thead><tr style={{background:N.navy800}}>
+                <th style={{padding:"6px 8px",textAlign:"left",fontSize:10,color:N.textMid,fontWeight:600}}>Description</th>
+                <th style={{padding:"6px 8px",textAlign:"right",fontSize:10,color:N.textMid,fontWeight:600,width:70}}>Qty</th>
+                <th style={{padding:"6px 8px",textAlign:"right",fontSize:10,color:N.textMid,fontWeight:600,width:140}}>Unit Price (TZS)</th>
+                <th style={{padding:"6px 8px",textAlign:"right",fontSize:10,color:N.textMid,fontWeight:600,width:130}}>Total</th>
+                <th style={{width:32}} />
+              </tr></thead>
+              <tbody>
+                {form.items.map((it,i) => (
+                  <tr key={it.id||i} style={{borderBottom:`1px solid ${N.border}`}}>
+                    <td style={{padding:"5px 6px"}}><input style={{...iS,margin:0}} value={it.service||""} onChange={e => setItem(i,"service",e.target.value)} placeholder="Service or description" /></td>
+                    <td style={{padding:"5px 6px"}}><input style={{...iS,margin:0,textAlign:"right"}} type="number" min="1" value={it.qty} onChange={e => setItem(i,"qty",e.target.value)} /></td>
+                    <td style={{padding:"5px 6px"}}><input style={{...iS,margin:0,textAlign:"right"}} type="number" min="0" step="1000" value={it.price} onChange={e => setItem(i,"price",e.target.value)} /></td>
+                    <td style={{padding:"5px 8px",textAlign:"right",fontSize:12,fontWeight:600,color:N.text,whiteSpace:"nowrap"}}>{fmtTzs(Number(it.qty)*Number(it.price))}</td>
+                    <td style={{padding:"5px 4px",textAlign:"center"}}>
+                      {form.items.length > 1 && <button style={{background:"transparent",border:"none",color:N.red,cursor:"pointer",padding:4}} aria-label="Remove item" title="Remove item" onClick={() => removeItem(i)}><Icon n="trash" /></button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,alignItems:"start"}}>
+            <div>
+              <Toggle checked={!!form.vat_enabled} onChange={setF("vat_enabled")} label="Apply VAT (18%)" />
+              {form.vat_enabled && (
+                <div style={{marginTop:8,display:"flex",gap:16}}>
+                  {["exclusive","inclusive"].map(t => (
+                    <label key={t} style={{display:"flex",gap:6,alignItems:"center",cursor:"pointer",fontSize:12,color:N.textMid}}>
+                      <input type="radio" checked={form.vat_type===t} onChange={() => setF("vat_type")(t)} /> {t.charAt(0).toUpperCase()+t.slice(1)}
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div style={{marginTop:12}}>
+                <label style={iL}>Discount (%)</label>
+                <input style={{...iS,width:120}} type="number" min="0" max="100" value={form.discount||0} onChange={e => setF("discount")(e.target.value)} />
+              </div>
+            </div>
+            <div style={{background:N.navy800,borderRadius:8,padding:"12px 14px",border:`1px solid ${N.border}`}}>
+              {[["Subtotal",fmtTzs(sub)],
+                ...(disc>0?[[`Discount (${form.discount}%)`,`-${fmtTzs(disc)}`]]:[]),
+                ...(form.vat_enabled?[[`VAT 18% (${form.vat_type})`,fmtTzs(vat)]]:[])
+              ].map(([lbl,val]) => (
+                <div key={lbl} style={{display:"flex",justifyContent:"space-between",fontSize:12,color:N.textMid,padding:"3px 0",borderBottom:`1px solid ${N.border}`}}>
+                  <span>{lbl}</span><span>{val}</span>
+                </div>
+              ))}
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:15,fontWeight:800,color:N.text,padding:"8px 0 0"}}>
+                <span>Grand Total</span><span style={{color:N.sky}}>{fmtTzs(grand)}</span>
+              </div>
+            </div>
+          </div>
+          <div>
+            <label style={iL}>Notes / Payment Instructions</label>
+            <textarea style={{...iS,height:70,resize:"vertical"}} value={form.notes||""} onChange={e => setF("notes")(e.target.value)} placeholder="Payment terms, bank details, etc." />
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"flex-end",gap:8,padding:"12px 20px",borderTop:`1px solid ${N.border}`,flexShrink:0}}>
+          <Sb bg="transparent" col={N.textMid} border={N.border} label="Cancel" onClick={onClose}>Cancel</Sb>
+          <Sb bg={N.sky} col="#fff" border="transparent" label="Save invoice" disabled={saving||!form.invoice_no?.trim()} onClick={handleSave}>
+            {saving ? <><Icon n="loader" /> Saving…</> : <><Icon n="save" /> {isEdit?"Update":"Create"} Invoice</>}
+          </Sb>
+        </div>
+      </div>
+      {previewOpen && <InvoicePreviewModal inv={form} payments={[]} onClose={() => setPreviewOpen(false)} />}
+    </div>
+  );
+}
+
 // Finance tab: account balances, events P&L, all-transactions ledger, P&L by category
-function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, onSelect, onExport }) {
+function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, onSelect, onExport, invData }) {
   const canDelete = useCanDelete();
   const [q,          setQ]          = useState("");
   const [range,      setRange]      = useState({ from:"", to:"" });
@@ -2368,6 +2738,8 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
   const [ledgerKind, setLedgerKind] = useState("all");
   const [ledgerAcc,  setLedgerAcc]  = useState("all");
   const [quickAdd,   setQuickAdd]   = useState(null);       // null | "income" | "expense"
+  const [editingInv,    setEditingInv]    = useState(null); // null | invoice obj (no id = new, id = edit)
+  const [previewingInv, setPreviewingInv] = useState(null); // null | saved invoice obj
 
   if (fin.error) return (
     <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
@@ -2452,7 +2824,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
 
       {/* View tabs */}
       <div style={{display:"flex",gap:6,marginBottom:16}}>
-        {[["events","Events"],["ledger","Ledger"],["pl","P & L"]].map(([v, l]) => (
+        {[["events","Events"],["ledger","Ledger"],["pl","P & L"],["invoices","Invoices"]].map(([v, l]) => (
           <button key={v} style={segStyle(view === v)} onClick={() => setView(v)}>{l}</button>
         ))}
       </div>
@@ -2664,6 +3036,65 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
         </div>
       )}
 
+      {/* ── INVOICES view ── */}
+      {view === "invoices" && invData && (
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div style={{fontSize:12,color:N.textDim}}>{invData.invoices.length} invoice{invData.invoices.length !== 1 ? "s" : ""}</div>
+            <Sb bg={N.sky} col="#fff" border="transparent" label="New invoice" onClick={() => setEditingInv(BLANK_INVOICE(invData.invoices))}><Icon n="plus" /> New Invoice</Sb>
+          </div>
+          {invData.error && (
+            <EmptyState icon="file" tone="warn" title="Invoices table not set up"
+              text={<>Run <code style={{fontFamily:"JetBrains Mono, monospace",color:N.sky}}>invoices.sql</code> in the Supabase SQL editor, then press Retry.<br /><span style={{fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{invData.error}</span></>}
+              action={<button className="nk-btn nk-btn-ghost" onClick={invData.loadAll}><Icon n="refresh" /> Retry</button>} />
+          )}
+          {!invData.error && !invData.invoices.length && !invData.loading && (
+            <EmptyState icon="file" compact title="No invoices yet" text="Create your first invoice to get started." />
+          )}
+          {invData.invoices.length > 0 && (
+            <table className="nk-table m-hide-3 m-hide-4">
+              <thead>
+                <tr>
+                  <th>Invoice No</th>
+                  <th>Client</th>
+                  <th>Event</th>
+                  <th className="m-hide">Issue Date</th>
+                  <th className="m-hide">Due Date</th>
+                  <th style={{textAlign:"right"}}>Amount</th>
+                  <th>Status</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {invData.invoices.map(inv => {
+                  const st = INV_ST[inv.status] || INV_ST.draft;
+                  const ev2 = evMap[inv.event_id];
+                  return (
+                    <tr key={inv.id}>
+                      <td style={{fontWeight:700,color:N.text}}>{inv.invoice_no}</td>
+                      <td>{inv.client_name || <span style={{color:N.textDim}}>—</span>}</td>
+                      <td>{ev2 ? (ev2.username || ev2.id) : <span style={{color:N.textDim}}>—</span>}</td>
+                      <td className="m-hide" style={{color:N.textDim}}>{inv.issue_date}</td>
+                      <td className="m-hide" style={{color:N.textDim}}>{inv.due_date}</td>
+                      <td style={{textAlign:"right",fontWeight:600,color:N.text,fontVariantNumeric:"tabular-nums"}}>{fmtTzs(inv.grand)}</td>
+                      <td><span style={{padding:"2px 8px",borderRadius:10,fontSize:11,fontWeight:700,letterSpacing:1,textTransform:"uppercase",background:st.bg,color:st.col}}>{st.label}</span></td>
+                      <td style={{whiteSpace:"nowrap",textAlign:"right"}}>
+                        <div className="nk-row-actions" style={{justifyContent:"flex-end"}}>
+                          <Sb bg="transparent" col={N.sky} border={N.border} label={`Preview ${inv.invoice_no}`} onClick={() => setPreviewingInv(inv)}><Icon n="eye" /> Preview</Sb>
+                          <Sb bg="transparent" col={N.textMid} border={N.border} label={`Edit ${inv.invoice_no}`} onClick={() => setEditingInv({ ...inv, items:(inv.items||[]).map(i => ({...i})) })}><Icon n="edit" /> Edit</Sb>
+                          <Sb bg="transparent" col={N.amber} border={N.border} label={`Clone ${inv.invoice_no}`} onClick={() => invData.cloneInvoice(inv)} disabled={invData.busy}><Icon n="copy" /> Clone</Sb>
+                          {canDelete && <Sb bg="transparent" col={N.red} border={alpha(N.red,"44")} label={`Delete ${inv.invoice_no}`} onClick={() => invData.deleteInvoice(inv)} disabled={invData.busy}><Icon n="trash" /></Sb>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
       {/* Modals */}
       {adding && ev && (
         <TxnModal kind={adding} event={ev} accounts={fin.accounts} saving={fin.busy}
@@ -2684,6 +3115,16 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
           onSave={async (form, chosenEv) => { if (chosenEv && await fin.addTxn(form, chosenEv)) setQuickAdd(null); }} />
       )}
       {accountsOpen && <AccountsModal fin={fin} onClose={() => setAccountsOpen(false)} />}
+      {editingInv && (
+        <InvoiceFormModal initial={editingInv} events={events} customers={customers} invData={invData}
+          onClose={() => setEditingInv(null)} />
+      )}
+      {previewingInv && invData && (
+        <InvoicePreviewModal inv={previewingInv}
+          payments={fin.txns.filter(t => previewingInv.event_id && t.event_id === previewingInv.event_id && t.kind === "income")}
+          onClose={() => setPreviewingInv(null)}
+          onEdit={() => { setPreviewingInv(null); setEditingInv({ ...previewingInv, items:(previewingInv.items||[]).map(i => ({...i})) }); }} />
+      )}
     </div>
   );
 }
@@ -7969,8 +8410,10 @@ export default function App() {
   const editEvent    = (ev) => setModalEvent({ ...ev, start_datetime: ev.start_datetime ? ev.start_datetime.slice(0,16) : "", end_datetime: ev.end_datetime ? ev.end_datetime.slice(0,16) : "" });
   /* ── Finance: accounts + per-event income / expenses ── */
   const fin = useFinance({ enabled: !!userId, showToast, askDialog, logHistory });
+  const invData = useInvoices({ enabled: !!userId, userId, showToast, askDialog });
   const [financeSel, setFinanceSel] = useState(null);   // event open in the Finance tab
   useEffect(() => { if (tab === "finance" && !fin.loaded) fin.loadAll(); }, [tab, userId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (tab === "finance" && !invData.loaded) invData.loadAll(); }, [tab, userId]); // eslint-disable-line react-hooks/exhaustive-deps
   // Downloads the given transactions (the Finance tab's current date range) as Excel
   const exportFinance = async (txns) => {
     const XLSX = await loadXlsx();
@@ -10599,7 +11042,7 @@ export default function App() {
 
             {/* ─── FINANCE ─── */}
             {tab === "finance" && (
-              <FinanceTab fin={fin} events={savedEvents} eventsLoaded={eventsLoaded} customers={crm.customers} selectedId={financeSel} onSelect={setFinanceSel} onExport={exportFinance} />
+              <FinanceTab fin={fin} events={savedEvents} eventsLoaded={eventsLoaded} customers={crm.customers} selectedId={financeSel} onSelect={setFinanceSel} onExport={exportFinance} invData={invData} />
             )}
 
             {/* ─── DESIGN ─── */}
