@@ -789,7 +789,7 @@ const CSS = `
   .nk-phone-val { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: ${N.textMid}; display: flex; align-items: center; gap: 6px; }
 
   /* ── Modal ── */
-  .nk-overlay {
+  .nk-overlay, .nk-modal-wrap {
     position: fixed; inset: 0; background: rgba(0,0,0,0.75);
     z-index: 500; display: flex; align-items: center; justify-content: center;
     padding: 24px;
