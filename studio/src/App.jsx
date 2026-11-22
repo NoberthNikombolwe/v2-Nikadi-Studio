@@ -90,7 +90,9 @@ const lazyLoad = (factory, key) => factory().catch(err => {
   throw err;
 });
 
-const loadXlsx  = () => lazyLoad(() => import("xlsx"), "xlsx");
+const loadXlsx       = () => lazyLoad(() => import("xlsx"),        "xlsx");
+const loadHtml2Canvas = () => lazyLoad(() => import("html2canvas"), "html2canvas").then(m => m.default ?? m);
+const loadJsPdf       = () => lazyLoad(() => import("jspdf"),       "jspdf").then(m => m.jsPDF ?? m.default?.jsPDF ?? m.default);
 
 // Compresses an image (dataUrl string or File/Blob) to a JPEG Blob.
 // Uses canvas.toBlob() for accurate size; binary-searches for the highest JPEG quality
@@ -2461,6 +2463,7 @@ function InvoicePreviewModal({ inv, payments = [], onClose, onEdit }) {
   const { sub, disc, net: _n, vat, grand } = calcInvoice(inv);
   const totalPaid = payments.reduce((s, t) => s + (Number(t.amount)||0), 0);
   const balance   = Math.max(0, grand - totalPaid);
+  const [pdfBusy, setPdfBusy] = React.useState(false);
   const TotRow = ({ label, val, bold }) => (
     <div style={{display:"flex",justifyContent:"space-between",padding:bold?"9px 0 5px":"5px 0",fontSize:bold?14:12,
       color:bold?"#0d2240":"#64748b",borderBottom:bold?"none":"1px solid #f1f5f9",
@@ -2477,6 +2480,24 @@ function InvoicePreviewModal({ inv, payments = [], onClose, onEdit }) {
     w.document.close(); w.focus();
     setTimeout(() => { try { w.print(); } catch(e) {} }, 700);
   };
+  const doDownloadPdf = async () => {
+    const prt = document.getElementById("inv-print-area");
+    if (!prt || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const [html2canvas, JsPDF] = await Promise.all([loadHtml2Canvas(), loadJsPdf()]);
+      const canvas = await html2canvas(prt, { scale: 2, useCORS: true, logging: false, backgroundColor: "#ffffff" });
+      const imgW = 210; // A4 width mm
+      const imgH = Math.round(canvas.height * imgW / canvas.width);
+      const pdf = new JsPDF({ unit: "mm", format: [imgW, imgH], orientation: "portrait" });
+      pdf.addImage(canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, imgW, imgH);
+      pdf.save(`${inv.invoice_no}.pdf`);
+    } catch (e) {
+      alert(`PDF export failed: ${e.message}`);
+    } finally {
+      setPdfBusy(false);
+    }
+  };
   return (
     <div className="nk-modal-wrap" style={{zIndex:600}}>
       <div className="nk-modal" style={{maxWidth:800,maxHeight:"92vh",overflow:"hidden",display:"flex",flexDirection:"column",padding:0}}>
@@ -2487,6 +2508,9 @@ function InvoicePreviewModal({ inv, payments = [], onClose, onEdit }) {
           </div>
           <div style={{display:"flex",gap:8}}>
             <Sb bg={N.navy600} col={N.sky} border={N.border} label="Print invoice" onClick={doPrint}><Icon n="print" /> Print</Sb>
+            <Sb bg={N.navy600} col={N.green} border={N.border} label="Download invoice as PDF" onClick={doDownloadPdf} disabled={pdfBusy}>
+              {pdfBusy ? <Icon n="loader" /> : <Icon n="download" />} PDF
+            </Sb>
             {onEdit && <Sb bg={N.navy700} col={N.textMid} border={N.border} label="Edit invoice" onClick={onEdit}><Icon n="edit" /> Edit</Sb>}
             <Sb bg="transparent" col={N.textDim} border="transparent" label="Close preview" onClick={onClose}><Icon n="x" /></Sb>
           </div>
