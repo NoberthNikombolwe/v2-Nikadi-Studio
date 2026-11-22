@@ -5948,7 +5948,7 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
 const EP_DEFAULTS = {
   primary_color:"#00C2FF", accent_color:"#7C3AED", bg_color:"#0A0F1E", text_color:"#FFFFFF",
   web_event_name:"", hero_image_url:"", tagline:"", hosts:[], schedule:[], dress_code_text:"", dress_code_image_url:"",
-  gallery:[], sponsors:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_lat:"", venue_lng:"", venue_description:"", show_countdown:true,
+  gallery:[], sponsors:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_lat:"", venue_lng:"", venue_description:"", show_countdown:true, show_passcode:true,
 };
 function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   const [loading, setLoading] = useState(true);
@@ -6156,8 +6156,9 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                     <input className="nk-input" placeholder="e.g. Join us for a celebration" value={form.tagline||""} onChange={set("tagline")} />
                   </div>
                   {imgUploadRow("Hero image (banner)", "hero_image_url", uploading)}
-                  <div style={{marginTop:16,padding:"10px 14px",background:alpha(N.navy700,"cc"),border:`1px solid ${N.border}`,borderRadius:10}}>
+                  <div style={{marginTop:16,padding:"10px 14px",background:alpha(N.navy700,"cc"),border:`1px solid ${N.border}`,borderRadius:10,display:"flex",flexDirection:"column",gap:10}}>
                     <Toggle checked={!!form.show_countdown} onChange={setB("show_countdown")} label="Show countdown timer in hero" />
+                    <Toggle checked={form.show_passcode !== false} onChange={setB("show_passcode")} label="Show passcode and QR code" />
                   </div>
                 </div>
               )}

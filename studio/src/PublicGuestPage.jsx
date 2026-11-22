@@ -758,7 +758,7 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
               </div>
             )}
             <div style={{ padding:"18px 20px" }}>
-              {(data.card_type || data.card_code) && (
+              {(data.card_type || (data.card_code && ps.show_passcode !== false)) && (
                 <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:16 }}>
                   {data.card_type && (
                     <span style={{ fontSize:12, fontWeight:700, padding:"3px 10px", borderRadius:6,
@@ -766,7 +766,7 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
                       {data.card_type}
                     </span>
                   )}
-                  {data.card_code && (
+                  {data.card_code && ps.show_passcode !== false && (
                     <span style={{ fontFamily:"'JetBrains Mono', monospace", fontSize:12, fontWeight:700,
                       padding:"3px 10px", borderRadius:6, letterSpacing:2,
                       background:`${pri}12`, border:`1px solid ${pri}30`, color:pri }}>
@@ -935,35 +935,34 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
             </div>
           </div>
 
-          {/* Passcode */}
-          {data.card_code && (
-            <div style={card}>
-              <div style={{ padding:"18px 20px" }}>
-                <div style={sectionLabel}>{t.showAtEntrance}</div>
-                <div style={{ marginTop:8, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
-                  <div style={{ fontSize:13, color:"#64748b" }}>{t.passcode}</div>
-                  <div style={{ fontFamily:"'JetBrains Mono', monospace", fontSize:18, fontWeight:900, letterSpacing:4,
-                    padding:"10px 20px", borderRadius:10, border:`2px solid ${pri}`, color:pri, background:`${pri}0a` }}>
-                    {data.card_code}
+          {/* Passcode + QR code — hidden when organiser turns off show_passcode */}
+          {data.card_code && ps.show_passcode !== false && (
+            <>
+              <div style={card}>
+                <div style={{ padding:"18px 20px" }}>
+                  <div style={sectionLabel}>{t.showAtEntrance}</div>
+                  <div style={{ marginTop:8, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
+                    <div style={{ fontSize:13, color:"#64748b" }}>{t.passcode}</div>
+                    <div style={{ fontFamily:"'JetBrains Mono', monospace", fontSize:18, fontWeight:900, letterSpacing:4,
+                      padding:"10px 20px", borderRadius:10, border:`2px solid ${pri}`, color:pri, background:`${pri}0a` }}>
+                      {data.card_code}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* QR code */}
-          {data.card_code && (
-            <div style={card}>
-              <div style={{ padding:"22px 20px", textAlign:"center" }}>
-                <div style={{ fontSize:11, fontWeight:700, letterSpacing:1.5, textTransform:"uppercase",
-                  color:"#94a3b8", marginBottom:16 }}>{t.entryQR}</div>
-                <div style={{ display:"inline-flex", padding:18, background:"#fff", borderRadius:14,
-                  border:"1px solid #e2e8f0", marginBottom:14, boxShadow:"0 2px 12px rgba(0,0,0,0.06)" }}>
-                  <QRCodeDisplay text={data.card_code} size={180} label={t.generatingQR} />
+              <div style={card}>
+                <div style={{ padding:"22px 20px", textAlign:"center" }}>
+                  <div style={{ fontSize:11, fontWeight:700, letterSpacing:1.5, textTransform:"uppercase",
+                    color:"#94a3b8", marginBottom:16 }}>{t.entryQR}</div>
+                  <div style={{ display:"inline-flex", padding:18, background:"#fff", borderRadius:14,
+                    border:"1px solid #e2e8f0", marginBottom:14, boxShadow:"0 2px 12px rgba(0,0,0,0.06)" }}>
+                    <QRCodeDisplay text={data.card_code} size={180} label={t.generatingQR} />
+                  </div>
+                  <div style={{ fontSize:12, color:"#64748b", lineHeight:1.6 }}>{t.scanInstruction}</div>
                 </div>
-                <div style={{ fontSize:12, color:"#64748b", lineHeight:1.6 }}>{t.scanInstruction}</div>
               </div>
-            </div>
+            </>
           )}
 
           {/* RSVP */}
