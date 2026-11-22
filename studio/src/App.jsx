@@ -2125,12 +2125,12 @@ function useFinance({ enabled, showToast, askDialog, logHistory }) {
   // Records an income / expense for an event; resolves to the saved row or null
   const addTxn = async (form, ev) => {
     setBusy(true);
-    const { data, error: e } = await supabase.from("event_transactions").insert([txnToRow(form, ev.id)]).select().single();
+    const { data, error: e } = await supabase.from("event_transactions").insert([txnToRow(form, ev?.id ?? null)]).select().single();
     setBusy(false);
     if (e) return fail("Could not save transaction", e);
     setTxns(ts => [data, ...ts]);
     const acc = accounts.find(a => a.id === data.account_id)?.name;
-    logHistory({ channel:"finance", action:data.kind, name:data.party, title:formatTsh(data.amount),
+    if (ev) logHistory({ channel:"finance", action:data.kind, name:data.party, title:formatTsh(data.amount),
       detail:[TXN_CATEGORIES[data.kind]?.[data.category], acc && `via ${acc}`, data.reference && `ref ${data.reference}`].filter(Boolean).join(" · ") }, ev.id);
     showToast(`${TXN_KINDS[data.kind].label} of ${formatTsh(data.amount)} recorded`, "success");
     return data;
@@ -2299,7 +2299,7 @@ function TxnModal({ kind: initialKind, initial, event, eventsForPicker, accounts
   const setKind = (k) => setForm(f => ({ ...f, kind:k, category: k === "income" ? "deposit" : "printing" }));
   const save = () => {
     const errs = validateTransaction(form);
-    if (eventsForPicker && !event && !form.event_id) errs.event_id = "Choose an event";
+    // event is optional — null means a general (non-event) transaction
     setErrors(errs);
     if (!Object.keys(errs).length) {
       const chosenEvent = event || eventsForPicker?.find(e => e.id === form.event_id) || null;
@@ -2336,9 +2336,9 @@ function TxnModal({ kind: initialKind, initial, event, eventsForPicker, accounts
           )}
           <div className="nk-form-grid">
             {eventsForPicker && !event && (
-              <Field label="Event *" error={errors.event_id} span>
+              <Field label="Event" error={errors.event_id} span>
                 <select className="nk-select" value={form.event_id} onChange={set("event_id")}>
-                  <option value="">— Select event —</option>
+                  <option value="">— None (general) —</option>
                   {eventsForPicker.map(e => <option key={e.id} value={e.id}>{e.username}{e.event_type ? ` · ${e.event_type}` : ""}</option>)}
                 </select>
               </Field>
@@ -2763,8 +2763,11 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
     .filter(ev => !needle || [ev.username, ev.event_type, ev.venue_name, custName[ev.customer_id]].filter(Boolean).join(" ").toLowerCase().includes(needle))
     .map(ev => ({ ev, s: summariseTransactions(byEvent[ev.id] || [], ev.package_price) }))
     .sort((a, b) => (b.s.count > 0) - (a.s.count > 0) || b.s.income - a.s.income);
-  const withTxns   = rows.filter(r => r.s.count).length;
-  const ev         = events.find(e => e.id === selectedId) || null;
+  const withTxns    = rows.filter(r => r.s.count).length;
+  const generalTxns = inRange.filter(t => !t.event_id);
+  const generalSum  = summariseTransactions(generalTxns);
+  const ev          = events.find(e => e.id === selectedId) || null;
+  const showGeneral = selectedId === "__general__";
   const evTxns     = ev ? sortTransactions(filterTransactions(byEvent[ev.id] || [], { kind: txFilter })) : [];
   const evSum      = ev ? summariseTransactions(byEvent[ev.id] || [], ev.package_price) : null;
   const evCats     = ev ? summariseByCategory(byEvent[ev.id] || []) : null;
@@ -2852,6 +2855,18 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                       <td>{s.count ? <MarginPill pct={s.marginPct} /> : <span style={{fontSize:11,color:N.textDim}}>No entries</span>}</td>
                     </tr>
                   ))}
+                  {generalSum.count > 0 && (
+                    <tr onClick={() => onSelect("__general__")} style={{cursor:"pointer"}} className={showGeneral ? "row-active" : ""}>
+                      <td>
+                        <div style={{fontWeight:700,color:N.text}}>General</div>
+                        <div style={{fontSize:11,color:N.textDim}}>Not linked to any event · {generalSum.count} txn{generalSum.count === 1 ? "" : "s"}</div>
+                      </td>
+                      <td className="num" style={{color:generalSum.income ? N.green : N.textDim}}>{generalSum.income ? formatTsh(generalSum.income) : "—"}</td>
+                      <td className="num" style={{color:generalSum.expense ? N.red : N.textDim}}>{generalSum.expense ? formatTsh(generalSum.expense) : "—"}</td>
+                      <td className="num" style={{fontWeight:700,color:generalSum.profit < 0 ? N.red : N.text}}>{formatTsh(generalSum.profit)}</td>
+                      <td><MarginPill pct={generalSum.marginPct} /></td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
               {!rows.length && (fin.loading || !eventsLoaded ? <EmptyState loading title="Loading finance…" />
@@ -2861,6 +2876,57 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
             </div>
           </div>
 
+          {showGeneral && (
+            <DetailModal label="General transactions" onClose={() => onSelect(null)} width={680}>
+              <div style={{minWidth:0,marginBottom:12}}>
+                <div style={{fontSize:16,fontWeight:800,color:N.text}}>General / Non-event</div>
+                <div style={{fontSize:12,color:N.textDim}}>Expenses and income not linked to any specific event</div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+                <MoneyTile label="Income"   value={formatTsh(generalSum.income)}  tone="good" />
+                <MoneyTile label="Expenses" value={formatTsh(generalSum.expense)} tone="bad" />
+                <MoneyTile label="Net"      value={formatTsh(generalSum.profit)}  tone={generalSum.profit < 0 ? "bad" : "info"} />
+                <MoneyTile label="Transactions" value={generalSum.count} tone="info" />
+              </div>
+              <div style={{display:"flex",gap:8,marginBottom:12}}>
+                <button className="nk-btn nk-btn-success" style={{flex:1}} onClick={() => setAdding("income")}>+ Income</button>
+                <button className="nk-btn nk-btn-ghost" style={{flex:1,color:N.red,borderColor:alpha(N.red,"66")}} onClick={() => setAdding("expense")}>+ Expense</button>
+              </div>
+              <div style={{display:"flex",gap:6,marginBottom:8}}>
+                {[["all","All"],["income","Income"],["expense","Expenses"]].map(([k, l]) => <button key={k} style={segStyle(txFilter === k)} onClick={() => setTxFilter(k)}>{l}</button>)}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {sortTransactions(filterTransactions(generalTxns, { kind: txFilter })).map(t => {
+                  const inc = t.kind === "income";
+                  const acc = accMap[t.account_id];
+                  return (
+                    <div key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",padding:10,borderRadius:10,background:N.navy700,border:`1px solid ${N.border}`}}>
+                      <div style={{width:30,height:30,borderRadius:8,flexShrink:0,display:"grid",placeItems:"center",fontWeight:800,
+                        background:inc ? N.greenBg : N.redBg,color:inc ? N.green : N.red}}>{inc ? <Icon n="arrowDown" /> : <Icon n="arrowUp" />}</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                          <span style={{fontWeight:700,color:N.text,overflow:"hidden",textOverflow:"ellipsis"}}>{t.party || "—"}</span>
+                          <span style={{fontWeight:800,color:inc ? N.green : N.red,whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>{TXN_KINDS[t.kind].sign}{formatTsh(t.amount)}</span>
+                        </div>
+                        <div style={{fontSize:11,color:N.textDim,marginTop:2}}>
+                          {[fmtDay(t.txn_date), TXN_CATEGORIES[t.kind]?.[t.category] || t.category, acc && `${inc ? "into" : "from"} ${acc.name}`, t.reference && `ref ${t.reference}`].filter(Boolean).join(" · ")}
+                        </div>
+                        {t.note && <div style={{fontSize:12,color:N.textMid,marginTop:4}}>{t.note}</div>}
+                        {t.created_by && <div style={{fontSize:10,color:N.textDim,marginTop:2}}>by {t.created_by}</div>}
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                        <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label={`Edit ${t.kind}`} title="Edit" onClick={() => setEditingTxn(t)}><Icon n="edit" /></button>
+                        {canDelete && <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12,color:N.red}} aria-label={`Remove ${t.kind}`} title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!generalSum.count && (
+                  <EmptyState icon="folder" compact title="No general transactions" text="Use + Income or + Expense above to add one." />
+                )}
+              </div>
+            </DetailModal>
+          )}
           {ev && (
             <DetailModal label={`${ev.username} finance`} onClose={() => onSelect(null)} width={680}>
               <div style={{minWidth:0,marginBottom:12}}>
@@ -3097,11 +3163,11 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
       )}
 
       {/* Modals */}
-      {adding && ev && (
-        <TxnModal kind={adding} event={ev} accounts={fin.accounts} saving={fin.busy}
+      {adding && (ev || showGeneral) && (
+        <TxnModal kind={adding} event={ev || null} accounts={fin.accounts} saving={fin.busy}
           onManageAccounts={() => { setAdding(null); setAccountsOpen(true); }}
           onClose={() => setAdding(null)}
-          onSave={async (form) => { if (await fin.addTxn(form, ev)) setAdding(null); }} />
+          onSave={async (form) => { if (await fin.addTxn(form, ev || null)) setAdding(null); }} />
       )}
       {editingTxn && (
         <TxnModal key={editingTxn.id} initial={editingTxn} event={evMap[editingTxn.event_id] || ev} accounts={fin.accounts} saving={fin.busy}
@@ -3113,7 +3179,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
         <TxnModal kind={quickAdd} eventsForPicker={events} accounts={fin.accounts} saving={fin.busy}
           onManageAccounts={() => { setQuickAdd(null); setAccountsOpen(true); }}
           onClose={() => setQuickAdd(null)}
-          onSave={async (form, chosenEv) => { if (chosenEv && await fin.addTxn(form, chosenEv)) setQuickAdd(null); }} />
+          onSave={async (form, chosenEv) => { if (await fin.addTxn(form, chosenEv)) setQuickAdd(null); }} />
       )}
       {accountsOpen && <AccountsModal fin={fin} onClose={() => setAccountsOpen(false)} />}
       {editingInv && (
@@ -9921,12 +9987,15 @@ export default function App() {
     warnMissingFonts();
     const rec = records[idx];
     try {
-      const url = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
-      const a = document.createElement("a"); a.download=`${(rec.name||`Record_${idx}`).replace(/\s/g,"_")}_Nikadi.png`; a.href=url; a.click();
+      const dataUrl = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
+      const blob = await compressImageToBlob(dataUrl, { maxKb: 2000, maxWidth: 2000, quality: 0.92 });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.download=`${(rec.name||`Record_${idx}`).replace(/\s/g,"_")}_Nikadi.jpg`; a.href=href; a.click();
+      URL.revokeObjectURL(href);
     } catch (err) { showToast(`Could not render card for ${rec.name}: ${err.message}`, "warn"); }
   };
 
-  // Renders every record's card and zips them into a single "nikadi_cards.zip" download
+  // Renders every record's card, compresses each to JPEG under 2 MB, and zips them
   const downloadAll = async () => {
     if (!records.length) { showToast("No records","warn"); return; }
     showToast(`Zipping ${records.length} cards…`,"info");
@@ -9937,7 +10006,9 @@ export default function App() {
       for (let i=0;i<records.length;i++) {
         const rec = records[i];
         const dataUrl = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
-        zip.file(`${(rec.name||`Record_${i}`).replace(/\s/g,"_")}_Nikadi.png`, dataUrl.split(",")[1], { base64:true });
+        const blob = await compressImageToBlob(dataUrl, { maxKb: 2000, maxWidth: 2000, quality: 0.92 });
+        const buf = await blob.arrayBuffer();
+        zip.file(`${(rec.name||`Record_${i}`).replace(/\s/g,"_")}_Nikadi.jpg`, buf);
       }
       const blob = await zip.generateAsync({ type:"blob" });
       const a = document.createElement("a"); a.download="nikadi_cards.zip"; a.href=URL.createObjectURL(blob); a.click();
