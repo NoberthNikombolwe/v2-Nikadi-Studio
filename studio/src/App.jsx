@@ -1218,6 +1218,113 @@ async function exportCard(bgImage, bgSize, elements, record, footer = null) {
   return cv.toDataURL("image/png");
 }
 
+/* ── Pagination ───────────────────────────────────────────────────────── */
+// Pure slice helper — no hooks, safe to call anywhere.
+const paginate = (items, page, pageSize) =>
+  items.slice(page * pageSize, (page + 1) * pageSize);
+
+// Pager bar: prev/next buttons + rows-per-page selector. Renders null when list is ≤ 10 rows
+// and the current page size is also 10 (i.e. there is no choice to show).
+function Pager({ page, setPage, pageSize, setPageSize, total }) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safe       = Math.min(page, totalPages - 1);
+  if (total <= 10 && pageSize === 10) return null;
+  return (
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,
+      marginTop:10,fontSize:12,color:N.textDim}}>
+      <div style={{display:"flex",alignItems:"center",gap:4}}>
+        <button className="nk-btn nk-btn-ghost" style={{padding:"3px 8px",fontSize:12}} disabled={safe === 0}
+          onClick={() => setPage(0)} aria-label="First page"><Icon n="chevron-left" /><Icon n="chevron-left" /></button>
+        <button className="nk-btn nk-btn-ghost" style={{padding:"3px 8px",fontSize:12}} disabled={safe === 0}
+          onClick={() => setPage(p => Math.max(0, p - 1))} aria-label="Previous page"><Icon n="chevron-left" /></button>
+        <span style={{padding:"2px 10px",minWidth:80,textAlign:"center"}}>
+          {total === 0 ? "No records" : `${safe * pageSize + 1}–${Math.min((safe + 1) * pageSize, total)} of ${total}`}
+        </span>
+        <button className="nk-btn nk-btn-ghost" style={{padding:"3px 8px",fontSize:12}} disabled={safe >= totalPages - 1}
+          onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} aria-label="Next page"><Icon n="chevron-right" /></button>
+        <button className="nk-btn nk-btn-ghost" style={{padding:"3px 8px",fontSize:12}} disabled={safe >= totalPages - 1}
+          onClick={() => setPage(totalPages - 1)} aria-label="Last page"><Icon n="chevron-right" /><Icon n="chevron-right" /></button>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <span>Rows:</span>
+        {[10, 20, 50, 100].map(n => (
+          <button key={n} onClick={() => { setPageSize(n); setPage(0); }}
+            style={{padding:"2px 7px",borderRadius:5,border:`1px solid ${pageSize === n ? N.sky : N.border}`,
+              background:pageSize === n ? alpha(N.sky,"18") : "transparent",color:pageSize === n ? N.sky : N.textDim,
+              fontSize:12,cursor:"pointer",lineHeight:"1.5"}}>
+            {n}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Searchable select ────────────────────────────────────────────────── */
+// Drop-in replacement for a <select> when the option list is long enough to need filtering.
+// options: [{ value, label, sub? }]  value/onChange: same contract as <select>
+function SearchSelect({ options = [], value, onChange, placeholder = "— Select —", disabled = false }) {
+  const [open, setOpen]   = React.useState(false);
+  const [q, setQ]         = React.useState("");
+  const ref               = React.useRef();
+  const inputRef          = React.useRef();
+  const selected          = options.find(o => o.value === value);
+  const filtered          = q.trim()
+    ? options.filter(o => (o.label + " " + (o.sub || "")).toLowerCase().includes(q.trim().toLowerCase()))
+    : options;
+  // Close on outside click
+  React.useEffect(() => {
+    if (!open) return;
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQ(""); } };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  // Focus search input when opening
+  React.useEffect(() => { if (open && inputRef.current) inputRef.current.focus(); }, [open]);
+  const pick = (val) => { onChange({ target: { value: val } }); setOpen(false); setQ(""); };
+  return (
+    <div ref={ref} style={{position:"relative",width:"100%"}}>
+      <button type="button" disabled={disabled} onClick={() => !disabled && setOpen(o => !o)}
+        className="nk-select" style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+          gap:8,cursor:disabled?"not-allowed":"pointer",textAlign:"left",width:"100%",fontFamily:"inherit"}}>
+        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,
+          color:selected ? undefined : N.textDim}}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <Icon n="chevronDown" style={{flexShrink:0,opacity:0.5,fontSize:"0.8em"}} />
+      </button>
+      {open && (
+        <div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,zIndex:400,
+          background:N.navy700,border:`1px solid ${N.border}`,borderRadius:8,
+          boxShadow:"0 8px 24px rgba(0,0,0,0.3)",overflow:"hidden"}}>
+          <div style={{padding:"6px 8px",borderBottom:`1px solid ${N.border}`}}>
+            <input ref={inputRef} className="nk-input" style={{margin:0,fontSize:12}}
+              placeholder="Search…" value={q} onChange={e => setQ(e.target.value)}
+              onKeyDown={e => { if (e.key === "Escape") { setOpen(false); setQ(""); } }} />
+          </div>
+          <div style={{maxHeight:220,overflowY:"auto"}}>
+            {filtered.length === 0 && (
+              <div style={{padding:"10px 12px",fontSize:12,color:N.textDim}}>No matches</div>
+            )}
+            {filtered.map(o => (
+              <button key={o.value} type="button" onClick={() => pick(o.value)}
+                style={{display:"block",width:"100%",textAlign:"left",padding:"8px 12px",background:"transparent",
+                  border:"none",cursor:"pointer",color:o.value === value ? N.sky : N.text,
+                  fontFamily:"inherit",fontSize:13,
+                  borderLeft:`2px solid ${o.value === value ? N.sky : "transparent"}`}}
+                onMouseOver={e => e.currentTarget.style.background = alpha(N.sky,"10")}
+                onMouseOut={e => e.currentTarget.style.background = "transparent"}>
+                <div style={{fontWeight:o.value === value ? 700 : undefined}}>{o.label}</div>
+                {o.sub && <div style={{fontSize:11,color:N.textDim,marginTop:1}}>{o.sub}</div>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Small components ─────────────────────────────────────────────────── */
 // Colored status pill for a record's WhatsApp status. "Sent" = on its way (waiting for the
 // delivery report); the report then says Delivered / Read, or Not on WhatsApp. `reason` (the
@@ -2339,10 +2446,13 @@ function TxnModal({ kind: initialKind, initial, event, eventsForPicker, accounts
           <div className="nk-form-grid">
             {eventsForPicker && !event && (
               <Field label="Event" error={errors.event_id} span>
-                <select className="nk-select" value={form.event_id} onChange={set("event_id")}>
-                  <option value="">— None (general) —</option>
-                  {eventsForPicker.map(e => <option key={e.id} value={e.id}>{e.username}{e.event_type ? ` · ${e.event_type}` : ""}</option>)}
-                </select>
+                <SearchSelect
+                  value={form.event_id}
+                  onChange={set("event_id")}
+                  placeholder="— None (general) —"
+                  options={[{ value:"", label:"— None (general) —" },
+                    ...eventsForPicker.map(e => ({ value:e.id, label:e.username || e.id, sub:e.event_type || undefined }))]}
+                />
               </Field>
             )}
             <Field label="Amount (TSh) *" error={errors.amount}>
@@ -2659,10 +2769,13 @@ function InvoiceFormModal({ initial, events = [], customers = [], invData, onClo
           </div>
           <div>
             <label style={iL}>Link to Event <span style={{fontWeight:400,color:N.textDim}}>(optional — auto-fills client, links payments)</span></label>
-            <select style={{...iS,cursor:"pointer"}} value={form.event_id||""} onChange={e => handleEventChange(e.target.value)}>
-              <option value="">— None —</option>
-              {events.map(ev => <option key={ev.id} value={ev.id}>{ev.username || ev.id}</option>)}
-            </select>
+            <SearchSelect
+              value={form.event_id||""}
+              onChange={e => handleEventChange(e.target.value)}
+              placeholder="— None —"
+              options={[{ value:"", label:"— None —" },
+                ...events.map(ev => ({ value:ev.id, label:ev.username || ev.id, sub:ev.event_type || undefined }))]}
+            />
           </div>
           <div>
             <div style={{fontSize:11,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",color:N.textDim,marginBottom:10}}>Client Details</div>
@@ -2765,6 +2878,12 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
   const [quickAdd,   setQuickAdd]   = useState(null);       // null | "income" | "expense"
   const [editingInv,    setEditingInv]    = useState(null); // null | invoice obj (no id = new, id = edit)
   const [previewingInv, setPreviewingInv] = useState(null); // null | saved invoice obj
+  const [ledgerPage,  setLedgerPage]  = useState(0);
+  const [ledgerPs,    setLedgerPs]    = useState(20);
+  const [invPage,     setInvPage]     = useState(0);
+  const [invPs,       setInvPs]       = useState(20);
+  const [finEvPage,   setFinEvPage]   = useState(0);
+  const [finEvPs,     setFinEvPs]     = useState(20);
 
   if (fin.error) return (
     <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
@@ -2787,6 +2906,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
     .filter(ev => !needle || [ev.username, ev.event_type, ev.venue_name, custName[ev.customer_id]].filter(Boolean).join(" ").toLowerCase().includes(needle))
     .map(ev => ({ ev, s: summariseTransactions(byEvent[ev.id] || [], ev.package_price) }))
     .sort((a, b) => (b.s.count > 0) - (a.s.count > 0) || b.s.income - a.s.income);
+  const pagedFinEvRows = paginate(rows, finEvPage, finEvPs);
   const withTxns    = rows.filter(r => r.s.count).length;
   const generalTxns = inRange.filter(t => !t.event_id);
   const generalSum  = summariseTransactions(generalTxns);
@@ -2866,7 +2986,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
               <table className="nk-table m-hide-2 m-hide-3">
                 <thead><tr><th>Event</th><th className="num">Income</th><th className="num">Expenses</th><th className="num">Profit</th><th>Margin</th></tr></thead>
                 <tbody>
-                  {rows.map(({ ev: e, s }) => (
+                  {pagedFinEvRows.map(({ ev: e, s }) => (
                     <tr key={e.id} onClick={() => onSelect(e.id)} style={{cursor:"pointer"}} className={e.id === selectedId ? "row-active" : ""}>
                       <td>
                         <div style={{fontWeight:700,color:N.text}}>{e.username}</div>
@@ -2897,6 +3017,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                 : events.length ? <EmptyState icon="search" title="No events match" text="Try another name, customer or venue."
                     action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setQ("")}>Clear search</button>} />
                 : <EmptyState icon="folder" title="No events yet" text="Create an event in the Events tab, then record its payments here." />)}
+              <Pager page={finEvPage} setPage={setFinEvPage} pageSize={finEvPs} setPageSize={setFinEvPs} total={rows.length} />
             </div>
           </div>
 
@@ -3052,7 +3173,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
             <table className="nk-table m-hide-4 m-hide-5">
               <thead><tr><th>Date</th><th>Event</th><th>Type</th><th className="num">Amount</th><th>Party</th><th>Account</th></tr></thead>
               <tbody>
-                {ledgerTxns.map(t => {
+                {paginate(ledgerTxns, ledgerPage, ledgerPs).map(t => {
                   const inc    = t.kind === "income";
                   const acc    = accMap[t.account_id];
                   const evRow  = evMap[t.event_id];
@@ -3079,6 +3200,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
               </tbody>
             </table>
             {!ledgerTxns.length && <EmptyState icon="wallet" compact title="No transactions" text={fin.txns.length ? "Try clearing the filters." : "Record income and expenses in the Events view."} />}
+            <Pager page={ledgerPage} setPage={setLedgerPage} pageSize={ledgerPs} setPageSize={setLedgerPs} total={ledgerTxns.length} />
           </div>
         </div>
       )}
@@ -3143,6 +3265,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
             <EmptyState icon="file" compact title="No invoices yet" text="Create your first invoice to get started." />
           )}
           {invData.invoices.length > 0 && (
+            <>
             <table className="nk-table m-hide-3 m-hide-4">
               <thead>
                 <tr>
@@ -3157,7 +3280,7 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                 </tr>
               </thead>
               <tbody>
-                {invData.invoices.map(inv => {
+                {paginate(invData.invoices, invPage, invPs).map(inv => {
                   const st = INV_ST[inv.status] || INV_ST.draft;
                   const ev2 = evMap[inv.event_id];
                   return (
@@ -3182,6 +3305,8 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
                 })}
               </tbody>
             </table>
+            <Pager page={invPage} setPage={setInvPage} pageSize={invPs} setPageSize={setInvPs} total={invData.invoices.length} />
+            </>
           )}
         </div>
       )}
@@ -4850,9 +4975,12 @@ function ScheduleTargetPicker({ events, current, canSms, canWa, onPick, onClose 
                 </div>
               ) : (
                 <Field label="Event">
-                  <select className="nk-select" value={eventId} onChange={e => setEventId(e.target.value)}>
-                    {sorted.map(e => <option key={e.id} value={e.id}>{e.username || "Event"}{e.start_datetime ? ` · ${fmtDay(e.start_datetime)}` : ""}{e.id === current?.id ? " (open now)" : ""}</option>)}
-                  </select>
+                  <SearchSelect
+                    value={eventId}
+                    onChange={e => setEventId(e.target.value)}
+                    placeholder="— Select event —"
+                    options={sorted.map(e => ({ value:e.id, label:(e.username || "Event") + (e.id === current?.id ? " (open now)" : ""), sub: e.start_datetime ? fmtDay(e.start_datetime) : undefined }))}
+                  />
                 </Field>
               )}
               <label className="nk-label">Send by</label>
@@ -4896,6 +5024,8 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
   const [openRuns, setOpenRuns] = useState([]);
   const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState(null);       // { initial, channel, inputs }
+  const [schedPage, setSchedPage]   = useState(0);
+  const [schedPs,   setSchedPs]     = useState(20);
   const [now, setNow] = useState(() => new Date());
   const openRef = useRef(null);                      // the open schedule, for loads that finish later
   const show = (id) => { openRef.current = id; setOpenId(id); };
@@ -5036,7 +5166,7 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
               <table className="nk-table m-hide-2 m-hide-4 m-hide-5 m-hide-7 m-act">
                 <thead><tr>{["Name", "Event", "Channel", "When", "Who", "Next send", "Done", "Status", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
                 <tbody>
-                  {shown.map(s => {
+                  {paginate(shown, schedPage, schedPs).map(s => {
                     const next = nextOf(s.id);
                     const can = scheduleControls(s, waiting.filter(r => r.schedule_id === s.id), now);
                     const ok = canEditOf(s);
@@ -5063,6 +5193,7 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
                   })}
                 </tbody>
               </table>
+              <Pager page={schedPage} setPage={setSchedPage} pageSize={schedPs} setPageSize={setSchedPs} total={shown.length} />
             </div>
           )}
         </>
@@ -5320,6 +5451,8 @@ function FeedbackTab({ access, events, askDialog, showToast }) {
   const [missing, setMissing] = useState(false);
   const [filters, setFilters] = useState({ q: "", status: "open", kind: "all" });
   const [openId, setOpenId] = useState(null);
+  const [fbPage, setFbPage] = useState(0);
+  const [fbPs,   setFbPs]   = useState(20);
 
   const load = async () => {
     if (!supabase) return;
@@ -5403,7 +5536,7 @@ function FeedbackTab({ access, events, askDialog, showToast }) {
               <table className="nk-table m-hide-2 m-hide-4 m-hide-6 m-act">
                 <thead><tr>{["When", "From", "Kind", "Rating", "Message", "Page", "Status", ""].map((h, i) => <th key={i}>{h}</th>)}</tr></thead>
                 <tbody>
-                  {shown.map(f => (
+                  {paginate(shown, fbPage, fbPs).map(f => (
                     <tr key={f.id} style={{cursor:"pointer"}} onClick={() => setOpenId(f.id)}>
                       <td>{fmtWhen(f.created_at)}</td>
                       <td>{f.created_by}</td>
@@ -5417,6 +5550,7 @@ function FeedbackTab({ access, events, askDialog, showToast }) {
                   ))}
                 </tbody>
               </table>
+              <Pager page={fbPage} setPage={setFbPage} pageSize={fbPs} setPageSize={setFbPs} total={shown.length} />
             </div>
           )}
         </>
@@ -5544,12 +5678,18 @@ function ProviderLog({ fetchLogs, today }) {
 function ReportsTab({ eventName, records, deliveries, canCheck, checking, onCheck, onDownload, canSeeLog, fetchLogs, smsNote, waNote, today }) {
   const [view, setView] = useState("guests");
   const [filters, setFilters] = useState({ q: "", channel: "all", status: "all" });
+  const [guestsPage, setGuestsPage] = useState(0);
+  const [guestsPs,   setGuestsPs]   = useState(20);
+  const [logPage,    setLogPage]    = useState(0);
+  const [logPs,      setLogPs]      = useState(50);
   const guests = records.filter(r => !r.sample);
   const g = guestStatusCounts(records);
   const all = deliveryCounts(deliveries.rows);
   const reasons = failureReasons(deliveries.rows);
   const waiting = deliveries.rows.filter(d => d.status === "sent" && d.message_id).length;
   const log = filterDeliveries(deliveries.rows, filters);
+  const pagedGuests = paginate(guests, guestsPage, guestsPs);
+  const pagedLog    = paginate(log,    logPage,    logPs);
   const setF = (k, v) => setFilters(f => ({ ...f, [k]: v }));
   const exportLog = async () => {
     const XLSX = await loadXlsx();
@@ -5636,9 +5776,9 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
           <table className="nk-table m-hide-1 m-hide-3 m-hide-4">
             <thead><tr>{["#", "Name", "Card Type", "Phone", "WhatsApp", "SMS"].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>
-              {guests.map((rec, i) => (
+              {pagedGuests.map((rec, i) => (
                 <tr key={rec.dbId || i}>
-                  <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{i + 1}</td>
+                  <td style={{color:N.accent,fontFamily:"JetBrains Mono, monospace",fontSize:12}}>#{guestsPage * guestsPs + i + 1}</td>
                   <td style={{fontWeight:600}}>{rec.name}</td>
                   <td style={{fontSize:12,color:N.textMid}}>{rec.cardType}</td>
                   <td style={{fontFamily:"JetBrains Mono, monospace",fontSize:12,color:N.textMid}}>{rec.phone ? `+${normalisePhone(rec.phone)}` : "—"}</td>
@@ -5649,6 +5789,7 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
             </tbody>
           </table>
           {!guests.length && <EmptyState compact icon="users" title="No guests yet" />}
+          <Pager page={guestsPage} setPage={setGuestsPage} pageSize={guestsPs} setPageSize={setGuestsPs} total={guests.length} />
         </div>
       )}
 
@@ -5677,7 +5818,7 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
                   <table className="nk-table m-hide-3 m-hide-5 m-hide-7 m-hide-8 m-hide-9">
                     <thead><tr>{["Sent", "Guest", "Phone", "Channel", "Message", "Status", "Reason / note", "Done", "Via"].map(h => <th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
-                      {log.slice(0, 500).map(d => (
+                      {pagedLog.map(d => (
                         <tr key={d.id}>
                           <td>{fmtShort(d.sent_at)}</td>
                           <td style={{fontWeight:600}}>{d.recipient_name || "—"}</td>
@@ -5692,7 +5833,7 @@ function ReportsTab({ eventName, records, deliveries, canCheck, checking, onChec
                       ))}
                     </tbody>
                   </table>
-                  {log.length > 500 && <div style={{fontSize:11,color:N.textDim,padding:8}}>Showing the newest 500 of {log.length} — use the filters or the Excel export for the rest.</div>}
+                  <Pager page={logPage} setPage={setLogPage} pageSize={logPs} setPageSize={setLogPs} total={log.length} />
                 </div>
               )}
           </>
@@ -6960,6 +7101,8 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
   const canDelete = useCanDelete();   // Super Admins: delete a card no longer used
   const removeCard = async (c) => { if (await onDeleteCard?.(c)) { load(); } };
   const [filter, setFilter] = useState({ status: "all", q: "" });
+  const [callsPage, setCallsPage] = useState(0);
+  const [callsPs,   setCallsPs]   = useState(20);
   const [commenting, setCommenting] = useState(null);
   const [tracking,  setTracking]  = useState(null);
   const [sharing, setSharing] = useState(false);
@@ -6992,6 +7135,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
   const peopleOf = (c) => Number(c.max_scans) || peopleForCardType(c.card_type, access.cardRules, access.settings);
   const sum = summariseCalls(cards || [], peopleOf);
   const rows = filterCalls(cards || [], filter);
+  const pagedCalls = paginate(rows, callsPage, callsPs);
   const update = async (c, changes, log) => {
     const before = { call_status: c.call_status, call_comment: c.call_comment, call_updated_at: c.call_updated_at, call_by: c.call_by };
     const next = { ...changes, call_updated_at: new Date().toISOString(), call_by: myEmail };
@@ -7063,7 +7207,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
         <table className="nk-table m-hide-5">
           <thead><tr><th>Guest</th><th>Phone</th><th>Answer</th><th>Comment</th><th>Updated</th>{onResend && <th>Resend</th>}</tr></thead>
           <tbody>
-            {rows.map(c => (
+            {pagedCalls.map(c => (
               <tr key={c.id}>
                 <td><div style={{fontWeight:700,color:N.text}}>{c.name}</div><div style={{fontSize:11,color:N.textDim}}>{c.card_type || "—"} · {peopleLabel(peopleOf(c))}{c.card_code ? <> · <span style={{fontFamily:"JetBrains Mono, monospace",letterSpacing:1}}>{c.card_code}</span></> : null}</div></td>
                 <td>
@@ -7168,6 +7312,7 @@ function CallsTab({ eventId, eventRow, access, myEmail, showToast, logHistory, o
           : !cards.length ? <EmptyState icon="table" title="No guests saved for this event" text="Import the guest list in Design and press Save Cards to DB." />
           : !rows.length && <EmptyState icon="search" title="No guests match" action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setFilter({ status: "all", q: "" })}>Show everyone</button>} />}
       </div>
+      <Pager page={callsPage} setPage={setCallsPage} pageSize={callsPs} setPageSize={setCallsPs} total={rows.length} />
       {commenting && <CommentModal card={commenting} onClose={() => setCommenting(null)}
         onSave={async (text) => { if (await update(commenting, { call_comment: text || null }, { status: commenting.call_status || "ok", detail: `Comment: ${text || "(removed)"}` })) setCommenting(null); }} />}
       {tracking && canTrack && <TrackModal card={tracking} onClose={() => setTracking(null)} />}
@@ -7301,12 +7446,15 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer, even
   const canDelete = useCanDelete();
   const [filter,  setFilter]  = useState({ status:"open", q:"" });
   const [editing, setEditing] = useState(null);   // null | {} (new) | lead row
+  const [leadsPage, setLeadsPage]         = useState(0);
+  const [leadsPageSize, setLeadsPageSize] = useState(20);
   const lead = crm.leads.find(l => l.id === selectedId) || null;
   useEffect(() => { if (selectedId) crm.loadFollowups(selectedId); }, [selectedId]); // eslint-disable-line react-hooks/exhaustive-deps
   if (crm.error) return <CrmUnavailable error={crm.error} onRetry={crm.loadAll} />;
 
-  const rows = sortLeads(filterLeads(crm.leads, filter));
-  const sum  = summariseLeads(crm.leads);
+  const rows      = sortLeads(filterLeads(crm.leads, filter));
+  const sum       = summariseLeads(crm.leads);
+  const pagedLeads = paginate(rows, leadsPage, leadsPageSize);
   const customer = lead?.customer_id ? crm.customers.find(c => c.id === lead.customer_id) : null;
   const open = lead && OPEN_STATUSES.includes(lead.status);
   const onSave = async (form) => {
@@ -7359,7 +7507,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer, even
           <table className="nk-table m-hide-2 m-hide-3 m-hide-4">
             <thead><tr>{["Lead","Event","Package","Region","Stage","Next follow-up"].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>
-              {rows.map(l => (
+              {pagedLeads.map(l => (
                 <tr key={l.id} onClick={() => onSelect(l.id)} style={{cursor:"pointer"}} className={l.id === selectedId ? "row-active" : ""}>
                   <td>
                     <div style={{fontWeight:700,color:N.text,whiteSpace:"nowrap"}}>{l.name}</div>
@@ -7384,6 +7532,7 @@ function LeadsTab({ crm, selectedId, onSelect, onOpenEvent, onOpenCustomer, even
               : <EmptyState icon="target" title="No leads yet" text="Every enquiry starts here — record it, follow up, and turn it into a customer."
                   action={<button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}><Icon n="plus" /> New Lead</button>} />
           )}
+          <Pager page={leadsPage} setPage={setLeadsPage} pageSize={leadsPageSize} setPageSize={setLeadsPageSize} total={rows.length} />
         </div>
 
         {lead && (
@@ -7455,6 +7604,8 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState(null);   // null | {} (new) | customer row
   const [loaded,  setLoaded]  = useState({ id:null, list:[] });   // events of customer `id`
+  const [custsPage, setCustsPage]         = useState(0);
+  const [custsPageSize, setCustsPageSize] = useState(20);
   const customer = crm.customers.find(c => c.id === selectedId) || null;
   const events = loaded.id === selectedId ? loaded.list : null;    // null while loading
   useEffect(() => {
@@ -7470,7 +7621,8 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
   const rows = crm.customers.filter(c => !needle
     || [c.name, c.region, c.notes].filter(Boolean).join(" ").toLowerCase().includes(needle)
     || (digits.length >= 4 && (c.phone || "").includes(normalisePhone(digits))));
-  const leadsOf = customer ? crm.leads.filter(l => l.customer_id === customer.id) : [];
+  const leadsOf    = customer ? crm.leads.filter(l => l.customer_id === customer.id) : [];
+  const pagedCusts = paginate(rows, custsPage, custsPageSize);
   const totalEvents = Object.values(crm.eventCounts).reduce((a, b) => a + b, 0);
   const onSave = async (form) => {
     const saved = await crm.saveCustomer(form, editing?.id);
@@ -7497,7 +7649,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
           <table className="nk-table m-hide-2 m-hide-4">
             <thead><tr>{["Customer","Region","Events","Since"].map(h => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>
-              {rows.map(c => (
+              {pagedCusts.map(c => (
                 <tr key={c.id} onClick={() => onSelect(c.id)} style={{cursor:"pointer"}} className={c.id === selectedId ? "row-active" : ""}>
                   <td>
                     <div style={{fontWeight:700,color:N.text}}>{c.name}</div>
@@ -7516,6 +7668,7 @@ function CustomersTab({ crm, selectedId, onSelect, onOpenEvent, onOpenLead, onNe
               : <EmptyState icon="users" title="No customers yet" text="Qualify a lead or add a customer directly."
                   action={<button className="nk-btn nk-btn-primary" onClick={() => setEditing({})}><Icon n="plus" /> New Customer</button>} />
           )}
+          <Pager page={custsPage} setPage={setCustsPage} pageSize={custsPageSize} setPageSize={setCustsPageSize} total={rows.length} />
         </div>
 
         {customer && (
@@ -7995,6 +8148,8 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyFilter,  setHistoryFilter]  = useState({ channel:"all", status:"all", q:"" });
+  const [historyPage,    setHistoryPage]    = useState(0);
+  const [historyPs,      setHistoryPs]      = useState(50);
   const [shareView, setShareView] = useState(false);   // "Share view-only link" pop-up (History tab)
   const historyEventRef = useRef(null);   // event whose history is in historyRows
   const historyQueue    = useRef([]);     // rows waiting to be written
@@ -8450,8 +8605,8 @@ export default function App() {
   const [eventsScope, setEventsScope] = useState("all");   // Events tab: "all" | "mine" (for roles that see every event)
   const [evFilter, setEvFilter] = useState({ q: "", status: "active", type: "all" });
   const [evPage,   setEvPage]   = useState(0);
+  const [evPs,     setEvPs]     = useState(20);
   const [evSort,   setEvSort]   = useState({ col: "date", dir: "desc" });
-  const EV_PAGE_SIZE = 20;
   // All unique event types from loaded events (for the type filter dropdown)
   const evTypes = [...new Set(savedEvents.map(e => e.event_type).filter(Boolean))].sort();
   // Scope → filter → paginate
@@ -8476,9 +8631,7 @@ export default function App() {
     if (evSort.col === "status") return d * (a.status||"").localeCompare(b.status||"");
     return 0;
   });
-  const evTotalPages = Math.max(1, Math.ceil(evSorted.length / EV_PAGE_SIZE));
-  const evPageSafe   = Math.min(evPage, evTotalPages - 1);
-  const evPageRows   = evSorted.slice(evPageSafe * EV_PAGE_SIZE, (evPageSafe + 1) * EV_PAGE_SIZE);
+  const evPageRows = paginate(evSorted, evPage, evPs);
   const setEvF = (patch) => { setEvFilter(f => ({ ...f, ...patch })); setEvPage(0); };
   const myEmail = (user?.email || "").toLowerCase();
 
@@ -10984,7 +11137,7 @@ export default function App() {
                             onClick={()=>selectEvent(ev)}
                             style={{cursor:"pointer"}}
                             title="Click to load this event and open its design">
-                            <td style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{evPageSafe * EV_PAGE_SIZE + i + 1}</td>
+                            <td style={{color:N.textDim,fontFamily:"JetBrains Mono, monospace",fontSize:11}}>{evPage * evPs + i + 1}</td>
                             <td>
                               <div style={{fontWeight:700,color:N.text}}>{ev.username}</div>
                               {ev.phone && <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>+{normalisePhone(ev.phone)}</div>}
@@ -11074,21 +11227,7 @@ export default function App() {
                 {supabase && savedEvents.length > 0 && evFiltered.length === 0 && (
                   <EmptyState icon="filter" title="No events match" text="Try a different search or clear the filters." />
                 )}
-                {supabase && evTotalPages > 1 && (
-                  <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:12,paddingTop:12}}>
-                    <button className="nk-btn nk-btn-ghost" disabled={evPageSafe === 0}
-                      onClick={() => setEvPage(p => Math.max(0, p - 1))}>
-                      <Icon n="chevron-left" /> Prev
-                    </button>
-                    <span style={{fontSize:12,color:N.textDim}}>
-                      Page {evPageSafe + 1} of {evTotalPages} &middot; {evFiltered.length} event{evFiltered.length !== 1 ? "s" : ""}
-                    </span>
-                    <button className="nk-btn nk-btn-ghost" disabled={evPageSafe >= evTotalPages - 1}
-                      onClick={() => setEvPage(p => Math.min(evTotalPages - 1, p + 1))}>
-                      Next <Icon n="chevron-right" />
-                    </button>
-                  </div>
-                )}
+                <Pager page={evPage} setPage={setEvPage} pageSize={evPs} setPageSize={setEvPs} total={evSorted.length} />
               </div>
             )}
 
@@ -11883,7 +12022,7 @@ export default function App() {
                       <table className="nk-table m-hide-3 m-hide-5 m-hide-7 m-hide-8">
                         <thead><tr>{["Time","Channel","Action","Recipient","Message / Template","Result","By","Detail"].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
-                          {shown.map(r => {
+                          {paginate(shown, historyPage, historyPs).map(r => {
                             const st = HISTORY_STATUSES[r.status] || { label:r.status, tone:"info" };
                             const ch = HISTORY_CHANNELS[r.channel] || { icon:"•", label:r.channel };
                             return (
@@ -11923,6 +12062,7 @@ export default function App() {
                             : <EmptyState icon="history" title="Nothing recorded yet" text="Sends, uploads and event changes will appear here." />}
                         </div>
                       )}
+                      <Pager page={historyPage} setPage={setHistoryPage} pageSize={historyPs} setPageSize={setHistoryPs} total={shown.length} />
                     </div>
                     {historyHasMore && (
                       <button className="nk-btn nk-btn-ghost nk-btn-full" style={{marginTop:12}} onClick={()=>loadHistory(true)} disabled={historyLoading}>
