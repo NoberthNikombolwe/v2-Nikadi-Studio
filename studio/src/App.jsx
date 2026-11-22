@@ -2060,7 +2060,7 @@ const segStyle = (on) => ({ padding:"6px 12px", borderRadius:7, fontSize:12, fon
 const NIKADI_CO = { name:"NIKADI ENTERPRISES", tagline:"Professional Services", email:"info@nikadi.co.tz",
   phones:["+255 750 301 111","+255 747 639 118"], address:"P.O. Box 106018, Dar es Salaam, Tanzania" };
 const newInvItem    = () => ({ id: Date.now() + Math.random(), service:"", qty:1, price:0 });
-const nextInvoiceNo = (list=[]) => `NKD-${String(list.length+1).padStart(4,"0")}`;
+const nextInvoiceNo = (list=[]) => `NKD-${String(list.length+100).padStart(5,"0")}`;
 const fmtTzs        = (n) => new Intl.NumberFormat("en-TZ",{style:"currency",currency:"TZS",minimumFractionDigits:2}).format(Number(n)||0);
 const calcInvoice   = ({items=[],vat_enabled=false,vat_type="exclusive",discount=0}={}) => {
   const sub  = items.reduce((s,it) => s + Number(it.qty)*Number(it.price), 0);
@@ -2079,7 +2079,8 @@ const BLANK_INVOICE = (list=[]) => ({
   invoice_no: nextInvoiceNo(list), event_id:"", status:"draft",
   issue_date: localDate(), due_date: addDays(30),
   client_name:"", client_email:"", client_phone:"", client_address:"",
-  items:[newInvItem()], vat_enabled:false, vat_type:"exclusive", discount:0, notes:"",
+  items:[newInvItem()], vat_enabled:false, vat_type:"exclusive", discount:0,
+  notes:"You can make Payment Via M-PESA LIPA NAMBA:\nNUMBER: 358229342\nNAME: NIKADI ENTERPRISES",
 });
 const INV_PRINT_CSS = `@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=DM+Sans:wght@300;400;500;600&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
