@@ -2183,22 +2183,27 @@ const MarginPill = ({ pct }) => <Pill tone={MARGIN_TONE[marginTone(pct)]}>{forma
 
 // Record an income or expense for one event: amount, date, account, who sent / was paid
 // Record a new income / expense, or edit one (`initial` = the transaction being edited)
-function TxnModal({ kind: initialKind, initial, event, accounts, onSave, onClose, saving, onManageAccounts }) {
+function TxnModal({ kind: initialKind, initial, event, eventsForPicker, accounts, onSave, onClose, saving, onManageAccounts }) {
   // An edited transaction keeps its account in the list even if that account was deactivated since
   const active = accounts.filter(a => a.active || a.id === initial?.account_id);
   const [form, setForm] = useState(() => initial
     ? { kind: initial.kind, amount: String(initial.amount ?? ""), txn_date: initial.txn_date || localDate(), account_id: initial.account_id || "",
         party: initial.party || "", category: initial.category || (initial.kind === "income" ? "deposit" : "printing"),
-        reference: initial.reference || "", note: initial.note || "" }
+        reference: initial.reference || "", note: initial.note || "", event_id: initial.event_id || "" }
     : { kind: initialKind, amount:"", txn_date: localDate(), account_id: active.length === 1 ? active[0].id : "",
-        party: initialKind === "income" ? (event?.username || "") : "", category: initialKind === "income" ? "deposit" : "printing", reference:"", note:"" });
+        party: initialKind === "income" ? (event?.username || "") : "", category: initialKind === "income" ? "deposit" : "printing",
+        reference:"", note:"", event_id: event?.id || (eventsForPicker?.length === 1 ? eventsForPicker[0].id : "") });
   const [errors, setErrors] = useState({});
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
   const setKind = (k) => setForm(f => ({ ...f, kind:k, category: k === "income" ? "deposit" : "printing" }));
   const save = () => {
     const errs = validateTransaction(form);
+    if (eventsForPicker && !event && !form.event_id) errs.event_id = "Choose an event";
     setErrors(errs);
-    if (!Object.keys(errs).length) onSave(form);
+    if (!Object.keys(errs).length) {
+      const chosenEvent = event || eventsForPicker?.find(e => e.id === form.event_id) || null;
+      onSave(form, chosenEvent);
+    }
   };
   const amount = parsePrice(form.amount);
   const isIncome = form.kind === "income";
@@ -2208,7 +2213,7 @@ function TxnModal({ kind: initialKind, initial, event, accounts, onSave, onClose
         <div className="nk-modal-head">
           <div>
             <div className="nk-modal-title">{initial ? (isIncome ? "Edit income" : "Edit expense") : (isIncome ? "Record income" : "Record expense")}</div>
-            <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{event?.username}{event?.event_type ? ` · ${event.event_type}` : ""}</div>
+            {event && <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{event.username}{event.event_type ? ` · ${event.event_type}` : ""}</div>}
           </div>
           <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
         </div>
@@ -2229,6 +2234,14 @@ function TxnModal({ kind: initialKind, initial, event, accounts, onSave, onClose
             </div>
           )}
           <div className="nk-form-grid">
+            {eventsForPicker && !event && (
+              <Field label="Event *" error={errors.event_id} span>
+                <select className="nk-select" value={form.event_id} onChange={set("event_id")}>
+                  <option value="">— Select event —</option>
+                  {eventsForPicker.map(e => <option key={e.id} value={e.id}>{e.username}{e.event_type ? ` · ${e.event_type}` : ""}</option>)}
+                </select>
+              </Field>
+            )}
             <Field label="Amount (TSh) *" error={errors.amount}>
               <input className="nk-input" autoFocus inputMode="decimal" placeholder="e.g. 250000 or 250k" value={form.amount} onChange={set("amount")} />
               {Number.isFinite(amount) && amount > 0 && <div style={{fontSize:11,color:N.textDim,marginTop:-6,marginBottom:8}}>{formatTsh(amount)}</div>}
@@ -2341,16 +2354,21 @@ function AccountsModal({ fin, onClose }) {
   );
 }
 
-// Finance tab: business-wide totals, each event's income / expense / profit / margin,
-// and the selected event's transactions with who paid (or was paid) via which account
+// Finance tab: account balances, events P&L, all-transactions ledger, P&L by category
 function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, onSelect, onExport }) {
   const canDelete = useCanDelete();
-  const [q,       setQ]       = useState("");
-  const [range,   setRange]   = useState({ from:"", to:"" });
-  const [txFilter, setTxFilter] = useState("all");
-  const [adding,  setAdding]  = useState(null);   // null | "income" | "expense"
-  const [editingTxn, setEditingTxn] = useState(null);   // transaction open in the edit form
+  const [q,          setQ]          = useState("");
+  const [range,      setRange]      = useState({ from:"", to:"" });
+  const [txFilter,   setTxFilter]   = useState("all");
+  const [adding,     setAdding]     = useState(null);
+  const [editingTxn, setEditingTxn] = useState(null);
   const [accountsOpen, setAccountsOpen] = useState(false);
+  const [view,       setView]       = useState("events");   // "events" | "ledger" | "pl"
+  const [ledgerQ,    setLedgerQ]    = useState("");
+  const [ledgerKind, setLedgerKind] = useState("all");
+  const [ledgerAcc,  setLedgerAcc]  = useState("all");
+  const [quickAdd,   setQuickAdd]   = useState(null);       // null | "income" | "expense"
+
   if (fin.error) return (
     <div style={{background:N.navy800,borderRadius:16,border:`1px solid ${N.border}`}}>
       <EmptyState icon="wallet" tone="warn" title="Finance isn't set up in the database yet"
@@ -2359,155 +2377,294 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
     </div>
   );
 
-  const inRange = filterTransactions(fin.txns, range);
-  const total   = summariseTransactions(inRange);
-  const byEvent = groupByEvent(inRange);
-  const custName = Object.fromEntries(customers.map(c => [c.id, c.name]));
-  const accName  = Object.fromEntries(fin.accounts.map(a => [a.id, a]));
-  const needle = q.trim().toLowerCase();
+  const inRange     = filterTransactions(fin.txns, range);
+  const total       = summariseTransactions(inRange);
+  const byEvent     = groupByEvent(inRange);
+  const accBalances = summariseByAccount(fin.txns);           // all-time, actual cash position
+  const pl          = summariseByCategory(inRange);           // P&L breakdown for selected period
+  const custName    = Object.fromEntries(customers.map(c => [c.id, c.name]));
+  const accMap      = Object.fromEntries(fin.accounts.map(a => [a.id, a]));
+  const evMap       = Object.fromEntries(events.map(e => [e.id, e]));
+  const needle      = q.trim().toLowerCase();
   const rows = events
     .filter(ev => !needle || [ev.username, ev.event_type, ev.venue_name, custName[ev.customer_id]].filter(Boolean).join(" ").toLowerCase().includes(needle))
-    .map(ev => ({ ev, s: summariseTransactions(byEvent[ev.id] || []) }))
+    .map(ev => ({ ev, s: summariseTransactions(byEvent[ev.id] || [], ev.package_price) }))
     .sort((a, b) => (b.s.count > 0) - (a.s.count > 0) || b.s.income - a.s.income);
-  const withTxns = rows.filter(r => r.s.count).length;
-  const ev = events.find(e => e.id === selectedId) || null;
-  const evTxns = ev ? sortTransactions(filterTransactions(byEvent[ev.id] || [], { kind: txFilter })) : [];
-  const evSum  = ev ? summariseTransactions(byEvent[ev.id] || []) : null;
-  const evCats = ev ? summariseByCategory(byEvent[ev.id] || []) : null;
+  const withTxns   = rows.filter(r => r.s.count).length;
+  const ev         = events.find(e => e.id === selectedId) || null;
+  const evTxns     = ev ? sortTransactions(filterTransactions(byEvent[ev.id] || [], { kind: txFilter })) : [];
+  const evSum      = ev ? summariseTransactions(byEvent[ev.id] || [], ev.package_price) : null;
+  const evCats     = ev ? summariseByCategory(byEvent[ev.id] || []) : null;
+  const ledgerTxns = sortTransactions(filterTransactions(inRange, { kind: ledgerKind, account: ledgerAcc, q: ledgerQ }));
+  const activeAccs = fin.accounts.filter(a => a.active);
   const ranges = [["All time", "", ""], ["This month", localDate().slice(0, 8) + "01", ""], ["Last 30 days", addDays(-30), ""], ["This year", localDate().slice(0, 4) + "-01-01", ""]];
 
   return (
     <div className="nk-page" style={{padding:"0 0 40px"}}>
+      {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:12}}>
         <div>
           <h2 style={{fontSize:20,fontWeight:800,color:N.text}}>Finance</h2>
           <p style={{fontSize:12,color:N.textDim,marginTop:2}}>Every shilling in and out, per event — and what each event really earned</p>
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={fin.loadAll} disabled={fin.loading} aria-label="Refresh">{fin.loading ? <><Icon n="loader" /></> : <><Icon n="undo" /></>} Refresh</button>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => onExport(inRange)} disabled={!inRange.length}><Icon n="download" /> Export Excel</button>
-          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setAccountsOpen(true)}><Icon n="bank" /> Accounts ({fin.accounts.filter(a => a.active).length})</button>
+          <button className="nk-btn nk-btn-success" style={{fontSize:12}} onClick={() => setQuickAdd("income")}><Icon n="plus" /> Income</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12,color:N.red,borderColor:alpha(N.red,"66")}} onClick={() => setQuickAdd("expense")}><Icon n="plus" /> Expense</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={fin.loadAll} disabled={fin.loading} aria-label="Refresh">{fin.loading ? <Icon n="loader" /> : <Icon n="undo" />} Refresh</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => onExport(inRange)} disabled={!inRange.length}><Icon n="download" /> Export</button>
+          <button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setAccountsOpen(true)}><Icon n="bank" /> Accounts ({activeAccs.length})</button>
         </div>
       </div>
 
+      {/* Date range */}
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
         {ranges.map(([l, from, to]) => (
           <button key={l} style={segStyle(range.from === from && range.to === to)} onClick={() => setRange({ from, to })}>{l}</button>
         ))}
       </div>
 
+      {/* Period summary tiles */}
       <div className="nk-stats">
         <MoneyTile label="Income"   value={formatTsh(total.income)}  tone="good" />
         <MoneyTile label="Expenses" value={formatTsh(total.expense)} tone="bad" />
         <MoneyTile label="Profit"   value={formatTsh(total.profit)}  tone={total.profit < 0 ? "bad" : "info"} />
-        <MoneyTile label="Margin"   value={formatPct(total.marginPct)} tone={MARGIN_TONE[marginTone(total.marginPct)]} sub={`${withTxns} event${withTxns === 1 ? "" : "s"} · ${total.count} transaction${total.count === 1 ? "" : "s"}`} />
+        <MoneyTile label="Margin"   value={formatPct(total.marginPct)} tone={MARGIN_TONE[marginTone(total.marginPct)]} sub={`${withTxns} event${withTxns === 1 ? "" : "s"} · ${total.count} txn${total.count === 1 ? "" : "s"}`} />
       </div>
 
-      <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
-        <div style={{flex:"2 1 520px",minWidth:0}}>
-          <input className="nk-input" style={{maxWidth:320,marginBottom:10}} placeholder="Search event, customer, venue…" value={q} onChange={e => setQ(e.target.value)} />
-          <div className="nk-table-wrap" style={{margin:0}}>
-            <table className="nk-table m-hide-2 m-hide-3">
-              <thead><tr><th>Event</th><th className="num">Income</th><th className="num">Expenses</th><th className="num">Profit</th><th>Margin</th></tr></thead>
-              <tbody>
-                {rows.map(({ ev: e, s }) => (
-                  <tr key={e.id} onClick={() => onSelect(e.id)} style={{cursor:"pointer"}} className={e.id === selectedId ? "row-active" : ""}>
-                    <td>
-                      <div style={{fontWeight:700,color:N.text}}>{e.username}</div>
-                      <div style={{fontSize:11,color:N.textDim}}>{[e.event_type, custName[e.customer_id], e.start_datetime && fmtDay(e.start_datetime)].filter(Boolean).join(" · ") || "—"}</div>
-                    </td>
-                    <td className="num" style={{color:s.income ? N.green : N.textDim}}>{s.income ? formatTsh(s.income) : "—"}</td>
-                    <td className="num" style={{color:s.expense ? N.red : N.textDim}}>{s.expense ? formatTsh(s.expense) : "—"}</td>
-                    <td className="num" style={{fontWeight:700,color:!s.count ? N.textDim : s.profit < 0 ? N.red : N.text}}>{s.count ? formatTsh(s.profit) : "—"}</td>
-                    <td>{s.count ? <MarginPill pct={s.marginPct} /> : <span style={{fontSize:11,color:N.textDim}}>No entries</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {!rows.length && (fin.loading || !eventsLoaded ? <EmptyState loading title="Loading finance…" />
-              : events.length ? <EmptyState icon="search" title="No events match" text="Try another name, customer or venue."
-                  action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setQ("")}>Clear search</button>} />
-              : <EmptyState icon="folder" title="No events yet" text="Create an event in the Events tab, then record its payments here." />)}
+      {/* Account balances (all-time net) */}
+      {activeAccs.length > 0 && (
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:11,fontWeight:700,color:N.textDim,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>Account Balances</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            {activeAccs.map(a => {
+              const t = accBalances[a.id] || { income:0, expense:0, net:0 };
+              return (
+                <div key={a.id} style={{flex:"1 1 130px",padding:"10px 14px",borderRadius:12,background:N.navy700,border:`1px solid ${N.border}`}}>
+                  <div style={{fontSize:11,color:N.textDim,marginBottom:2,display:"flex",alignItems:"center",gap:4}}><Icon n={ACCOUNT_TYPES[a.type]?.icon} style={{flexShrink:0}} /> {a.name}</div>
+                  <div style={{fontWeight:800,fontSize:16,color:t.net < 0 ? N.red : N.text,fontVariantNumeric:"tabular-nums"}}>{formatTsh(t.net)}</div>
+                  <div style={{fontSize:10,color:N.textDim,marginTop:2}}>{ACCOUNT_TYPES[a.type]?.label}</div>
+                </div>
+              );
+            })}
           </div>
         </div>
+      )}
 
-        {ev && (
-          <DetailModal label={`${ev.username} finance`} onClose={() => onSelect(null)} width={680}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:12}}>
-              <div style={{minWidth:0}}>
-                <div style={{fontSize:16,fontWeight:800,color:N.text}}>{ev.username}</div>
-                <div style={{fontSize:12,color:N.textDim}}>{[ev.event_type, custName[ev.customer_id], ev.package_price && `${formatTsh(ev.package_price)} / card`].filter(Boolean).join(" · ")}</div>
-              </div>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
-              <MoneyTile label="Income"   value={formatTsh(evSum.income)}  tone="good" />
-              <MoneyTile label="Expenses" value={formatTsh(evSum.expense)} tone="bad" />
-              <MoneyTile label="Profit"   value={formatTsh(evSum.profit)}  tone={evSum.profit < 0 ? "bad" : "info"} />
-              <MoneyTile label="Margin"   value={formatPct(evSum.marginPct)} tone={MARGIN_TONE[marginTone(evSum.marginPct)]} />
-            </div>
-            {evSum.income > 0 && (
-              <div style={{marginBottom:14}} title="Share of income spent vs kept">
-                <div style={{display:"flex",height:8,borderRadius:4,overflow:"hidden",background:N.navy700}}>
-                  <div style={{width:`${Math.min(100, evSum.expense / evSum.income * 100)}%`,background:N.red}} />
-                  <div style={{flex:1,background:evSum.profit >= 0 ? N.green : "transparent"}} />
-                </div>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:N.textDim,marginTop:4}}>
-                  <span>Spent {Math.round(Math.min(100, evSum.expense / evSum.income * 100))}%</span><span>Kept {formatPct(evSum.marginPct)}</span>
-                </div>
-              </div>
-            )}
-            <div style={{display:"flex",gap:8,marginBottom:12}}>
-              <button className="nk-btn nk-btn-success" style={{flex:1}} onClick={() => setAdding("income")}>+ Income</button>
-              <button className="nk-btn nk-btn-ghost" style={{flex:1,color:N.red,borderColor:alpha(N.red,"66")}} onClick={() => setAdding("expense")}>+ Expense</button>
-            </div>
-            {evCats && Object.keys(evCats.expense).length > 0 && (
-              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
-                {Object.entries(evCats.expense).sort((a, b) => b[1] - a[1]).map(([c, v]) => (
-                  <span key={c} style={{fontSize:11,padding:"3px 8px",borderRadius:6,background:N.navy700,color:N.textMid,border:`1px solid ${N.border}`}}>
-                    {TXN_CATEGORIES.expense[c] || c}: <strong style={{color:N.text}}>{formatTsh(v)}</strong>
-                  </span>
-                ))}
-              </div>
-            )}
-            <div style={{display:"flex",gap:6,marginBottom:8}}>
-              {[["all","All"],["income","Income"],["expense","Expenses"]].map(([k, l]) => <button key={k} style={segStyle(txFilter === k)} onClick={() => setTxFilter(k)}>{l}</button>)}
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {evTxns.map(t => {
-                const inc = t.kind === "income";
-                const acc = accName[t.account_id];
-                return (
-                  <div key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",padding:10,borderRadius:10,background:N.navy700,border:`1px solid ${N.border}`}}>
-                    <div style={{width:30,height:30,borderRadius:8,flexShrink:0,display:"grid",placeItems:"center",fontWeight:800,
-                      background:inc ? N.greenBg : N.redBg,color:inc ? N.green : N.red}}>{inc ? <><Icon n="arrowDown" /></> : <><Icon n="arrowUp" /></>}</div>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
-                        <span style={{fontWeight:700,color:N.text,overflow:"hidden",textOverflow:"ellipsis"}}>{t.party || "—"}</span>
-                        <span style={{fontWeight:800,color:inc ? N.green : N.red,whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>{TXN_KINDS[t.kind].sign}{formatTsh(t.amount)}</span>
-                      </div>
-                      <div style={{fontSize:11,color:N.textDim,marginTop:2}}>
-                        {[fmtDay(t.txn_date), TXN_CATEGORIES[t.kind]?.[t.category] || t.category, acc && `${inc ? "into" : "from"} ${acc.name}`, t.reference && `ref ${t.reference}`].filter(Boolean).join(" · ")}
-                      </div>
-                      {t.note && <div style={{fontSize:12,color:N.textMid,marginTop:4}}>{t.note}</div>}
-                      {t.created_by && <div style={{fontSize:10,color:N.textDim,marginTop:2}}>by {t.created_by}</div>}
-                    </div>
-                    <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                      <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label={`Edit ${t.kind} of ${formatTsh(t.amount)}`} title="Edit" onClick={() => setEditingTxn(t)}><Icon n="edit" /></button>
-                      {canDelete && (<button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12,color:N.red}} aria-label={`Remove ${t.kind} of ${formatTsh(t.amount)}`} title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>)}
-                    </div>
-                  </div>
-                );
-              })}
-              {!evTxns.length && (
-                <EmptyState icon={txFilter === "expense" ? "arrowUp" : "arrowDown"} compact
-                  title={`No ${txFilter === "all" ? "transactions" : txFilter === "income" ? "income" : "expenses"} yet`}
-                  text={txFilter === "expense" ? "Record printing, credit, transport and other costs with + Expense." : "Record the customer's payment with + Income."} />
-              )}
-            </div>
-          </DetailModal>
-        )}
+      {/* View tabs */}
+      <div style={{display:"flex",gap:6,marginBottom:16}}>
+        {[["events","Events"],["ledger","Ledger"],["pl","P & L"]].map(([v, l]) => (
+          <button key={v} style={segStyle(view === v)} onClick={() => setView(v)}>{l}</button>
+        ))}
       </div>
 
+      {/* ── EVENTS view ── */}
+      {view === "events" && (
+        <div className="nk-split" style={{display:"flex",gap:16,alignItems:"flex-start",flexWrap:"wrap"}}>
+          <div style={{flex:"2 1 520px",minWidth:0}}>
+            <input className="nk-input" style={{maxWidth:320,marginBottom:10}} placeholder="Search event, customer, venue…" value={q} onChange={e => setQ(e.target.value)} />
+            <div className="nk-table-wrap" style={{margin:0}}>
+              <table className="nk-table m-hide-2 m-hide-3">
+                <thead><tr><th>Event</th><th className="num">Income</th><th className="num">Expenses</th><th className="num">Profit</th><th>Margin</th></tr></thead>
+                <tbody>
+                  {rows.map(({ ev: e, s }) => (
+                    <tr key={e.id} onClick={() => onSelect(e.id)} style={{cursor:"pointer"}} className={e.id === selectedId ? "row-active" : ""}>
+                      <td>
+                        <div style={{fontWeight:700,color:N.text}}>{e.username}</div>
+                        <div style={{fontSize:11,color:N.textDim}}>{[e.event_type, custName[e.customer_id], e.start_datetime && fmtDay(e.start_datetime)].filter(Boolean).join(" · ") || "—"}</div>
+                        {s.outstanding > 0 && <div style={{fontSize:11,color:N.amber,marginTop:1}}><Icon n="alert" /> {formatTsh(s.outstanding)} outstanding</div>}
+                      </td>
+                      <td className="num" style={{color:s.income ? N.green : N.textDim}}>{s.income ? formatTsh(s.income) : "—"}</td>
+                      <td className="num" style={{color:s.expense ? N.red : N.textDim}}>{s.expense ? formatTsh(s.expense) : "—"}</td>
+                      <td className="num" style={{fontWeight:700,color:!s.count ? N.textDim : s.profit < 0 ? N.red : N.text}}>{s.count ? formatTsh(s.profit) : "—"}</td>
+                      <td>{s.count ? <MarginPill pct={s.marginPct} /> : <span style={{fontSize:11,color:N.textDim}}>No entries</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!rows.length && (fin.loading || !eventsLoaded ? <EmptyState loading title="Loading finance…" />
+                : events.length ? <EmptyState icon="search" title="No events match" text="Try another name, customer or venue."
+                    action={<button className="nk-btn nk-btn-ghost" style={{fontSize:12}} onClick={() => setQ("")}>Clear search</button>} />
+                : <EmptyState icon="folder" title="No events yet" text="Create an event in the Events tab, then record its payments here." />)}
+            </div>
+          </div>
+
+          {ev && (
+            <DetailModal label={`${ev.username} finance`} onClose={() => onSelect(null)} width={680}>
+              <div style={{minWidth:0,marginBottom:12}}>
+                <div style={{fontSize:16,fontWeight:800,color:N.text}}>{ev.username}</div>
+                <div style={{fontSize:12,color:N.textDim}}>{[ev.event_type, custName[ev.customer_id], ev.package_price && `Package: ${formatTsh(ev.package_price)}`].filter(Boolean).join(" · ")}</div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+                <MoneyTile label="Income"   value={formatTsh(evSum.income)}  tone="good" />
+                <MoneyTile label="Expenses" value={formatTsh(evSum.expense)} tone="bad" />
+                <MoneyTile label="Profit"   value={formatTsh(evSum.profit)}  tone={evSum.profit < 0 ? "bad" : "info"} />
+                <MoneyTile label="Margin"   value={formatPct(evSum.marginPct)} tone={MARGIN_TONE[marginTone(evSum.marginPct)]}
+                  sub={evSum.outstanding > 0 ? `${formatTsh(evSum.outstanding)} outstanding` : undefined} />
+              </div>
+              {evSum.income > 0 && (
+                <div style={{marginBottom:14}} title="Share of income spent vs kept">
+                  <div style={{display:"flex",height:8,borderRadius:4,overflow:"hidden",background:N.navy700}}>
+                    <div style={{width:`${Math.min(100, evSum.expense / evSum.income * 100)}%`,background:N.red}} />
+                    <div style={{flex:1,background:evSum.profit >= 0 ? N.green : "transparent"}} />
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:N.textDim,marginTop:4}}>
+                    <span>Spent {Math.round(Math.min(100, evSum.expense / evSum.income * 100))}%</span><span>Kept {formatPct(evSum.marginPct)}</span>
+                  </div>
+                </div>
+              )}
+              {evSum.outstanding > 0 && (
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,background:alpha(N.amber,"18"),border:`1px solid ${alpha(N.amber,"44")}`,fontSize:12,color:N.amber,marginBottom:12}}>
+                  <Icon n="alert" /> <strong>{formatTsh(evSum.outstanding)}</strong> still owed on this event
+                </div>
+              )}
+              <div style={{display:"flex",gap:8,marginBottom:12}}>
+                <button className="nk-btn nk-btn-success" style={{flex:1}} onClick={() => setAdding("income")}>+ Income</button>
+                <button className="nk-btn nk-btn-ghost" style={{flex:1,color:N.red,borderColor:alpha(N.red,"66")}} onClick={() => setAdding("expense")}>+ Expense</button>
+              </div>
+              {evCats && Object.keys(evCats.expense).length > 0 && (
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+                  {Object.entries(evCats.expense).sort((a, b) => b[1] - a[1]).map(([c, v]) => (
+                    <span key={c} style={{fontSize:11,padding:"3px 8px",borderRadius:6,background:N.navy700,color:N.textMid,border:`1px solid ${N.border}`}}>
+                      {TXN_CATEGORIES.expense[c] || c}: <strong style={{color:N.text}}>{formatTsh(v)}</strong>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div style={{display:"flex",gap:6,marginBottom:8}}>
+                {[["all","All"],["income","Income"],["expense","Expenses"]].map(([k, l]) => <button key={k} style={segStyle(txFilter === k)} onClick={() => setTxFilter(k)}>{l}</button>)}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {evTxns.map(t => {
+                  const inc = t.kind === "income";
+                  const acc = accMap[t.account_id];
+                  return (
+                    <div key={t.id} style={{display:"flex",gap:10,alignItems:"flex-start",padding:10,borderRadius:10,background:N.navy700,border:`1px solid ${N.border}`}}>
+                      <div style={{width:30,height:30,borderRadius:8,flexShrink:0,display:"grid",placeItems:"center",fontWeight:800,
+                        background:inc ? N.greenBg : N.redBg,color:inc ? N.green : N.red}}>{inc ? <Icon n="arrowDown" /> : <Icon n="arrowUp" />}</div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                          <span style={{fontWeight:700,color:N.text,overflow:"hidden",textOverflow:"ellipsis"}}>{t.party || "—"}</span>
+                          <span style={{fontWeight:800,color:inc ? N.green : N.red,whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>{TXN_KINDS[t.kind].sign}{formatTsh(t.amount)}</span>
+                        </div>
+                        <div style={{fontSize:11,color:N.textDim,marginTop:2}}>
+                          {[fmtDay(t.txn_date), TXN_CATEGORIES[t.kind]?.[t.category] || t.category, acc && `${inc ? "into" : "from"} ${acc.name}`, t.reference && `ref ${t.reference}`].filter(Boolean).join(" · ")}
+                        </div>
+                        {t.note && <div style={{fontSize:12,color:N.textMid,marginTop:4}}>{t.note}</div>}
+                        {t.created_by && <div style={{fontSize:10,color:N.textDim,marginTop:2}}>by {t.created_by}</div>}
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                        <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12}} aria-label={`Edit ${t.kind}`} title="Edit" onClick={() => setEditingTxn(t)}><Icon n="edit" /></button>
+                        {canDelete && <button className="nk-btn nk-btn-ghost" style={{padding:"4px 8px",fontSize:12,color:N.red}} aria-label={`Remove ${t.kind}`} title="Remove" onClick={() => fin.deleteTxn(t)}><Icon n="trash" /></button>}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!evTxns.length && (
+                  <EmptyState icon={txFilter === "expense" ? "arrowUp" : "arrowDown"} compact
+                    title={`No ${txFilter === "all" ? "transactions" : txFilter === "income" ? "income" : "expenses"} yet`}
+                    text={txFilter === "expense" ? "Record printing, credit, transport and other costs with + Expense." : "Record the customer's payment with + Income."} />
+                )}
+              </div>
+            </DetailModal>
+          )}
+        </div>
+      )}
+
+      {/* ── LEDGER view ── */}
+      {view === "ledger" && (
+        <div>
+          <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+            <input className="nk-input" style={{flex:"2 1 180px",maxWidth:280}} placeholder="Party, reference, note…" value={ledgerQ} onChange={e => setLedgerQ(e.target.value)} />
+            <div style={{display:"flex",gap:4}}>
+              {[["all","All"],["income","Income"],["expense","Expenses"]].map(([k,l]) => (
+                <button key={k} style={segStyle(ledgerKind === k)} onClick={() => setLedgerKind(k)}>{l}</button>
+              ))}
+            </div>
+            <select className="nk-select" style={{flex:"1 1 140px",maxWidth:200,marginBottom:0}} value={ledgerAcc} onChange={e => setLedgerAcc(e.target.value)}>
+              <option value="all">All accounts</option>
+              {fin.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <div className="nk-table-wrap" style={{margin:0}}>
+            <table className="nk-table m-hide-4 m-hide-5">
+              <thead><tr><th>Date</th><th>Event</th><th>Type</th><th className="num">Amount</th><th>Party</th><th>Account</th></tr></thead>
+              <tbody>
+                {ledgerTxns.map(t => {
+                  const inc    = t.kind === "income";
+                  const acc    = accMap[t.account_id];
+                  const evRow  = evMap[t.event_id];
+                  return (
+                    <tr key={t.id} onClick={() => { setEditingTxn(t); }} style={{cursor:"pointer"}}>
+                      <td style={{whiteSpace:"nowrap",color:N.textDim,fontSize:12}}>{fmtDay(t.txn_date)}</td>
+                      <td>
+                        <div style={{fontWeight:600,color:N.text,fontSize:13}}>{evRow?.username || "—"}</div>
+                        {evRow?.event_type && <div style={{fontSize:11,color:N.textDim}}>{evRow.event_type}</div>}
+                      </td>
+                      <td>
+                        <span style={{fontSize:11,fontWeight:700,color:inc ? N.green : N.red}}>{TXN_KINDS[t.kind]?.label}</span>
+                        {t.category && <div style={{fontSize:11,color:N.textDim}}>{TXN_CATEGORIES[t.kind]?.[t.category] || t.category}</div>}
+                      </td>
+                      <td className="num" style={{fontWeight:800,color:inc ? N.green : N.red,fontVariantNumeric:"tabular-nums"}}>{TXN_KINDS[t.kind].sign}{formatTsh(t.amount)}</td>
+                      <td>
+                        <div style={{fontWeight:600,color:N.text}}>{t.party || "—"}</div>
+                        {t.reference && <div style={{fontSize:11,color:N.textDim,fontFamily:"JetBrains Mono, monospace"}}>{t.reference}</div>}
+                      </td>
+                      <td style={{fontSize:12,color:N.textMid}}>{acc?.name || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!ledgerTxns.length && <EmptyState icon="wallet" compact title="No transactions" text={fin.txns.length ? "Try clearing the filters." : "Record income and expenses in the Events view."} />}
+          </div>
+        </div>
+      )}
+
+      {/* ── P&L view ── */}
+      {view === "pl" && (
+        <div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:16,marginBottom:12}}>
+            {/* Income by category */}
+            <div style={{borderRadius:16,background:N.navy700,border:`1px solid ${N.border}`,overflow:"hidden"}}>
+              <div style={{padding:"12px 16px",borderBottom:`1px solid ${N.border}`,background:N.greenBg,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontWeight:800,fontSize:14,color:N.green}}>Income</span>
+                <span style={{fontWeight:800,fontSize:14,color:N.green,fontVariantNumeric:"tabular-nums"}}>{formatTsh(total.income)}</span>
+              </div>
+              {Object.entries(pl.income).sort((a,b) => b[1]-a[1]).map(([c, v]) => (
+                <div key={c} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 16px",borderBottom:`1px solid ${N.border}`}}>
+                  <span style={{fontSize:13,color:N.textMid}}>{TXN_CATEGORIES.income[c] || c}</span>
+                  <span style={{fontWeight:700,color:N.text,fontVariantNumeric:"tabular-nums"}}>{formatTsh(v)}</span>
+                </div>
+              ))}
+              {!Object.keys(pl.income).length && <div style={{padding:16,fontSize:12,color:N.textDim,textAlign:"center"}}>No income in this period</div>}
+            </div>
+            {/* Expenses by category */}
+            <div style={{borderRadius:16,background:N.navy700,border:`1px solid ${N.border}`,overflow:"hidden"}}>
+              <div style={{padding:"12px 16px",borderBottom:`1px solid ${N.border}`,background:N.redBg,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontWeight:800,fontSize:14,color:N.red}}>Expenses</span>
+                <span style={{fontWeight:800,fontSize:14,color:N.red,fontVariantNumeric:"tabular-nums"}}>{formatTsh(total.expense)}</span>
+              </div>
+              {Object.entries(pl.expense).sort((a,b) => b[1]-a[1]).map(([c, v]) => (
+                <div key={c} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 16px",borderBottom:`1px solid ${N.border}`}}>
+                  <span style={{fontSize:13,color:N.textMid}}>{TXN_CATEGORIES.expense[c] || c}</span>
+                  <span style={{fontWeight:700,color:N.text,fontVariantNumeric:"tabular-nums"}}>{formatTsh(v)}</span>
+                </div>
+              ))}
+              {!Object.keys(pl.expense).length && <div style={{padding:16,fontSize:12,color:N.textDim,textAlign:"center"}}>No expenses in this period</div>}
+            </div>
+          </div>
+          {/* Net profit summary */}
+          <div style={{padding:"14px 20px",borderRadius:12,background:N.navy700,border:`1px solid ${N.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+            <span style={{fontWeight:700,color:N.textMid,fontSize:14}}>Net profit for period</span>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <span style={{fontWeight:900,fontSize:20,color:total.profit < 0 ? N.red : N.text,fontVariantNumeric:"tabular-nums"}}>{formatTsh(total.profit)}</span>
+              <MarginPill pct={total.marginPct} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modals */}
       {adding && ev && (
         <TxnModal kind={adding} event={ev} accounts={fin.accounts} saving={fin.busy}
           onManageAccounts={() => { setAdding(null); setAccountsOpen(true); }}
@@ -2515,10 +2672,16 @@ function FinanceTab({ fin, events, eventsLoaded = true, customers, selectedId, o
           onSave={async (form) => { if (await fin.addTxn(form, ev)) setAdding(null); }} />
       )}
       {editingTxn && (
-        <TxnModal key={editingTxn.id} initial={editingTxn} event={events.find(e => e.id === editingTxn.event_id) || ev} accounts={fin.accounts} saving={fin.busy}
+        <TxnModal key={editingTxn.id} initial={editingTxn} event={evMap[editingTxn.event_id] || ev} accounts={fin.accounts} saving={fin.busy}
           onManageAccounts={() => { setEditingTxn(null); setAccountsOpen(true); }}
           onClose={() => setEditingTxn(null)}
           onSave={async (form) => { if (await fin.updateTxn(editingTxn, form)) setEditingTxn(null); }} />
+      )}
+      {quickAdd && (
+        <TxnModal kind={quickAdd} eventsForPicker={events} accounts={fin.accounts} saving={fin.busy}
+          onManageAccounts={() => { setQuickAdd(null); setAccountsOpen(true); }}
+          onClose={() => setQuickAdd(null)}
+          onSave={async (form, chosenEv) => { if (chosenEv && await fin.addTxn(form, chosenEv)) setQuickAdd(null); }} />
       )}
       {accountsOpen && <AccountsModal fin={fin} onClose={() => setAccountsOpen(false)} />}
     </div>
