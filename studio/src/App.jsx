@@ -1264,23 +1264,23 @@ function Pager({ page, setPage, pageSize, setPageSize, total }) {
 // Drop-in replacement for a <select> when the option list is long enough to need filtering.
 // options: [{ value, label, sub? }]  value/onChange: same contract as <select>
 function SearchSelect({ options = [], value, onChange, placeholder = "— Select —", disabled = false }) {
-  const [open, setOpen]   = React.useState(false);
-  const [q, setQ]         = React.useState("");
-  const ref               = React.useRef();
-  const inputRef          = React.useRef();
+  const [open, setOpen]   = useState(false);
+  const [q, setQ]         = useState("");
+  const ref               = useRef();
+  const inputRef          = useRef();
   const selected          = options.find(o => o.value === value);
   const filtered          = q.trim()
     ? options.filter(o => (o.label + " " + (o.sub || "")).toLowerCase().includes(q.trim().toLowerCase()))
     : options;
   // Close on outside click
-  React.useEffect(() => {
+  useEffect(() => {
     if (!open) return;
     const h = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQ(""); } };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, [open]);
   // Focus search input when opening
-  React.useEffect(() => { if (open && inputRef.current) inputRef.current.focus(); }, [open]);
+  useEffect(() => { if (open && inputRef.current) inputRef.current.focus(); }, [open]);
   const pick = (val) => { onChange({ target: { value: val } }); setOpen(false); setQ(""); };
   return (
     <div ref={ref} style={{position:"relative",width:"100%"}}>
@@ -2575,7 +2575,7 @@ function InvoicePreviewModal({ inv, payments = [], onClose, onEdit }) {
   const { sub, disc, net: _n, vat, grand } = calcInvoice(inv);
   const totalPaid = payments.reduce((s, t) => s + (Number(t.amount)||0), 0);
   const balance   = Math.max(0, grand - totalPaid);
-  const [pdfBusy, setPdfBusy] = React.useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
   const TotRow = ({ label, val, bold }) => (
     <div style={{display:"flex",justifyContent:"space-between",padding:bold?"9px 0 5px":"5px 0",fontSize:bold?14:12,
       color:bold?"#0d2240":"#64748b",borderBottom:bold?"none":"1px solid #f1f5f9",
