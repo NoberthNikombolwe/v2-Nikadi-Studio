@@ -34,12 +34,4 @@ create policy "invoices_all" on invoices for all
 
 -- Only Super Admins can delete (matches all other finance tables)
 create policy "invoices_delete_super_admin" on invoices as restrictive for delete
-  using (
-    exists (
-      select 1 from app_users u
-      join app_roles r on r.id = u.role_id
-      where u.id = auth.uid()
-        and r.key = 'superuser'
-        and u.active
-    )
-  );
+  using (public.my_role() = 'superuser');
