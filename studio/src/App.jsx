@@ -804,7 +804,7 @@ const CSS = `
   @keyframes modalIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
   .nk-modal-head {
     padding: 24px 28px 0; display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 20px;
+    margin-bottom: 20px; position: sticky; top: 0; z-index: 1; background: ${N.navy800};
   }
   .nk-modal-title { font-size: 18px; font-weight: 800; color: ${N.text}; }
   .nk-modal-close {
@@ -2420,15 +2420,15 @@ function TxnModal({ kind: initialKind, initial, event, eventsForPicker, accounts
   return (
     <div className="nk-overlay">
       <div className="nk-modal" style={{maxWidth:560}}>
-        <div className="nk-modal-head">
-          <div>
-            <div className="nk-modal-title">{initial ? (isIncome ? "Edit income" : "Edit expense") : (isIncome ? "Record income" : "Record expense")}</div>
-            {event && <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{event.username}{event.event_type ? ` · ${event.event_type}` : ""}</div>}
+        <div className="nk-modal-head" style={{flexDirection:"column",gap:12,alignItems:"stretch"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div className="nk-modal-title">{initial ? (isIncome ? "Edit income" : "Edit expense") : (isIncome ? "Record income" : "Record expense")}</div>
+              {event && <div style={{fontSize:12,color:N.textDim,marginTop:2}}>{event.username}{event.event_type ? ` · ${event.event_type}` : ""}</div>}
+            </div>
+            <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
           </div>
-          <button className="nk-modal-close" aria-label="Close" onClick={onClose}><Icon n="x" /></button>
-        </div>
-        <div className="nk-modal-body">
-          <div style={{display:"flex",gap:6,marginBottom:16}} role="tablist">
+          <div style={{display:"flex",gap:6}} role="tablist">
             {Object.keys(TXN_KINDS).map(k => (
               <button key={k} type="button" role="tab" aria-selected={form.kind === k} onClick={() => setKind(k)}
                 style={{...segStyle(form.kind === k), flex:1, padding:"10px 12px", fontSize:13,
@@ -2438,6 +2438,8 @@ function TxnModal({ kind: initialKind, initial, event, eventsForPicker, accounts
               </button>
             ))}
           </div>
+        </div>
+        <div className="nk-modal-body">
           {!active.length && (
             <div style={{padding:12,borderRadius:10,background:N.amberBg,color:N.amber,fontSize:12,marginBottom:14}}>
               <Icon n="alert" /> No accounts yet. <button type="button" className="nk-link" onClick={onManageAccounts}>Add your bank / mobile-money accounts</button> first.
