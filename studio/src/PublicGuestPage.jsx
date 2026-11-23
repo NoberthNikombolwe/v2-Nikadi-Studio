@@ -600,6 +600,18 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
   const gallery  = (Array.isArray(ps.gallery) ? ps.gallery : []).filter(Boolean);
   const hasLocation = !!ps.venue_location_url;
 
+  // Try to extract lat/lng from a Google Maps share URL so we can show a Leaflet map.
+  // Handles: /@lat,lng  and  ?q=lat,lng  and  query=lat,lng
+  const extractLatLng = (url) => {
+    if (!url) return null;
+    let m = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
+    m = url.match(/[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
+    return null;
+  };
+  const mapCoords = extractLatLng(ps.venue_location_url);
+
   // gallery images for lightbox (also include hero if present)
   const openGallery  = (idx) => setLightbox({ images: gallery, idx });
   const openSingle   = (url) => setLightbox({ images:[url], idx:0 });
@@ -1192,6 +1204,12 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
                 <p style={{ fontSize:14, color:"#374151", lineHeight:1.6, marginBottom:16 }}>
                   {ps.venue_description}
                 </p>
+              )}
+              {mapCoords && (
+                <div style={{ marginBottom:16 }}>
+                  <LeafletMap lat={mapCoords.lat} lng={mapCoords.lng}
+                    venueName={data.venue_name} venueAddress={data.venue_address} t={t} />
+                </div>
               )}
               {hasLocation && (
                 <a href={ps.venue_location_url} target="_blank" rel="noopener noreferrer"
