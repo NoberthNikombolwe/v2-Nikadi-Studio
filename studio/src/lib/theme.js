@@ -12,7 +12,7 @@ const TOKENS = [
   "navy900", "navy800", "navy700", "navy600", "navy500", "navy400", "navy300",
   "sky", "accent", "accentHover", "gold",
   "green", "greenBg", "red", "redBg", "amber", "amberBg", "purple", "purpleBg", "teal", "tealBg",
-  "text", "textMid", "textDim", "border", "cardBg", "linen",
+  "text", "textMid", "textDim", "border", "cardBg",
 ];
 
 // Colour tokens for inline styles and the CSS string, e.g. N.sky → "var(--nk-sky)"
