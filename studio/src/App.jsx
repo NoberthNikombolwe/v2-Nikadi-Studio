@@ -6684,6 +6684,15 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
       : await sb.from("event_pages").insert(payload).select("id").single().then(({ data, error: e }) => { if (data) setPageId(data.id); return { error: e }; });
     setBusy(false);
     if (error) { showToast(`Could not save: ${error.message}`, "warn"); return; }
+    // Re-read the saved row to confirm what actually persisted (catches silent failures).
+    const { data: saved } = await sb.from("event_pages").select("venue_lat,venue_lng").eq("event_id", eventRow.id).maybeSingle();
+    if (saved) {
+      setForm(f => ({
+        ...f,
+        venue_lat: saved.venue_lat != null ? String(saved.venue_lat) : f.venue_lat,
+        venue_lng: saved.venue_lng != null ? String(saved.venue_lng) : f.venue_lng,
+      }));
+    }
     showToast("Page settings saved", "success");
   };
 
@@ -7026,13 +7035,27 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                       <input className="nk-input" type="text" inputMode="decimal" placeholder="39.208328" value={form.venue_lng||""} onChange={set("venue_lng")} />
                     </div>
                   </div>
+                  {(() => {
+                    const lat = parseFloat(form.venue_lat), lng = parseFloat(form.venue_lng);
+                    const valid = isFinite(lat) && isFinite(lng) && lat !== 0 && lng !== 0;
+                    return valid ? (
+                      <a href={`https://www.google.com/maps?q=${lat},${lng}`} target="_blank" rel="noopener noreferrer"
+                        style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600,
+                          color:N.sky,marginBottom:12,textDecoration:"none"}}>
+                        <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                          <path d="M7 1a4 4 0 014 4c0 3-4 8-4 8S3 8 3 5a4 4 0 014-4z" stroke="currentColor" strokeWidth="1.4"/>
+                          <circle cx="7" cy="5" r="1.4" fill="currentColor"/>
+                        </svg>
+                        Preview this location on Google Maps
+                      </a>
+                    ) : null;
+                  })()}
                   <div>
                     <label className="nk-label">Venue description / directions</label>
                     <textarea className="nk-input" rows={3} style={{resize:"vertical"}} placeholder="e.g. Ndani ya Dar es Salaam, karibu na…" value={form.venue_description||""} onChange={set("venue_description")} />
                   </div>
                   <div style={{marginTop:12,fontSize:12,color:N.textDim,lineHeight:1.6}}>
-                    The map uses Leaflet.js with a satellite/street toggle and a Google Maps directions button.
-                    Get coordinates from Google Maps: right-click a location and copy the numbers shown.
+                    Get coordinates from Google Maps: right-click the exact spot → copy the numbers shown at the top of the menu. Paste latitude first, then longitude.
                   </div>
                 </div>
               )}
