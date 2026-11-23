@@ -6623,7 +6623,7 @@ function GuestLinksModal({ eventRow, onClose, showToast }) {
 const EP_DEFAULTS = {
   primary_color:"#00C2FF", accent_color:"#7C3AED", bg_color:"#0A0F1E", text_color:"#FFFFFF",
   web_event_name:"", hero_image_url:"", tagline:"", hosts:[], schedule:[], dress_code_text:"", dress_code_image_url:"",
-  gallery:[], sponsors:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_location_url:"", venue_description:"", show_countdown:true, show_passcode:true,
+  gallery:[], sponsors:[], rsvp_enabled:false, rsvp_message:"", rsvp_notify_phone:"", venue_lat:"", venue_lng:"", venue_location_url:"", venue_description:"", show_countdown:true, show_passcode:true,
 };
 function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   const [loading, setLoading] = useState(true);
@@ -6642,7 +6642,11 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     sb.from("event_pages").select("*").eq("event_id", eventRow.id).maybeSingle().then(({ data }) => { // eslint-disable-line react-hooks/exhaustive-deps
       if (data) {
         setPageId(data.id);
-        setForm({ ...EP_DEFAULTS, ...data });
+        setForm({
+          ...EP_DEFAULTS, ...data,
+          venue_lat: data.venue_lat != null ? String(data.venue_lat) : "",
+          venue_lng: data.venue_lng != null ? String(data.venue_lng) : "",
+        });
       }
       setLoading(false);
     });
@@ -6671,6 +6675,8 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     setBusy(true);
     const payload = {
       event_id:eventRow.id, ...form,
+      venue_lat: form.venue_lat !== "" ? (v => isFinite(v) ? v : null)(parseFloat(form.venue_lat)) : null,
+      venue_lng: form.venue_lng !== "" ? (v => isFinite(v) ? v : null)(parseFloat(form.venue_lng)) : null,
       venue_location_url: form.venue_location_url?.trim() || null,
       updated_at: new Date().toISOString(),
     };
@@ -7011,28 +7017,43 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
 
               {section==="location" && (
                 <div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                    <div>
+                      <label className="nk-label">Latitude</label>
+                      <input className="nk-input" type="text" inputMode="decimal" placeholder="-6.792376"
+                        value={form.venue_lat||""} onChange={set("venue_lat")} />
+                    </div>
+                    <div>
+                      <label className="nk-label">Longitude</label>
+                      <input className="nk-input" type="text" inputMode="decimal" placeholder="39.208328"
+                        value={form.venue_lng||""} onChange={set("venue_lng")} />
+                    </div>
+                  </div>
                   <div style={{marginBottom:12}}>
-                    <label className="nk-label">Location Link</label>
+                    <label className="nk-label">Get Directions Link</label>
                     <input className="nk-input" type="url" placeholder="https://maps.app.goo.gl/…"
                       value={form.venue_location_url||""} onChange={set("venue_location_url")} />
                     <div style={{fontSize:11,color:N.textDim,marginTop:4}}>
-                      Paste any Google Maps link. On Google Maps: tap Share → Copy link.
+                      Paste a Google Maps share link — guests tap this to open directions. On Google Maps: Share → Copy link.
                     </div>
                     {form.venue_location_url?.trim() && (
                       <a href={form.venue_location_url.trim()} target="_blank" rel="noopener noreferrer"
                         style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600,
-                          color:N.sky,marginTop:8,textDecoration:"none"}}>
+                          color:N.sky,marginTop:6,textDecoration:"none"}}>
                         <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
                           <path d="M7 1a4 4 0 014 4c0 3-4 8-4 8S3 8 3 5a4 4 0 014-4z" stroke="currentColor" strokeWidth="1.4"/>
                           <circle cx="7" cy="5" r="1.4" fill="currentColor"/>
                         </svg>
-                        Preview location
+                        Preview link
                       </a>
                     )}
                   </div>
                   <div>
-                    <label className="nk-label">Venue description / directions</label>
+                    <label className="nk-label">Venue description</label>
                     <textarea className="nk-input" rows={3} style={{resize:"vertical"}} placeholder="e.g. Ndani ya Dar es Salaam, karibu na…" value={form.venue_description||""} onChange={set("venue_description")} />
+                  </div>
+                  <div style={{marginTop:12,fontSize:12,color:N.textDim,lineHeight:1.6}}>
+                    Get coordinates from Google Maps: right-click the exact spot and copy the numbers shown at the top of the menu.
                   </div>
                 </div>
               )}

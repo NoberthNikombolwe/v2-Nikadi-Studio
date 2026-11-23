@@ -598,19 +598,10 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
   const hosts    = Array.isArray(ps.hosts)    ? ps.hosts    : [];
   const schedule = Array.isArray(ps.schedule) ? ps.schedule : [];
   const gallery  = (Array.isArray(ps.gallery) ? ps.gallery : []).filter(Boolean);
-  const hasLocation = !!ps.venue_location_url;
-
-  // Try to extract lat/lng from a Google Maps share URL so we can show a Leaflet map.
-  // Handles: /@lat,lng  and  ?q=lat,lng  and  query=lat,lng
-  const extractLatLng = (url) => {
-    if (!url) return null;
-    let m = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-    if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
-    m = url.match(/[?&](?:q|query)=(-?\d+\.\d+),(-?\d+\.\d+)/);
-    if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
-    return null;
-  };
-  const mapCoords = extractLatLng(ps.venue_location_url);
+  const hasLocation = !!(ps.venue_lat && ps.venue_lng);
+  // Directions button opens the saved link, or falls back to Google Maps with the coordinates.
+  const directionsUrl = ps.venue_location_url?.trim()
+    || (hasLocation ? `https://www.google.com/maps/dir/?api=1&destination=${ps.venue_lat},${ps.venue_lng}` : null);
 
   // gallery images for lightbox (also include hero if present)
   const openGallery  = (idx) => setLightbox({ images: gallery, idx });
@@ -1196,7 +1187,7 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
         )}
 
         {/* Venue & Directions */}
-        {(hasLocation || ps.venue_description) && (
+        {(hasLocation || directionsUrl || ps.venue_description) && (
           <div style={{ ...card, marginBottom:24, padding:"24px 28px" }}>
             <div style={sectionLabel}>{t.venueAndDirections}</div>
             <div style={{ marginTop:12 }}>
@@ -1205,14 +1196,14 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
                   {ps.venue_description}
                 </p>
               )}
-              {mapCoords && (
+              {hasLocation && (
                 <div style={{ marginBottom:16 }}>
-                  <LeafletMap lat={mapCoords.lat} lng={mapCoords.lng}
+                  <LeafletMap lat={ps.venue_lat} lng={ps.venue_lng}
                     venueName={data.venue_name} venueAddress={data.venue_address} t={t} />
                 </div>
               )}
-              {hasLocation && (
-                <a href={ps.venue_location_url} target="_blank" rel="noopener noreferrer"
+              {directionsUrl && (
+                <a href={directionsUrl} target="_blank" rel="noopener noreferrer"
                   className="pg-btn"
                   style={{ background:pri, color:"#fff", display:"inline-flex",
                     textDecoration:"none", width:"100%", boxSizing:"border-box" }}>

@@ -2226,6 +2226,8 @@ BEGIN
       'rsvp_enabled',        v_page.rsvp_enabled,
       'rsvp_message',        v_page.rsvp_message,
       'rsvp_notify_phone',   v_page.rsvp_notify_phone,
+      'venue_lat',           v_page.venue_lat,
+      'venue_lng',           v_page.venue_lng,
       'venue_location_url',  v_page.venue_location_url,
       'venue_description',   v_page.venue_description,
       'show_countdown',      v_page.show_countdown,
