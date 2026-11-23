@@ -2150,6 +2150,7 @@ CREATE TABLE IF NOT EXISTS event_pages (
 ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS web_event_name    TEXT;
 ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS rsvp_notify_phone TEXT;
 ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS sponsors          JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE event_pages ADD COLUMN IF NOT EXISTS show_passcode     BOOLEAN DEFAULT TRUE;
 
 -- ── RSVP submissions ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS event_rsvps (
@@ -2228,6 +2229,7 @@ BEGIN
       'venue_lng',           v_page.venue_lng,
       'venue_description',   v_page.venue_description,
       'show_countdown',      v_page.show_countdown,
+      'show_passcode',       COALESCE(v_page.show_passcode, TRUE),
       'web_event_name',      v_page.web_event_name,
       'sponsors',            COALESCE(v_page.sponsors, '[]'::jsonb)
     ) ELSE '{}'::jsonb END,
