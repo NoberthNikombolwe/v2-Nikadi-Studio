@@ -6640,7 +6640,14 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
   useEffect(() => {
     if (!sb) return;
     sb.from("event_pages").select("*").eq("event_id", eventRow.id).maybeSingle().then(({ data }) => { // eslint-disable-line react-hooks/exhaustive-deps
-      if (data) { setPageId(data.id); setForm({ ...EP_DEFAULTS, ...data }); }
+      if (data) {
+        setPageId(data.id);
+        setForm({
+          ...EP_DEFAULTS, ...data,
+          venue_lat: data.venue_lat != null ? String(data.venue_lat) : "",
+          venue_lng: data.venue_lng != null ? String(data.venue_lng) : "",
+        });
+      }
       setLoading(false);
     });
   }, [eventRow.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6668,8 +6675,8 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     setBusy(true);
     const payload = {
       event_id:eventRow.id, ...form,
-      venue_lat: form.venue_lat !== "" ? parseFloat(form.venue_lat) : null,
-      venue_lng: form.venue_lng !== "" ? parseFloat(form.venue_lng) : null,
+      venue_lat: form.venue_lat !== "" ? (v => isFinite(v) ? v : null)(parseFloat(form.venue_lat)) : null,
+      venue_lng: form.venue_lng !== "" ? (v => isFinite(v) ? v : null)(parseFloat(form.venue_lng)) : null,
       updated_at: new Date().toISOString(),
     };
     const { error } = pageId
@@ -7012,11 +7019,11 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
                     <div>
                       <label className="nk-label">Latitude</label>
-                      <input className="nk-input" type="number" step="any" placeholder="-6.7924" value={form.venue_lat||""} onChange={set("venue_lat")} />
+                      <input className="nk-input" type="text" inputMode="decimal" placeholder="-6.792376" value={form.venue_lat||""} onChange={set("venue_lat")} />
                     </div>
                     <div>
                       <label className="nk-label">Longitude</label>
-                      <input className="nk-input" type="number" step="any" placeholder="39.2083" value={form.venue_lng||""} onChange={set("venue_lng")} />
+                      <input className="nk-input" type="text" inputMode="decimal" placeholder="39.208328" value={form.venue_lng||""} onChange={set("venue_lng")} />
                     </div>
                   </div>
                   <div>
