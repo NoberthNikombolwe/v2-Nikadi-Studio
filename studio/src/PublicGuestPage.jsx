@@ -598,7 +598,7 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
   const hosts    = Array.isArray(ps.hosts)    ? ps.hosts    : [];
   const schedule = Array.isArray(ps.schedule) ? ps.schedule : [];
   const gallery  = (Array.isArray(ps.gallery) ? ps.gallery : []).filter(Boolean);
-  const hasLocation = ps.venue_lat && ps.venue_lng;
+  const hasLocation = !!ps.venue_location_url;
 
   // gallery images for lightbox (also include hero if present)
   const openGallery  = (idx) => setLightbox({ images: gallery, idx });
@@ -1183,8 +1183,8 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
           </div>
         )}
 
-        {/* Map */}
-        {hasLocation && (
+        {/* Venue & Directions */}
+        {(hasLocation || ps.venue_description) && (
           <div style={{ ...card, marginBottom:24, padding:"24px 28px" }}>
             <div style={sectionLabel}>{t.venueAndDirections}</div>
             <div style={{ marginTop:12 }}>
@@ -1193,8 +1193,18 @@ export default function PublicGuestPage({ eventPublicId, guestPublicId }) {
                   {ps.venue_description}
                 </p>
               )}
-              <LeafletMap lat={ps.venue_lat} lng={ps.venue_lng}
-                venueName={data.venue_name} venueAddress={data.venue_address} t={t} />
+              {hasLocation && (
+                <a href={ps.venue_location_url} target="_blank" rel="noopener noreferrer"
+                  className="pg-btn"
+                  style={{ background:pri, color:"#fff", display:"inline-flex",
+                    textDecoration:"none", width:"100%", boxSizing:"border-box" }}>
+                  <svg width="16" height="16" viewBox="0 0 14 14" fill="none" style={{ flexShrink:0 }}>
+                    <path d="M7 1a4 4 0 014 4c0 3-4 8-4 8S3 8 3 5a4 4 0 014-4z" stroke="#fff" strokeWidth="1.4"/>
+                    <circle cx="7" cy="5" r="1.4" fill="#fff"/>
+                  </svg>
+                  {t.directions}
+                </a>
+              )}
             </div>
           </div>
         )}
