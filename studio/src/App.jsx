@@ -12,7 +12,7 @@ import { Sb } from "./components/Sb";
 import { EmptyState, TONE, TONE_BG } from "./components/EmptyState";
 import { Pill } from "./components/Pill";
 import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
-import { supabase } from "./lib/supabase";
+import { supabase, bootstrapSession, signOut } from "./lib/supabase";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult,
@@ -3716,7 +3716,7 @@ function NoAccess({ email, name, avatar, onSignOut, onRetry }) {
           <button className="nk-btn nk-btn-ghost" onClick={onSignOut}>Use a different account</button>
         </div>
       </div>
-      <p className="nk-noaccess-foot">Signed in with the wrong Google account? Choose <strong>Use a different account</strong> to sign out.</p>
+      <p className="nk-noaccess-foot">Signed in with the wrong Google account? Click <strong>Use a different account</strong> above to sign out.</p>
     </div>
   );
 }
@@ -8226,13 +8226,22 @@ export default function App() {
 
   /* ── Auth ── */
   const [user, setUser] = useState(undefined); // undefined = loading, null = signed out
-  // Resolves the current Supabase session on mount and keeps `user` in sync with
-  // subsequent sign-in/sign-out events; gates the whole app behind <LoginPage>
+  const [authError, setAuthError] = useState(null); // { error, status? } when bootstrap fails
+  // In production: asks the Worker to create a Supabase session for the
+  // CF Access–authenticated user, then keeps `user` in sync via onAuthStateChange.
+  // In development: falls back to the existing Supabase OAuth flow.
   useEffect(() => {
     if (!supabase) { setUser(null); return; }
-    supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
+    });
+    bootstrapSession().then(result => {
+      if (!result.ok) {
+        setAuthError(result);
+        setUser(null);
+      } else {
+        supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
@@ -10481,14 +10490,14 @@ export default function App() {
     </div>
   );
 
-  if (!user) return <LoginPage />;
+  if (!user) return <LoginPage error={authError} />;
   if (access.loading) return (
     <div style={{minHeight:"100vh",background:N.navy900,display:"grid",placeItems:"center"}}>
       <style>{CSS}</style>
       <EmptyState loading title="Checking your access…" />
     </div>
   );
-  if (!access.setupMissing && !access.role) return <NoAccess email={user.email} name={user.user_metadata?.full_name} avatar={user.user_metadata?.avatar_url} onRetry={access.loadAll} onSignOut={() => supabase?.auth.signOut()} />;
+  if (!access.setupMissing && !access.role) return <NoAccess email={user.email} name={user.user_metadata?.full_name} avatar={user.user_metadata?.avatar_url} onRetry={access.loadAll} onSignOut={signOut} />;
   const tabModule = TAB_MODULE[tab];
   const viewOnly  = !access.setupMissing && tabModule && tab !== "settings" && tab !== "schedules" && !access.can(tabModule, "edit");
   const canDeleteData = access.setupMissing || access.role === "superuser";
@@ -10652,7 +10661,7 @@ export default function App() {
               <button
                 className="nk-btn nk-btn-ghost"
                 style={{fontSize:12,padding:"4px 10px"}}
-                onClick={() => supabase?.auth.signOut()}
+                onClick={signOut}
               >
                 Sign out
               </button>
@@ -10766,7 +10775,7 @@ export default function App() {
                     {access.role && <div style={{margin:"2px 0"}}><RoleBadge role={access.role} /></div>}
                     <div style={{fontSize:11,color:N.textDim,display:"flex",alignItems:"center",gap:5}}><span className={`nk-db-dot ${dbDot}`} /> {dbStatus === "connected" ? "Connected" : dbStatus === "unconfigured" ? "No database" : "Database error"}</div>
                   </div>
-                  <button className="nk-btn nk-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={() => supabase?.auth.signOut()}>Sign out</button>
+                  <button className="nk-btn nk-btn-ghost" style={{fontSize:12,padding:"6px 10px"}} onClick={signOut}>Sign out</button>
                 </div>
               </div>
             </aside>

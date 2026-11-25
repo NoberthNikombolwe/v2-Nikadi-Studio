@@ -102,10 +102,12 @@ const GoogleIcon = () => (
   </svg>
 );
 
-export default function LoginPage() {
+// In development the OAuth button signs the user in via Supabase.
+// In production CF Access handles sign-in before the app ever loads,
+// so this component only appears on error (not invited, etc.).
+export default function LoginPage({ error }) {
   const [loading, setLoading] = useState(false);
-  // A rejected sign-in (e.g. an email that was not invited) comes back with the reason in the URL
-  const [error, setError]     = useState(() => {
+  const [oauthError, setOauthError] = useState(() => {
     const q = new URLSearchParams(window.location.hash.replace(/^#/, "") || window.location.search);
     const msg = q.get("error_description");
     if (!msg) return null;
@@ -116,22 +118,26 @@ export default function LoginPage() {
   });
 
   const signInWithGoogle = async () => {
-    if (!supabase) {
-      setError("Supabase is not configured. Check your environment variables.");
-      return;
-    }
+    if (!supabase) { setOauthError("Supabase is not configured. Check your environment variables."); return; }
     setLoading(true);
-    setError(null);
+    setOauthError(null);
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      // Come back to the app's own URL — includes the sub-folder on GitHub Pages (BASE_URL)
       options: { redirectTo: window.location.origin + import.meta.env.BASE_URL },
     });
-    if (err) {
-      setError(err.message);
-      setLoading(false);
-    }
+    if (err) { setOauthError(err.message); setLoading(false); }
   };
+
+  const displayError = oauthError || (() => {
+    if (!error) return null;
+    if (error.error === "not_invited")
+      return "This Google account has not been invited to Nikadi Studio. Ask an administrator to add your email in Settings → Users.";
+    if (error.error === "cf_access_not_configured")
+      return "Cloudflare Access is not yet protecting this app. Configure it in the Cloudflare dashboard.";
+    return `Authentication error: ${error.error}`;
+  })();
+
+  const isDev = import.meta.env.DEV;
 
   return (
     <>
@@ -142,26 +148,39 @@ export default function LoginPage() {
           <div className="login-app-name">Nikadi Studio</div>
           <div className="login-tagline">Card Design &amp; Dispatch</div>
 
-          <div className="login-heading">Welcome back</div>
-          <div className="login-sub">
-            Sign in to access your events, card designs,<br />and SMS dispatch tools.
-          </div>
+          {isDev ? (
+            <>
+              <div className="login-heading">Welcome back</div>
+              <div className="login-sub">
+                Sign in to access your events, card designs,<br />and SMS dispatch tools.
+              </div>
+              <button className="login-google-btn" onClick={signInWithGoogle} disabled={loading}>
+                <GoogleIcon />
+                {loading ? "Redirecting…" : "Continue with Google"}
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="login-heading">Access denied</div>
+              <div className="login-sub">
+                You authenticated with Google but your account does not have access to Nikadi Studio.
+              </div>
+              <button
+                className="login-google-btn"
+                onClick={() => { window.location.href = "/cdn-cgi/access/logout"; }}
+              >
+                <GoogleIcon /> Sign out and try a different account
+              </button>
+            </>
+          )}
 
-          <button
-            className="login-google-btn"
-            onClick={signInWithGoogle}
-            disabled={loading}
-          >
-            <GoogleIcon />
-            {loading ? "Redirecting…" : "Continue with Google"}
-          </button>
-
-          {error && <div className="login-error">{error}</div>}
+          {displayError && <div className="login-error">{displayError}</div>}
 
           <hr className="login-divider" />
           <div className="login-footer">
-            Your data is stored securely in Supabase.<br />
-            By signing in you agree to our terms of service.
+            {isDev
+              ? "Development mode — using Supabase OAuth."
+              : "Access is managed via Cloudflare Access."}
           </div>
         </div>
       </div>
