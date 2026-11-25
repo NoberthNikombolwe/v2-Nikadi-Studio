@@ -26,25 +26,14 @@ export function useDeliveries(eventId, onChange) {
   useEffect(() => {
     load(); // eslint-disable-line react-hooks/set-state-in-effect
     if (!eventId) return;
-
-    const handler = (p) => {
+    const rt = cfChannel(`deliveries:${eventId}`);
+    rt.on((p) => {
       if (p.eventType === "DELETE") { setRows(rs => rs.filter(r => r.id !== p.old.id)); return; }
       const row = p.new;
       setRows(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [row, ...rs]);
       onChangeRef.current?.(row);
-    };
-
-    const rt = cfChannel(`deliveries:${eventId}`);
-    if (rt) {
-      rt.on(handler).subscribe();
-      return () => rt.unsubscribe();
-    }
-
-    if (!supabase) return;
-    const ch = supabase.channel(`deliveries-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_deliveries", filter: `event_id=eq.${eventId}` }, handler)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    }).subscribe();
+    return () => rt.unsubscribe();
   }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
   return { rows, loaded, missing, error, load };
 }

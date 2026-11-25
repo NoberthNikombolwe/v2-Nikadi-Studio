@@ -17,24 +17,13 @@ export function useEventCards(eventId) {
   useEffect(() => {
     load(); // eslint-disable-line react-hooks/set-state-in-effect
     if (!eventId) return;
-
-    const handler = (p) => {
+    const rt = cfChannel(`cards:${eventId}`);
+    rt.on((p) => {
       if (p.eventType === "DELETE") { setCards(cs => cs && cs.filter(c => c.id !== p.old.id)); return; }
       const row = p.new;
       setCards(cs => !cs ? cs : cs.some(c => c.id === row.id) ? cs.map(c => c.id === row.id ? { ...c, ...row } : c) : [...cs, row]);
-    };
-
-    const rt = cfChannel(`cards:${eventId}`);
-    if (rt) {
-      rt.on(handler).subscribe();
-      return () => rt.unsubscribe();
-    }
-
-    if (!supabase) return;
-    const ch = supabase.channel(`cards-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "event_cards", filter: `event_id=eq.${eventId}` }, handler)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    }).subscribe();
+    return () => rt.unsubscribe();
   }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps
   const patch = (id, changes) => setCards(cs => cs && cs.map(c => c.id === id ? { ...c, ...changes } : c));
   return { cards, error, load, patch };

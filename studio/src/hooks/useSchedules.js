@@ -29,41 +29,24 @@ export function useSchedules(eventId, channel) {
     load(); // eslint-disable-line react-hooks/set-state-in-effect
     if (!eventId) return;
     const byTime = (a, b) => new Date(a.run_at) - new Date(b.run_at);
-
-    const scheduleHandler = (p) => {
-      if (p.eventType === "DELETE") {
-        setSchedules(ss => ss && ss.filter(s => s.id !== p.old.id));
-        setRuns(rs => rs.filter(r => r.schedule_id !== p.old.id));
-        return;
-      }
-      const row = p.new;
-      if (row.channel !== channel) return;
-      setSchedules(ss => !ss ? ss : ss.some(s => s.id === row.id) ? ss.map(s => s.id === row.id ? { ...s, ...row } : s) : [row, ...ss]);
-    };
-
-    const runHandler = (p) => {
-      if (p.eventType === "DELETE") { setRuns(rs => rs.filter(r => r.id !== p.old.id)); return; }
-      const row = p.new;
-      setRuns(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [...rs, row].sort(byTime));
-    };
-
-    // In production: single DO channel for the event receives both table changes.
-    // The handlers above still filter by channel for message_schedules.
     const rt = cfChannel(`schedules:${eventId}`);
-    if (rt) {
-      rt.on((p) => {
-        if (p.table === "message_schedules") scheduleHandler(p);
-        else if (p.table === "message_schedule_runs") runHandler(p);
-      }).subscribe();
-      return () => rt.unsubscribe();
-    }
-
-    if (!supabase) return;
-    const ch = supabase.channel(`schedules-${channel}-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedules", filter: `event_id=eq.${eventId}` }, scheduleHandler)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedule_runs", filter: `event_id=eq.${eventId}` }, runHandler)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    rt.on((p) => {
+      if (p.table === "message_schedules") {
+        if (p.eventType === "DELETE") {
+          setSchedules(ss => ss && ss.filter(s => s.id !== p.old.id));
+          setRuns(rs => rs.filter(r => r.schedule_id !== p.old.id));
+          return;
+        }
+        const row = p.new;
+        if (row.channel !== channel) return;
+        setSchedules(ss => !ss ? ss : ss.some(s => s.id === row.id) ? ss.map(s => s.id === row.id ? { ...s, ...row } : s) : [row, ...ss]);
+      } else if (p.table === "message_schedule_runs") {
+        if (p.eventType === "DELETE") { setRuns(rs => rs.filter(r => r.id !== p.old.id)); return; }
+        const row = p.new;
+        setRuns(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [...rs, row].sort(byTime));
+      }
+    }).subscribe();
+    return () => rt.unsubscribe();
   }, [eventId, channel]); // eslint-disable-line react-hooks/exhaustive-deps
   return { schedules, runs, error, missing, load };
 }

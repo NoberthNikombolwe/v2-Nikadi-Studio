@@ -5059,19 +5059,9 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
     load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
     let t = null;
     const soon = () => { clearTimeout(t); t = setTimeout(load, 800); };   // sends in progress update often
-
     const rt = cfChannel("schedules-all");
-    if (rt) {
-      rt.on(soon).subscribe();
-      return () => { clearTimeout(t); rt.unsubscribe(); };
-    }
-
-    if (!supabase) return;
-    const ch = supabase.channel("schedules-all")
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedules" }, soon)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_schedule_runs" }, soon)
-      .subscribe();
-    return () => { clearTimeout(t); supabase.removeChannel(ch); };
+    rt.on(soon).subscribe();
+    return () => { clearTimeout(t); rt.unsubscribe(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { setStatus, remove } = useScheduleActions({ askDialog, showToast, logHistory, reload: load });

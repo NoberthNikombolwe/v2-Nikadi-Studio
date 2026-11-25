@@ -1,19 +1,20 @@
-// Cloudflare Worker WebSocket channel — drop-in replacement for supabase.channel().
+// Cloudflare Worker WebSocket channel — replaces supabase.channel() entirely.
 //
-// In production the app is served from the same origin as the Worker, so the
-// WebSocket connects directly.  In dev Vite can't proxy WebSockets, so we
-// return null and callers fall back to supabase.channel() as before.
+// In production: connects via WebSocket to the Worker's Durable Object hub at
+// /api/realtime?channel=<name>. Reconnects automatically on disconnect.
+//
+// In dev (Vite on :5173): returns a silent no-op channel — no realtime updates,
+// no errors. Run `npx wrangler dev` alongside Vite if live updates are needed in dev.
 //
 // Usage:
 //   const rt = cfChannel('deliveries:event-uuid')
-//   if (rt) {
-//     rt.on(payload => { /* { eventType, table, new, old } */ }).subscribe()
-//     return () => rt.unsubscribe()
-//   }
-//   // ...supabase.channel() fallback...
+//   rt.on(payload => { /* { eventType, table, new, old } */ }).subscribe()
+//   return () => rt.unsubscribe()
 
 export function cfChannel(name) {
-  if (import.meta.env.DEV) return null
+  if (import.meta.env.DEV) {
+    return { on() { return this }, subscribe() { return this }, unsubscribe() {} }
+  }
 
   let handler = null
   let ws = null
