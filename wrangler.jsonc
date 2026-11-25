@@ -11,6 +11,14 @@
   "r2_buckets": [
     { "binding": "R2", "bucket_name": "nikadi-studio" }
   ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "REALTIME_HUB", "class_name": "RealtimeHub" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_classes": ["RealtimeHub"] }
+  ],
   "triggers": {
     "crons": [
       "* * * * *",

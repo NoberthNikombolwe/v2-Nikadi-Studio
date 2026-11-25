@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from "../lib/supabase";
+import { cfChannel } from "../lib/realtime";
 
 // The open event's delivery results, kept live with realtime. `onChange(row)` sees every live
 // insert / update (the app uses it to move guests' badges). `missing` = the delivery SQL (§11)
@@ -24,14 +25,24 @@ export function useDeliveries(eventId, onChange) {
   };
   useEffect(() => {
     load(); // eslint-disable-line react-hooks/set-state-in-effect
-    if (!supabase || !eventId) return;
+    if (!eventId) return;
+
+    const handler = (p) => {
+      if (p.eventType === "DELETE") { setRows(rs => rs.filter(r => r.id !== p.old.id)); return; }
+      const row = p.new;
+      setRows(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [row, ...rs]);
+      onChangeRef.current?.(row);
+    };
+
+    const rt = cfChannel(`deliveries:${eventId}`);
+    if (rt) {
+      rt.on(handler).subscribe();
+      return () => rt.unsubscribe();
+    }
+
+    if (!supabase) return;
     const ch = supabase.channel(`deliveries-${eventId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "message_deliveries", filter: `event_id=eq.${eventId}` }, (p) => {
-        if (p.eventType === "DELETE") { setRows(rs => rs.filter(r => r.id !== p.old.id)); return; }
-        const row = p.new;
-        setRows(rs => rs.some(r => r.id === row.id) ? rs.map(r => r.id === row.id ? { ...r, ...row } : r) : [row, ...rs]);
-        onChangeRef.current?.(row);
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "message_deliveries", filter: `event_id=eq.${eventId}` }, handler)
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [eventId]); // eslint-disable-line react-hooks/exhaustive-deps

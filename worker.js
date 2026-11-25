@@ -41,6 +41,8 @@ import { serviceClient } from './workers/db.js'
 import { runCleanChat, CLEAN_LIMITS } from './studio/supabase/functions/_shared/dataClean.js'
 import { runEventPageChat, PAGE_LIMITS } from './studio/supabase/functions/_shared/aiEventPage.js'
 import { runSmsDraft, SMS_DRAFT_LIMITS } from './studio/supabase/functions/_shared/aiSmsDraft.js'
+import { RealtimeHub } from './durable-objects/RealtimeHub.js'
+export { RealtimeHub }
 
 const smsProxy = createProxy({ mountPrefix: '/proxy/sms', tokenEnv: ['SMS_BEARER_TOKEN'], routes: SMS_ROUTES })
 const waProxy  = createProxy({ mountPrefix: '/proxy/wa',  tokenEnv: ['WA_BEARER_TOKEN', 'SMS_BEARER_TOKEN'], routes: WA_ROUTES })
@@ -82,6 +84,12 @@ export default {
 
     if (pathname === '/api/notify-rsvp')
       return notifyRsvp(request, env)
+
+    if (pathname === '/api/realtime' && request.headers.get('Upgrade') === 'websocket')
+      return realtimeConnect(request, env)
+
+    if (pathname === '/api/realtime/notify' && request.method === 'POST')
+      return realtimeNotify(request, env)
 
     return env.ASSETS.fetch(request)
   },
@@ -258,6 +266,36 @@ async function r2Serve(request, env, pathname) {
   headers.set('Cache-Control', 'public, max-age=31536000, immutable')
   if (obj.httpEtag) headers.set('ETag', obj.httpEtag)
   return new Response(obj.body, { headers })
+}
+
+// ── Realtime WebSocket proxy → Durable Object ────────────────────────────────
+
+async function realtimeConnect(request, env) {
+  const channel = new URL(request.url).searchParams.get('channel')
+  if (!channel) return new Response('Missing channel', { status: 400 })
+  if (!env.REALTIME_HUB) return new Response('Realtime not configured', { status: 503 })
+  const id = env.REALTIME_HUB.idFromName(channel)
+  const stub = env.REALTIME_HUB.get(id)
+  return stub.fetch(request)
+}
+
+async function realtimeNotify(request, env) {
+  const secret = request.headers.get('x-realtime-secret')
+  if (!secret || secret !== env.REALTIME_SECRET)
+    return new Response('Unauthorized', { status: 401 })
+  if (!env.REALTIME_HUB) return new Response('ok', { status: 200 })
+  const body = await request.text()
+  let payload
+  try { payload = JSON.parse(body) } catch { return new Response('Bad JSON', { status: 400 }) }
+  const { channel } = payload
+  if (!channel) return new Response('Missing channel', { status: 400 })
+  const id = env.REALTIME_HUB.idFromName(channel)
+  const stub = env.REALTIME_HUB.get(id)
+  return stub.fetch(new Request('https://internal/notify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  }))
 }
 
 // ── Supabase session bootstrap ────────────────────────────────────────────────

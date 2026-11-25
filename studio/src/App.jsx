@@ -13,6 +13,7 @@ import { EmptyState, TONE, TONE_BG } from "./components/EmptyState";
 import { Pill } from "./components/Pill";
 import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase, bootstrapSession, signOut } from "./lib/supabase";
+import { cfChannel } from "./lib/realtime";
 import { r2Storage } from "./lib/storage";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
@@ -5056,9 +5057,16 @@ function SchedulesTab({ access, events, current, askDialog, showToast, logHistor
   };
   useEffect(() => {
     load(); // eslint-disable-line react-hooks/set-state-in-effect -- loads data from the database
-    if (!supabase) return;
     let t = null;
     const soon = () => { clearTimeout(t); t = setTimeout(load, 800); };   // sends in progress update often
+
+    const rt = cfChannel("schedules-all");
+    if (rt) {
+      rt.on(soon).subscribe();
+      return () => { clearTimeout(t); rt.unsubscribe(); };
+    }
+
+    if (!supabase) return;
     const ch = supabase.channel("schedules-all")
       .on("postgres_changes", { event: "*", schema: "public", table: "message_schedules" }, soon)
       .on("postgres_changes", { event: "*", schema: "public", table: "message_schedule_runs" }, soon)
