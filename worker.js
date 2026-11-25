@@ -42,6 +42,9 @@ import { runCleanChat, CLEAN_LIMITS } from './studio/supabase/functions/_shared/
 import { runEventPageChat, PAGE_LIMITS } from './studio/supabase/functions/_shared/aiEventPage.js'
 import { runSmsDraft, SMS_DRAFT_LIMITS } from './studio/supabase/functions/_shared/aiSmsDraft.js'
 import { RealtimeHub } from './durable-objects/RealtimeHub.js'
+import { d1Client, d1Select, d1Insert, d1Update, d1Delete, d1Upsert, notifyDO } from './workers/d1.js'
+import { RPC } from './workers/d1-rpc.js'
+import { handleGoogleLogin, handleGoogleCallback, handleLogout, handleMe, getEmailFromSession } from './workers/auth.js'
 export { RealtimeHub }
 
 const smsProxy = createProxy({ mountPrefix: '/proxy/sms', tokenEnv: ['SMS_BEARER_TOKEN'], routes: SMS_ROUTES })
@@ -76,6 +79,18 @@ export default {
     if (pathname === '/api/ai-sms-draft' && request.method === 'POST')
       return aiSmsDraft(request, env)
 
+    if (pathname === '/auth/google')
+      return handleGoogleLogin(request, env)
+
+    if (pathname === '/auth/callback')
+      return handleGoogleCallback(request, env)
+
+    if (pathname === '/auth/logout')
+      return handleLogout(request, env)
+
+    if (pathname === '/api/me')
+      return handleMe(request, env)
+
     if (pathname === '/api/delivery-webhook')
       return handleDeliveryWebhook(request, env)
 
@@ -90,6 +105,13 @@ export default {
 
     if (pathname === '/api/realtime/notify' && request.method === 'POST')
       return realtimeNotify(request, env)
+
+    // ── Cloudflare D1 data API ──────────────────────────────────────
+    if (pathname === '/api/db' && request.method === 'POST')
+      return handleD1(request, env)
+
+    if (pathname.startsWith('/api/rpc/') && request.method === 'POST')
+      return handleRpc(request, env, pathname.slice('/api/rpc/'.length))
 
     return env.ASSETS.fetch(request)
   },
@@ -116,6 +138,13 @@ function geminiPost(url, init) {
 
 function requireAuth(request) {
   return request.headers.get('CF-Access-Authenticated-User-Email')
+}
+
+// Get authenticated email: CF Access header (if set) or D1 session cookie.
+async function resolveEmail(request, env) {
+  const cfEmail = request.headers.get('CF-Access-Authenticated-User-Email')
+  if (cfEmail) return cfEmail.toLowerCase()
+  return getEmailFromSession(request, env)
 }
 
 function jsonReply(status, body) {
@@ -296,6 +325,86 @@ async function realtimeNotify(request, env) {
     headers: { 'Content-Type': 'application/json' },
     body,
   }))
+}
+
+// ── Cloudflare D1 CRUD API ────────────────────────────────────────────────────
+
+// Public tables — no auth required (public scan / view pages use these via RPC)
+const PUBLIC_RPC = new Set([
+  'public_scan_event','public_find_cards','public_recent_scans','public_scan_stats',
+  'public_view_event','public_view_guests','public_view_history',
+  'server_time','scan_card',
+])
+
+async function handleD1(request, env) {
+  if (!env.DB) return jsonReply(503, { message: 'D1 database not configured' })
+  const email = await resolveEmail(request, env) || ''
+
+  let body
+  try { body = await request.json() } catch { return jsonReply(400, { message: 'Invalid JSON' }) }
+
+  const { table, op = 'SELECT', select, filters, order, limit, offset, single, data, upsertOn } = body
+  if (!table) return jsonReply(400, { message: 'Missing table' })
+
+  // Auth: all table access requires a known active user
+  if (email) {
+    const user = await env.DB.prepare('SELECT active FROM app_users WHERE email = ?').bind(email).first()
+    if (!user?.active) return jsonReply(403, { message: 'Access denied' })
+  } else {
+    return jsonReply(401, { message: 'Sign in required' })
+  }
+
+  try {
+    const DB = env.DB
+    let rows
+    if (op === 'SELECT' || !op) {
+      rows = await d1Select(DB, { table, select, filters, order, limit, offset })
+    } else if (op === 'INSERT') {
+      rows = await d1Insert(DB, { table, data })
+      notifyDO(env, table, 'INSERT', rows)
+    } else if (op === 'UPDATE') {
+      rows = await d1Update(DB, { table, data, filters })
+      notifyDO(env, table, 'UPDATE', rows)
+    } else if (op === 'DELETE') {
+      rows = await d1Delete(DB, { table, filters })
+      notifyDO(env, table, 'DELETE', rows)
+    } else if (op === 'UPSERT') {
+      rows = await d1Upsert(DB, { table, data, onConflict: upsertOn })
+      notifyDO(env, table, 'UPDATE', rows)
+    } else {
+      return jsonReply(400, { message: `Unknown op: ${op}` })
+    }
+    const result = single ? (rows[0] ?? null) : rows
+    return jsonReply(200, result)
+  } catch (e) {
+    return jsonReply(400, { message: e.message })
+  }
+}
+
+async function handleRpc(request, env, fn) {
+  if (!fn) return jsonReply(400, { message: 'Missing function name' })
+  const handler = RPC[fn]
+  if (!handler) return jsonReply(404, { message: `Unknown RPC: ${fn}` })
+
+  const email = await resolveEmail(request, env) || ''
+
+  // Public RPCs don't require auth; all others do
+  if (!PUBLIC_RPC.has(fn) && !email) return jsonReply(401, { message: 'Sign in required' })
+
+  if (!PUBLIC_RPC.has(fn) && env.DB && email) {
+    const user = await env.DB.prepare('SELECT active FROM app_users WHERE email = ?').bind(email).first()
+    if (!user?.active) return jsonReply(403, { message: 'Access denied' })
+  }
+
+  let params = {}
+  try { params = await request.json() } catch {}
+
+  try {
+    const result = await handler(env.DB, params, email, env)
+    return jsonReply(200, result ?? null)
+  } catch (e) {
+    return jsonReply(400, { message: e.message })
+  }
 }
 
 // ── Supabase session bootstrap ────────────────────────────────────────────────

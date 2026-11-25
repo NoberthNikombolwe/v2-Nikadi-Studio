@@ -1,35 +1,57 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "v2-nikadi-studio",
-  "main": "worker.js",
-  "compatibility_date": "2026-11-25",
-  "assets": {
-    "directory": "studio/dist",
-    "not_found_handling": "single-page-application",
-    "binding": "ASSETS"
-  },
-  "r2_buckets": [
-    { "binding": "R2", "bucket_name": "nikadi-studio" }
-  ],
-  "durable_objects": {
-    "bindings": [
-      { "name": "REALTIME_HUB", "class_name": "RealtimeHub" }
-    ]
-  },
-  "migrations": [
-    { "tag": "v1", "new_classes": ["RealtimeHub"] }
-  ],
-  "triggers": {
-    "crons": [
-      "* * * * *",
-      "*/5 * * * *"
-    ]
-  },
-  "observability": {
-    "logs": {
-      "enabled": true,
-      "invocation_logs": true,
-      "persist": true
-    }
-  }
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "v2-nikadi-studio",
+	"main": "worker.js",
+	"compatibility_date": "2026-11-25",
+	"assets": {
+		"directory": "studio/dist",
+		"not_found_handling": "single-page-application",
+		"binding": "ASSETS"
+	},
+	"r2_buckets": [
+		{
+			"binding": "R2",
+			"bucket_name": "nikadi-studio"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "nikadi-studio",
+			"database_id": "83e13151-6cea-4e29-b992-ec3d4f0d48e2"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "REALTIME_HUB",
+				"class_name": "RealtimeHub"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"RealtimeHub"
+			]
+		}
+	],
+	"workers_dev": true,
+	"routes": [
+		{ "pattern": "app.nikadi.co.tz", "custom_domain": true }
+	],
+	"triggers": {
+		"crons": [
+			"* * * * *",
+			"*/5 * * * *"
+		]
+	},
+	"observability": {
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true,
+			"persist": true
+		}
+	}
 }

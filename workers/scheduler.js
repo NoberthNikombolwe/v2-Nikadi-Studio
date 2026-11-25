@@ -6,15 +6,57 @@ import { UPSTREAM, cleanToken } from './proxy.js'
 import { scheduleTargets, describeTargetSkips, sendSmsMessages, smsSendResult, classifyWaSend, waCardStatus } from '../studio/supabase/functions/_shared/messaging.js'
 import { json, sameSecret, restClient, clip } from './db.js'
 import { syncDeliveries } from './deliveries.js'
+import { d1Select, d1Insert, notifyDO } from './d1.js'
+import { claim_schedule_run, save_run_progress, finish_schedule_run, record_message_sends } from './d1-rpc.js'
 
 export { sameSecret }
 
-const BUDGET_MS = 25_000           // 25 s budget — stays inside the Worker 30 s wall clock
+const BUDGET_MS = 25_000
 const UPSTREAM_TIMEOUT_MS = 20_000
 const SMS_BATCH = 100
 const WA_GAP_MS = 1_000
 
-const database = (url, key) => {
+// Build a database adapter — uses D1 when env.DB is set, otherwise Supabase PostgREST.
+const database = (env) => {
+  if (env.DB) {
+    // D1 path — all data in Cloudflare
+    const DB = env.DB
+    return {
+      rest: null,
+      claim: () => claim_schedule_run(DB, {}, null),
+      cards: async (eventId) => {
+        const rows = await d1Select(DB, { table: 'event_cards', filters: [{ col: 'event_id', op: 'eq', val: eventId }], order: [{ col: 'created_at', asc: true }] })
+        return rows.filter(c => c.in_list !== 0 && c.in_list !== false)
+      },
+      saveTargets: async (runId, targets) => {
+        await DB.prepare('INSERT INTO message_run_targets (id,run_id,targets) VALUES (?,?,?) ON CONFLICT(run_id) DO UPDATE SET targets=excluded.targets')
+          .bind(crypto.randomUUID(), runId, JSON.stringify(targets)).run()
+      },
+      targets: async (runId) => {
+        const row = await DB.prepare('SELECT targets FROM message_run_targets WHERE run_id = ?').bind(runId).first()
+        try { return row ? JSON.parse(row.targets) : { list: [], note: '' } } catch { return { list: [], note: '' } }
+      },
+      progress: (runId, next, sent, failed, skipped, release = false) =>
+        save_run_progress(DB, { p_run_id: runId, p_next_index: next, p_sent: sent, p_failed: failed, p_skipped: skipped, p_release: release }, null, env)
+          .then(() => true).catch(() => false),
+      finish: (runId, status, detail) =>
+        finish_schedule_run(DB, { p_run_id: runId, p_status: status, p_detail: detail }, null, env),
+      recordSends: async (items) => {
+        if (!items.length) return
+        await record_message_sends(DB, { p_items: items }, null, env)
+      },
+      logs: async (rows) => {
+        if (!rows.length) return
+        for (const row of rows) {
+          await d1Insert(DB, { table: 'event_logs', data: { id: crypto.randomUUID(), ...row } }).catch(() => null)
+        }
+      },
+    }
+  }
+
+  // Supabase PostgREST fallback (used when D1 is not yet set up)
+  const url = env.SUPABASE_URL
+  const key = env.SUPABASE_SERVICE_ROLE_KEY
   const { call, rpc } = restClient(url, key)
   return {
     rest: { call, rpc },
@@ -61,18 +103,17 @@ const database = (url, key) => {
 
 // Core scheduler — same logic whether invoked via HTTP or cron.
 export const runScheduler = async (env, body, { budgetMs = BUDGET_MS, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) => {
-  const url = env.SUPABASE_URL
-  const key = env.SUPABASE_SERVICE_ROLE_KEY
-  if (!url || !key) return json(500, { error: 'Server is not configured' })
+  if (!env.DB && (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY))
+    return json(500, { error: 'Server is not configured' })
 
-  const db = database(url, key)
+  const db = database(env)
   const started = now()
   const outOfTime = () => now() - started >= budgetMs
   const task = body?.task
 
   if (task === 'deliveries') {
     try {
-      return json(200, { ok: true, deliveries: await syncDeliveries(db.rest, env, { outOfTime }) })
+      return json(200, { ok: true, deliveries: await syncDeliveries(env.DB ? null : db.rest, env, { outOfTime }) })
     } catch (e) {
       return json(500, { error: e.message })
     }

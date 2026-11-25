@@ -1,6 +1,5 @@
 import Logo from "./Logo";
 import { useState } from "react";
-import { supabase } from "./lib/supabase";
 
 const FONTS = "https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap";
 
@@ -102,42 +101,32 @@ const GoogleIcon = () => (
   </svg>
 );
 
-// In development the OAuth button signs the user in via Supabase.
-// In production CF Access handles sign-in before the app ever loads,
-// so this component only appears on error (not invited, etc.).
 export default function LoginPage({ error }) {
   const [loading, setLoading] = useState(false);
   const [oauthError, setOauthError] = useState(() => {
-    const q = new URLSearchParams(window.location.hash.replace(/^#/, "") || window.location.search);
-    const msg = q.get("error_description");
+    // Check for auth_error param from the Worker's /auth/callback redirect
+    const q = new URLSearchParams(window.location.search);
+    const msg = q.get("auth_error");
     if (!msg) return null;
     window.history.replaceState(null, "", window.location.pathname);
-    return /invitation|database error saving new user/i.test(msg)
-      ? "This Google account has not been invited to Nikadi Studio. Ask an administrator to add your email in Settings → Users."
-      : msg.replace(/\+/g, " ");
+    if (msg === "not_authorized")
+      return "Your Google account has not been invited to Nikadi Studio. Ask an administrator to add your email in Settings → Users.";
+    return `Sign-in error: ${msg.replace(/_/g, " ")}`;
   });
 
-  const signInWithGoogle = async () => {
-    if (!supabase) { setOauthError("Supabase is not configured. Check your environment variables."); return; }
+  const signInWithGoogle = () => {
     setLoading(true);
-    setOauthError(null);
-    const { error: err } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: window.location.origin + import.meta.env.BASE_URL },
-    });
-    if (err) { setOauthError(err.message); setLoading(false); }
+    window.location.href = "/auth/google";
   };
 
   const displayError = oauthError || (() => {
     if (!error) return null;
-    if (error.error === "not_invited")
-      return "This Google account has not been invited to Nikadi Studio. Ask an administrator to add your email in Settings → Users.";
-    if (error.error === "cf_access_not_configured")
-      return "Cloudflare Access is not yet protecting this app. Configure it in the Cloudflare dashboard.";
-    return `Authentication error: ${error.error}`;
+    if (error.error === "not_invited" || error.error === "not_authorized")
+      return "Your Google account has not been invited to Nikadi Studio. Ask an administrator to add your email in Settings → Users.";
+    return null;
   })();
 
-  const isDev = import.meta.env.DEV;
+  const isNotAuthorized = error?.error === "not_invited" || error?.error === "not_authorized";
 
   return (
     <>
@@ -148,7 +137,21 @@ export default function LoginPage({ error }) {
           <div className="login-app-name">Nikadi Studio</div>
           <div className="login-tagline">Card Design &amp; Dispatch</div>
 
-          {isDev ? (
+          {isNotAuthorized ? (
+            <>
+              <div className="login-heading">Access denied</div>
+              <div className="login-sub">
+                Your Google account does not have access to Nikadi Studio.
+                Ask an administrator to invite you.
+              </div>
+              <button
+                className="login-google-btn"
+                onClick={() => { window.location.href = '/auth/logout'; }}
+              >
+                <GoogleIcon /> Sign out and try a different account
+              </button>
+            </>
+          ) : (
             <>
               <div className="login-heading">Welcome back</div>
               <div className="login-sub">
@@ -159,28 +162,13 @@ export default function LoginPage({ error }) {
                 {loading ? "Redirecting…" : "Continue with Google"}
               </button>
             </>
-          ) : (
-            <>
-              <div className="login-heading">Access denied</div>
-              <div className="login-sub">
-                You authenticated with Google but your account does not have access to Nikadi Studio.
-              </div>
-              <button
-                className="login-google-btn"
-                onClick={() => { window.location.href = "/cdn-cgi/access/logout"; }}
-              >
-                <GoogleIcon /> Sign out and try a different account
-              </button>
-            </>
           )}
 
           {displayError && <div className="login-error">{displayError}</div>}
 
           <hr className="login-divider" />
           <div className="login-footer">
-            {isDev
-              ? "Development mode — using Supabase OAuth."
-              : "Access is managed via Cloudflare Access."}
+            Sign in with the Google account your administrator invited.
           </div>
         </div>
       </div>
