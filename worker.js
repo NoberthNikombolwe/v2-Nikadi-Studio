@@ -19,10 +19,79 @@ export default {
       return session(request, env)
     }
 
+    // R2 write endpoints (upload, delete, list) — require CF Access auth
+    if (pathname.startsWith('/api/r2/')) {
+      return r2Write(request, env, pathname)
+    }
+
+    // Public file serving from R2 — no auth required
+    if (pathname.startsWith('/files/')) {
+      return r2Serve(request, env, pathname)
+    }
+
     return env.ASSETS.fetch(request)
   },
 }
 
+// ── R2 write operations ──────────────────────────────────────────────────────
+// All writes require CF Access authentication (the email header must be set).
+async function r2Write(request, env, pathname) {
+  const email = request.headers.get('CF-Access-Authenticated-User-Email')
+  if (!email) return new Response('Unauthorized', { status: 401 })
+  if (!env.R2) return new Response('R2 binding not configured', { status: 500 })
+
+  // pathname: /api/r2/{bucket}[/...rest]
+  const after  = pathname.slice('/api/r2/'.length)      // "wa-cards/wa/xxx.jpg"
+  const slash  = after.indexOf('/')
+  const bucket = slash === -1 ? after : after.slice(0, slash)
+  const rest   = slash === -1 ? ''    : after.slice(slash + 1)
+
+  // DELETE: POST /api/r2/{bucket}/delete  body: { paths: string[] }
+  if (rest === 'delete' && request.method === 'POST') {
+    const { paths = [] } = await request.json()
+    await Promise.all(paths.map(p => env.R2.delete(`${bucket}/${p}`)))
+    return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json' } })
+  }
+
+  // LIST: GET /api/r2/{bucket}/list?prefix=…
+  if (rest === 'list' && request.method === 'GET') {
+    const prefix = new URL(request.url).searchParams.get('prefix') || ''
+    const listed = await env.R2.list({ prefix: `${bucket}/${prefix}` })
+    const objects = listed.objects.map(o => ({
+      name: o.key.slice(`${bucket}/`.length),
+      size: o.size,
+    }))
+    return new Response(JSON.stringify({ objects }), { headers: { 'Content-Type': 'application/json' } })
+  }
+
+  // UPLOAD: PUT /api/r2/{bucket}/{...path}
+  if (request.method === 'PUT' && rest) {
+    const key = `${bucket}/${rest}`
+    const ct  = request.headers.get('Content-Type') || 'application/octet-stream'
+    await env.R2.put(key, request.body, { httpMetadata: { contentType: ct } })
+    return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json' } })
+  }
+
+  return new Response('Not found', { status: 404 })
+}
+
+// ── R2 public file serving ────────────────────────────────────────────────────
+// GET /files/{bucket}/{...path} — serves any object from R2 without auth.
+// Used as the public URL fallback when VITE_R2_PUBLIC_URL is not set.
+async function r2Serve(request, env, pathname) {
+  if (!env.R2) return new Response('R2 binding not configured', { status: 500 })
+  const key = pathname.slice('/files/'.length)   // "wa-cards/wa/xxx.jpg"
+  if (!key) return new Response('Not found', { status: 404 })
+  const obj = await env.R2.get(key)
+  if (!obj) return new Response('Not found', { status: 404 })
+  const headers = new Headers()
+  headers.set('Content-Type', obj.httpMetadata?.contentType || 'application/octet-stream')
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable')
+  if (obj.httpEtag) headers.set('ETag', obj.httpEtag)
+  return new Response(obj.body, { headers })
+}
+
+// ── Supabase session bootstrap ────────────────────────────────────────────────
 async function session(request, env) {
   const json = (body, status = 200) =>
     new Response(JSON.stringify(body), {

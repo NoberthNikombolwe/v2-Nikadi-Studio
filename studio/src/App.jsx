@@ -13,6 +13,7 @@ import { EmptyState, TONE, TONE_BG } from "./components/EmptyState";
 import { Pill } from "./components/Pill";
 import { useState, useRef, useCallback, useEffect, useMemo, useId, Children, isValidElement, Fragment, createContext, useContext } from "react";
 import { supabase, bootstrapSession, signOut } from "./lib/supabase";
+import { r2Storage } from "./lib/storage";
 import { normalisePhone, isValidPhone } from "./lib/phone";
 import { selectRecipients, dropDuplicates, describeSkipped } from "./lib/recipients";
 import { fillTemplate, normaliseSheetRows, recipientKey, applyMessageStatuses, sanitiseMessages, classifyWaSend, smsSendResult,
@@ -4283,14 +4284,14 @@ function CardFontsSettings({ access, canEdit }) {
     if (Object.keys(errors).length || !supabase) return;
     setBusy(true); setMsg(null);
     const name = family.trim(), path = fontFilePath(name, ext);
-    const { error } = await supabase.storage.from("fonts").upload(path, file, { contentType: FONT_FILE_TYPES[ext], upsert: false });
+    const { error } = await r2Storage.from("fonts").upload(path, file, { contentType: FONT_FILE_TYPES[ext], upsert: false });
     if (error) {
       setBusy(false);
       setMsg({ tone: "bad", text: /bucket|not found/i.test(error.message)
         ? "Run the latest supabase-roles-settings-scan.sql first — it adds the storage for fonts" : `Upload failed: ${error.message}` });
       return;
     }
-    const url = supabase.storage.from("fonts").getPublicUrl(path).data.publicUrl;
+    const url = r2Storage.from("fonts").getPublicUrl(path).data.publicUrl;
     try {                                          // make sure the browser can really use it
       const face = await new FontFace(name, `url("${url}")`).load();
       document.fonts.add(face);
@@ -6359,7 +6360,7 @@ function StorageSettings({ access, askDialog, showToast }) {
         const names = (data || []).map(r => r.name);
         if (!names.length) break;
         for (let i = 0; i < names.length; i += 100) {
-          const { error: re } = await supabase.storage.from("wa-cards").remove(names.slice(i, i + 100));
+          const { error: re } = await r2Storage.from("wa-cards").remove(names.slice(i, i + 100));
           if (re) throw re;
           done += Math.min(100, names.length - i);
           setClearing({ done, total: u.cards.files });
@@ -6661,9 +6662,9 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
     try {
       const blob = await compressImageToBlob(file, { maxKb: 500, maxWidth: 1920, quality: 0.85 });
       const path = `${eventRow.id}/${slot}_${Date.now()}.jpg`;
-      const { error } = await sb.storage.from("event-pages").upload(path, blob, { contentType: "image/jpeg", upsert: true });
+      const { error } = await r2Storage.from("event-pages").upload(path, blob, { contentType: "image/jpeg", upsert: true });
       if (error) { showToast(`Upload failed: ${error.message}`, "warn"); return; }
-      const url = sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl;
+      const url = r2Storage.from("event-pages").getPublicUrl(path).data.publicUrl;
       setForm(f => ({ ...f, [slot]: url }));
       showToast("Image uploaded", "success");
     } catch (e) { showToast(`Upload failed: ${e.message}`, "warn"); }
@@ -6935,9 +6936,9 @@ function EventPageModal({ eventRow, onClose, showToast, supabase: sb }) {
                           try {
                             const blob = await compressImageToBlob(e.target.files[0], { maxKb: 400, maxWidth: 1200, quality: 0.85 });
                             const path = `${eventRow.id}/gallery_${Date.now()}.jpg`;
-                            const { error } = await sb.storage.from("event-pages").upload(path, blob, { contentType: "image/jpeg", upsert: true });
+                            const { error } = await r2Storage.from("event-pages").upload(path, blob, { contentType: "image/jpeg", upsert: true });
                             if (error) { showToast(`Upload failed: ${error.message}`, "warn"); }
-                            else setGallery(i, sb.storage.from("event-pages").getPublicUrl(path).data.publicUrl);
+                            else setGallery(i, r2Storage.from("event-pages").getPublicUrl(path).data.publicUrl);
                           } catch (err) { showToast(`Upload failed: ${err.message}`, "warn"); }
                           finally { setUploading(null); e.target.value = ""; }
                         }} />
@@ -8820,9 +8821,9 @@ export default function App() {
       const blob = await compressImageToBlob(dataUrl, { maxKb: 1200, maxWidth: 1600, quality: 0.90 });
       if (!blob) return null;
       const path = `templates/tmpl_${Date.now()}.jpg`;
-      const { error } = await supabase.storage.from("templates").upload(path, blob, { contentType: "image/jpeg" });
+      const { error } = await r2Storage.from("templates").upload(path, blob, { contentType: "image/jpeg" });
       if (error) { console.warn("Storage:", error.message); return null; }
-      const { data: { publicUrl } } = supabase.storage.from("templates").getPublicUrl(path);
+      const { data: { publicUrl } } = r2Storage.from("templates").getPublicUrl(path);
       return publicUrl;
     } catch (e) { console.warn(e.message); return null; }
   };
@@ -9455,9 +9456,9 @@ export default function App() {
     const { error } = await supabase.from("events").delete().eq("id", ev.id);
     if (error) { showToast("Delete failed: " + error.message, "warn"); return; }
     // Clean up Storage files best-effort (don't block UX on failures)
-    if (waCardPaths.length) supabase.storage.from("wa-cards").remove(waCardPaths);
-    supabase.storage.from("event-pages").list(String(ev.id)).then(({ data: pageFiles }) => {
-      if (pageFiles?.length) supabase.storage.from("event-pages").remove(pageFiles.map(f => `${ev.id}/${f.name}`));
+    if (waCardPaths.length) r2Storage.from("wa-cards").remove(waCardPaths);
+    r2Storage.from("event-pages").list(String(ev.id)).then(({ data: pageFiles }) => {
+      if (pageFiles?.length) r2Storage.from("event-pages").remove(pageFiles.map(f => `${ev.id}/${f.name}`));
     });
     setSavedEvents(es => es.filter(e => e.id !== ev.id));
     if (savedEventId === ev.id) {
@@ -9842,11 +9843,9 @@ export default function App() {
       const rawDataUrl = await exportCard(bgImage, bgSize, designElements, rec, cardFooter);
       const blob = await compressCard(rawDataUrl);
       const storageKey = `wa/${Date.now()}_${(rec.name||"card").replace(/\W/g,"_")}.jpg`;
-      const { error: upErr } = await supabase.storage
-        .from("wa-cards")
-        .upload(storageKey, blob, { contentType:"image/jpeg", upsert:true });
+      const { error: upErr } = await r2Storage.from("wa-cards").upload(storageKey, blob, { contentType:"image/jpeg", upsert:true });
       if (upErr) throw new Error(upErr.message);
-      const { data: { publicUrl } } = supabase.storage.from("wa-cards").getPublicUrl(storageKey);
+      const { data: { publicUrl } } = r2Storage.from("wa-cards").getPublicUrl(storageKey);
       setRecords(rs => rs.map((r,i) => i===idx ? {...r, cardUrl:publicUrl, uploadStatus:"uploaded"} : r));
       if (rec.dbId) saveCardUrl(rec.dbId, publicUrl);   // kept for reloads and scheduled WhatsApp sends
       logHistory({ channel:"card", action:"upload", name:rec.name, phone:rec.phone });
