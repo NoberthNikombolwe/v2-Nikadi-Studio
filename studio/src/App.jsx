@@ -149,7 +149,7 @@ const compressImageToBlob = (source, { maxKb = 500, maxWidth = 1600, quality = 0
 // The SMS provider through our proxy: the Vite proxy in dev, the send-sms Edge Function in
 // production (it adds the provider token). At module level so pop-ups outside <App> (a
 // schedule handed to NextSMS) send the same way as Send All.
-const SMS_BASE = import.meta.env.DEV ? "/sms-proxy" : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-sms`;
+const SMS_BASE = import.meta.env.DEV ? "/sms-proxy" : "/proxy/sms";
 // Canonical public origin for shareable links (set VITE_SITE_URL on Heroku to the custom domain)
 const SITE_ORIGIN = (import.meta.env.VITE_SITE_URL || "").replace(/\/$/, "") || location.origin;
 const SMS_API = `${SMS_BASE}/api/sms/v2`;
@@ -8353,7 +8353,7 @@ export default function App() {
     try {
       const url = import.meta.env.DEV
         ? "/ai-sms-draft"
-        : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-sms-draft`;
+        : "/api/ai-sms-draft";
       const headers = { "Content-Type": "application/json" };
       if (!import.meta.env.DEV) {
         const { data: sess } = await supabase.auth.getSession();
@@ -9609,9 +9609,7 @@ export default function App() {
   const editRecord = (idx,field,val) => setRecords(rs => rs.map((r,i) => i===idx ? {...r,[field]:val,...(r.sample?{sample:false}:{})} : r));
 
   /* ── WhatsApp API ── */
-  const WA_BASE = import.meta.env.DEV
-    ? "/wa-proxy"
-    : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/send-wa`;
+  const WA_BASE = import.meta.env.DEV ? "/wa-proxy" : "/proxy/wa";
 
 
   // Asks (in-app modal) before re-sending to someone who already received a message

@@ -26,7 +26,7 @@ import { CLEAN_LIMITS, CLEAN_IMAGE_LIMITS, CLEAN_EXAMPLE, parseMarkdown, parseIn
 // Props: visible (on a Studio page), eventName, canUseGuests + onUseGuests(sheetRows) (load
 // the rows like an uploaded spreadsheet), askDialog, showToast — all from <App>.
 
-const AI_CLEAN_URL = import.meta.env.DEV ? "/ai-clean" : `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-clean`;
+const AI_CLEAN_URL = import.meta.env.DEV ? "/ai-clean" : "/api/ai-clean";
 
 // An Error with a readable message and the HTTP status (0 = no answer)
 const cleanerError = (message, status = 0) => Object.assign(new Error(message), { status });

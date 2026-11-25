@@ -11,6 +11,12 @@
   "r2_buckets": [
     { "binding": "R2", "bucket_name": "nikadi-studio" }
   ],
+  "triggers": {
+    "crons": [
+      "* * * * *",
+      "*/5 * * * *"
+    ]
+  },
   "observability": {
     "logs": {
       "enabled": true,
